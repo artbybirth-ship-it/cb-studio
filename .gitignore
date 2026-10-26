@@ -1,0 +1,40 @@
+.env
+__pycache__/
+*.py[cod]
+*.sqlite3
+.venv/
+media/
+node_modules/
+.next/
+out/
+.DS_Store
+
+# Build outputs
+frontend/dist/
+frontend/out/
+frontend/.next/
+frontend/node_modules/
+node_modules/
+
+# macOS installers
+*.dmg
+
+# Environment and secrets
+.env
+.env.local
+.env.production
+
+# Generated builds
+frontend/dist/
+frontend/out/
+frontend/.next/
+frontend/node_modules/
+node_modules/
+*.dmg
+
+# Local settings and secrets
+.claude/settings.local.json
+.env
+.env.local
+.env.production
+.DS_Store

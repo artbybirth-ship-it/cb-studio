@@ -1,0 +1,82 @@
+{
+  "name": "characterbazaarstudio-frontend",
+  "version": "0.1.9",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "desktop:dev": "concurrently -k \"npm run dev\" \"wait-on http://127.0.0.1:3000/dashboard && electron .\"",
+    "desktop:prepare": "npm run build && rm -rf .next/standalone/public .next/standalone/.next/static && mkdir -p .next/standalone/.next .next/standalone/node_modules && cp -R public .next/standalone/public && cp -R .next/static .next/standalone/.next/static && rm -rf .next/standalone/node_modules/next && cp -R node_modules/next .next/standalone/node_modules/next",
+    "desktop:build:mac:universal": "./build-dmg-universal.sh"
+  },
+  "dependencies": {
+    "next": "16.2.12",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zustand": "^5.0.0",
+    "easeljs": "1.0.2",
+    "tweenjs": "1.0.2",
+    "preloadjs": "1.0.1",
+    "soundjs": "1.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "16.2.12",
+    "postcss": "^8.5.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.9.0",
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.0",
+    "@electron/notarize": "^3.1.0",
+    "concurrently": "^9.2.1",
+    "wait-on": "^9.0.1"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "com.characterbazaar.studio",
+    "productName": "CharacterBazaar Studio",
+    "asar": true,
+    "electronVersion": "32.3.3",
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": "nextapp"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.graphics-design",
+      "minimumSystemVersion": "10.15",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "electron/entitlements.mac.plist",
+      "entitlementsInherit": "electron/entitlements.mac.plist",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "mergeASARs": true,
+      "x64ArchFiles": "{**/node_modules/@img/**/*.{node,dylib},**/node_modules/@next/swc-darwin-*/*.node}"
+    },
+    "dmg": {
+      "title": "CharacterBazaar Studio ${version}",
+      "artifactName": "CharacterBazaar-Studio-${version}-macOS-10.15-and-later-universal.${ext}"
+    },
+    "afterSign": "electron/notarize.cjs"
+  },
+  "description": "CharacterBazaar Studio desktop editor for macOS",
+  "author": "Amazdraw Services Pvt. Ltd."
+}

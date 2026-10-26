@@ -1,0 +1,282 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CB Studio Render Harness</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&family=Mukta:wght@400;600;800&family=Noto+Sans+Devanagari:wght@400;600;800&family=Hind:wght@400;600;700&family=Baloo+2:wght@400;600;800&family=Montserrat:wght@400;600;800&family=Roboto:wght@400;700;900&family=Open+Sans:wght@400;600;800&family=Lato:wght@400;700;900&family=Playfair+Display:wght@400;700;900&display=swap" />
+  <style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#fff}
+    *{box-sizing:border-box}
+    #stage{position:absolute;left:0;top:0;overflow:hidden;background:#fff;font-family:Arial,sans-serif;transform-origin:0 0}
+    .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none;image-rendering:auto;filter:none}
+    .char-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+    .char-layer iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;pointer-events:none}
+    .text-layer{position:absolute;transform-origin:center;color:#fff;font:800 52px/1.1 Arial,sans-serif;text-shadow:0 2px 8px #000;white-space:pre-wrap}
+    .prop-layer{position:absolute;width:130px;height:130px;border-radius:22px;border:4px solid #49c9c7;background:#17343a;color:#dffafa;display:grid;place-items:center;text-align:center;transform-origin:center}
+    .prop-layer span{font-size:48px}.prop-layer small{position:absolute;top:136px;font-size:18px;white-space:nowrap;color:#dffafa}
+    #fatal{position:absolute;inset:0;display:none;place-items:center;padding:30px;background:#fff;color:#b91c1c;font:700 18px/1.4 Arial,sans-serif;text-align:center;z-index:999999}
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+  <div id="fatal"></div>
+<script>
+(function(){
+  'use strict';
+  window.__CBS_RENDER_READY__ = false;
+  window.__CBS_RENDER_ERROR__ = '';
+  window.__CBS_RENDER_BOOTED__ = true;
+
+  var params = new URLSearchParams(location.search);
+  var sceneId = params.get('scene') || '';
+  var requestedWidth = Math.max(2, Number(params.get('width') || 0));
+  var requestedHeight = Math.max(2, Number(params.get('height') || 0));
+  var captureScale = Math.max(1, Math.min(4, Number(params.get('scale') || 1)));
+  var stage = document.getElementById('stage');
+  var fatal = document.getElementById('fatal');
+  var characterFrames = [];
+  var readySources = new Set();
+  var pendingImages = 0;
+  var pendingSeek = null;
+  var currentTimeSeconds = 0;
+
+  function fail(message){
+    var text = String(message || 'Unknown render error');
+    window.__CBS_RENDER_ERROR__ = text;
+    fatal.textContent = text;
+    fatal.style.display = 'grid';
+    if(pendingSeek){ clearTimeout(pendingSeek.timer); pendingSeek.resolve(); pendingSeek = null; }
+    console.error('[CBS render harness]', text);
+  }
+
+  function resolveUrl(url){
+    try { return new URL(url, location.origin).toString(); }
+    catch(_e){ return url; }
+  }
+
+  async function fetchJson(url){
+    var response = await fetch(url, {cache:'no-store'});
+    if(!response.ok) throw new Error(url + ' -> HTTP ' + response.status);
+    return response.json();
+  }
+
+  function addBackground(url, opacity, z){
+    if(!url) return;
+    var img = document.createElement('img');
+    img.className = 'bg';
+    pendingImages += 1;
+    img.src = resolveUrl(url);
+    img.style.opacity = String(opacity == null ? 1 : opacity);
+    img.style.zIndex = String(z);
+    img.onload = function(){ pendingImages = Math.max(0, pendingImages - 1); markReadyWhenPossible(); };
+    img.onerror = function(){ pendingImages = Math.max(0, pendingImages - 1); fail('Background image failed to load: ' + url); };
+    stage.appendChild(img);
+  }
+
+  // Text layer fonts: keep in sync with lib/fonts.ts (FONT_OPTIONS).
+  var FONT_CSS = {"Arial":"Arial, Helvetica, sans-serif","Poppins":"'Poppins', sans-serif","Mukta":"'Mukta', sans-serif","Noto Sans Devanagari":"'Noto Sans Devanagari', sans-serif","Hind":"'Hind', sans-serif","Baloo 2":"'Baloo 2', cursive","Montserrat":"'Montserrat', sans-serif","Roboto":"'Roboto', sans-serif","Open Sans":"'Open Sans', sans-serif","Lato":"'Lato', sans-serif","Playfair Display":"'Playfair Display', serif","Georgia":"Georgia, serif","Times New Roman":"'Times New Roman', Times, serif","Verdana":"Verdana, Geneva, sans-serif","Trebuchet MS":"'Trebuchet MS', sans-serif","Courier New":"'Courier New', Courier, monospace","Impact":"Impact, 'Arial Black', sans-serif"};
+  function fontCss(name){ var key = name || 'Arial'; return FONT_CSS[key] || ("'" + key + "', Arial, sans-serif"); }
+
+  function addText(object, z){
+    var el = document.createElement('div');
+    el.className = 'text-layer';
+    el.textContent = object.text || object.name || '';
+    el.style.color = object.fillColor || '#fff';
+    el.style.fontFamily = fontCss(object.fontFamily);
+    el.style.fontSize = Number(object.fontSize || 52) + 'px';
+    el.style.left = Number(object.x || 0) + 'px';
+    el.style.top = Number(object.y || 0) + 'px';
+    el.style.opacity = String(object.opacity == null ? 1 : object.opacity);
+    el.style.zIndex = String(z);
+    el.style.transform = layerTransform(object);
+    stage.appendChild(el);
+  }
+
+  // Same transform as the editor canvas (StageCanvas layerTransformCss): rotation, skew, scale with
+  // stretch, and the mirror flip (Reflect).
+  function layerTransform(object){
+    var clamp = function(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); };
+    var scale = Number(object.scale || 1);
+    var sx = clamp(Number(object.stretchX == null ? 1 : object.stretchX) || 1, 0.02, 50);
+    var sy = clamp(Number(object.stretchY == null ? 1 : object.stretchY) || 1, 0.02, 50);
+    var kx = clamp(Number(object.skewX || 0), -80, 80), ky = clamp(Number(object.skewY || 0), -80, 80);
+    return 'translate(-50%,-50%) rotate(' + Number(object.rotation || 0) + 'deg) skew(' + kx + 'deg,' + ky + 'deg) scale(' + (scale * sx) + ',' + (scale * sy) + ')' + (object.flipX ? ' scaleX(-1)' : '');
+  }
+
+  function addProp(object, z){
+    var el = document.createElement('div');
+    el.className = 'prop-layer';
+    el.innerHTML = '<span>◇</span><small></small>';
+    el.querySelector('small').textContent = object.name || 'Prop';
+    el.style.left = Number(object.x || 0) + 'px';
+    el.style.top = Number(object.y || 0) + 'px';
+    el.style.opacity = String(object.opacity == null ? 1 : object.opacity);
+    el.style.zIndex = String(z);
+    if (object.fillColor) el.style.background = object.fillColor;
+    el.style.transform = layerTransform(object);
+    stage.appendChild(el);
+  }
+
+  function resolveCharacterTransform(object, seconds){
+    var base={x:Number(object.x||0),y:Number(object.y||0),scale:Number(object.scale||1),rotation:Number(object.rotation||0)};
+    var frames=Array.isArray(object.keyframes)?object.keyframes.slice().sort(function(a,b){return Number(a.time||0)-Number(b.time||0);}):[];
+    if(!frames.length)return base;
+    var t=Math.max(0,Number(seconds||0)),first=frames[0],last=frames[frames.length-1];
+    if(t<=Number(first.time||0))return{x:Number(first.x||0),y:Number(first.y||0),scale:base.scale,rotation:base.rotation};
+    if(t>=Number(last.time||0))return{x:Number(last.x||0),y:Number(last.y||0),scale:base.scale,rotation:base.rotation};
+    for(var i=0;i<frames.length-1;i++){
+      var left=frames[i],right=frames[i+1],lt=Number(left.time||0),rt=Number(right.time||0);
+      if(t<lt||t>rt)continue;
+      var span=Math.max(0.000001,rt-lt),ratio=Math.max(0,Math.min(1,(t-lt)/span));
+      return{x:Number(left.x||0)+(Number(right.x||0)-Number(left.x||0))*ratio,y:Number(left.y||0)+(Number(right.y||0)-Number(left.y||0))*ratio,scale:base.scale,rotation:base.rotation};
+    }
+    return base;
+  }
+
+  function sendEdits(entry, seconds){
+    if(!entry.frame.contentWindow) return;
+    var object = entry.object;
+    var transform=resolveCharacterTransform(object,seconds==null?currentTimeSeconds:seconds);
+    entry.frame.contentWindow.postMessage({
+      source:'characterbazaarstudio-editor',
+      type:'CHARACTER_EDITS',
+      partOverrides:object.partOverrides || {},
+      colorOverrides:object.colorOverrides || {},
+      colorReplacements:object.colorReplacements || [],
+      selectedPart:'',
+      viewport:{width:requestedWidth || innerWidth,height:requestedHeight || innerHeight},
+      characterTransform:{
+        x:transform.x,
+        y:transform.y,
+        scale:transform.scale,
+        rotation:transform.rotation,
+        flipX:!!object.flipX
+      }
+    }, '*');
+  }
+
+  function addCharacter(object, z){
+    var layer = document.createElement('div');
+    layer.className = 'char-layer';
+    layer.style.zIndex = String(z);
+    layer.style.opacity = String(object.opacity == null ? 1 : object.opacity);
+    var frame = document.createElement('iframe');
+    var assetUrl = object.assetUrl || '/characters/talking/men/player.html';
+    var src = new URL(resolveUrl(assetUrl));
+    src.searchParams.set('autoplay','0');
+    src.searchParams.set('muted','1');
+    src.searchParams.set('interactive','0');
+    src.searchParams.set('editorStage','1');
+    src.searchParams.set('viewportWidth', String(requestedWidth || innerWidth));
+    src.searchParams.set('viewportHeight', String(requestedHeight || innerHeight));
+    src.searchParams.set('qualityScale', String(captureScale));
+    src.searchParams.set('bridge','render-v29');
+    frame.src = src.toString();
+    var hue = Number(object.characterHue == null ? 0 : object.characterHue);
+    var sat = Number(object.characterSaturation == null ? 100 : object.characterSaturation);
+    var bright = Number(object.characterBrightness == null ? 100 : object.characterBrightness);
+    frame.style.filter = 'hue-rotate(' + hue + 'deg) saturate(' + sat + '%) brightness(' + bright + '%)';
+    layer.appendChild(frame);
+    stage.appendChild(layer);
+    characterFrames.push({frame:frame,object:object});
+  }
+
+  function markReadyWhenPossible(){
+    if(window.__CBS_RENDER_ERROR__) return;
+    if(pendingImages > 0) return;
+    if(readySources.size < characterFrames.length) return;
+    // Text fonts must be loaded before capture (Google fonts arrive asynchronously).
+    if(document.fonts && document.fonts.status !== 'loaded' && !markReadyWhenPossible.fontsWaited){ markReadyWhenPossible.fontsWaited = true; document.fonts.ready.then(markReadyWhenPossible, markReadyWhenPossible); return; }
+    characterFrames.forEach(function(entry){sendEdits(entry,currentTimeSeconds);});
+    requestAnimationFrame(function(){requestAnimationFrame(function(){window.__CBS_RENDER_READY__ = true;});});
+  }
+
+  window.addEventListener('message', function(event){
+    var data = event.data;
+    if(!data || data.source !== 'characterbazaarstudio-animate') return;
+    if(data.type === 'ERROR') { fail(data.message || 'Talking player runtime error'); return; }
+    if(data.type === 'READY') {
+      if(event.source) readySources.add(event.source);
+      var entry = characterFrames.find(function(item){ return item.frame.contentWindow === event.source; });
+      if(entry) sendEdits(entry,currentTimeSeconds);
+      markReadyWhenPossible();
+      return;
+    }
+    if(data.type === 'SEEK_DONE' && pendingSeek){
+      var seekMs = Number(data.seekMs || 0);
+      if(Math.abs(seekMs - pendingSeek.targetMs) > 2) return;
+      if(event.source) pendingSeek.sources.add(event.source);
+      if(pendingSeek.sources.size >= characterFrames.length){
+        var done = pendingSeek;
+        pendingSeek = null;
+        clearTimeout(done.timer);
+        requestAnimationFrame(function(){requestAnimationFrame(done.resolve);});
+      }
+    }
+  });
+
+  window.__CBS_SET_TIME__ = function(seconds){
+    return new Promise(function(resolve){
+      if(window.__CBS_RENDER_ERROR__) { resolve(); return; }
+      var safeSeconds = Math.max(0, Number(seconds) || 0);
+      currentTimeSeconds = safeSeconds;
+      var targetMs = safeSeconds * 1000;
+      if(pendingSeek){ clearTimeout(pendingSeek.timer); pendingSeek.resolve(); pendingSeek = null; }
+      if(characterFrames.length === 0){ requestAnimationFrame(function(){requestAnimationFrame(resolve);}); return; }
+      var timer = setTimeout(function(){
+        if(pendingSeek && pendingSeek.targetMs === targetMs){
+          pendingSeek = null;
+          fail('Timed out seeking source animation to ' + targetMs.toFixed(0) + ' ms');
+          resolve();
+        }
+      }, 5000);
+      pendingSeek = {targetMs:targetMs,sources:new Set(),resolve:resolve,timer:timer};
+      characterFrames.forEach(function(entry){
+        if(entry.frame.contentWindow){
+          sendEdits(entry,safeSeconds);
+          entry.frame.contentWindow.postMessage({source:'characterbazaarstudio-editor',type:'SEEK',seekMs:targetMs}, '*');
+        }
+      });
+    });
+  };
+
+  async function boot(){
+    try{
+      if(!sceneId) throw new Error('Missing scene id');
+      var scene = await fetchJson('/api/scenes/' + encodeURIComponent(sceneId));
+      var project = await fetchJson('/api/projects/' + encodeURIComponent(scene.project));
+      var width = requestedWidth || Number(project.width || 1920);
+      var height = requestedHeight || Number(project.height || 1080);
+      stage.style.width = width + 'px';
+      stage.style.height = height + 'px';
+      stage.style.transform = 'scale(' + captureScale + ')';
+      stage.style.background = (scene.editor_data && scene.editor_data.background) || '#ffffff';
+      var data = scene.editor_data || {objects:[]};
+      if(data.backgroundImage) addBackground(data.backgroundImage,1,1);
+      var objects = Array.isArray(data.objects) ? data.objects : [];
+      objects.forEach(function(object,index){
+        var z = 10 + index;
+        if(object.type === 'background' && object.assetKind === 'image' && object.assetUrl) addBackground(object.assetUrl,object.opacity,z);
+      });
+      objects.forEach(function(object,index){
+        var z = 100 + index;
+        if(object.type === 'background' || object.type === 'audio') return;
+        if(object.type === 'character' && object.assetKind === 'animate-createjs' && object.assetUrl) addCharacter(object,z);
+        else if(object.type === 'text') addText(object,z);
+        else addProp(object,z);
+      });
+      if(characterFrames.length === 0){
+        markReadyWhenPossible();
+      } else {
+        setTimeout(function(){
+          if(!window.__CBS_RENDER_READY__ && !window.__CBS_RENDER_ERROR__) fail('Only ' + readySources.size + '/' + characterFrames.length + ' character runtimes became ready');
+        }, 20000);
+      }
+    }catch(error){ fail(error && error.message ? error.message : String(error)); }
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

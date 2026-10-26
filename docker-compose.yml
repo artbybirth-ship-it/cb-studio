@@ -1,0 +1,88 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-characterbazaarstudio}
+      POSTGRES_USER: ${POSTGRES_USER:-characterbazaarstudio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-characterbazaarstudio}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-characterbazaarstudio} -d ${POSTGRES_DB:-characterbazaarstudio}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    env_file: .env
+    restart: unless-stopped
+    command: >-
+      sh -c "until python -c 'import socket; socket.gethostbyname(\"db\")' 2>/dev/null; do echo 'Waiting for Docker DNS/db...'; sleep 2; done;
+      python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - ./backend:/app
+      - media_data:/app/media
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    env_file: .env
+    restart: unless-stopped
+    command: celery -A autodraft_backend worker -l INFO
+    volumes:
+      - ./backend:/app
+      - media_data:/app/media
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  ai:
+    build: ./ai_service
+    env_file: .env
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./ai_service:/app
+
+  frontend:
+    build: ./frontend
+    env_file: .env
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+      NEXT_PUBLIC_AI_URL: ${NEXT_PUBLIC_AI_URL:-/ai-api}
+      # Docker/server development intentionally proxies to Django/AI.
+      # Packaged Electron builds leave these unset and use the built-in local API.
+      CB_BACKEND_ORIGIN: http://backend:8000
+      CB_AI_ORIGIN: http://ai:8100
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+      - ai
+
+volumes:
+  postgres_data:
+  media_data:

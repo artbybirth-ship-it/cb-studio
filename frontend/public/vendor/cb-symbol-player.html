@@ -1,0 +1,125 @@
+<!doctype html>
+<!--
+  CharacterBazaar Studio — single-symbol player and part catalog for installed Animate exports.
+
+  Player:  /vendor/cb-symbol-player.html?js=<export .js>&comp=<composition id>&symbol=<library symbol>
+           Draws one library symbol (e.g. another character's "Headcopy3") fitted to the frame,
+           bottom-aligned, for part replacements. Follows REPLACEMENT_SEEK like other replacements.
+  Catalog: ...&catalog=1&part=<symbol base name, e.g. Head>&poses=<JSON [{symbol,label}]>&req=<id>
+           Posts SYMBOL_CATALOG { items: [{ symbol, label, thumb }] }: every library symbol named
+           like the part (Head, Headcopy…Headcopy13), labelled with the pose that uses it.
+  Only same-origin export scripts are loaded.
+-->
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Symbol player</title>
+<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}canvas{display:block;width:100%;height:100%;background:transparent}</style>
+</head><body><canvas id="canvas"></canvas>
+<script src="/vendor/createjs"></script>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var JS = q.get('js') || '', COMP = q.get('comp') || '', SYMBOL = q.get('symbol') || '';
+  var CATALOG = q.get('catalog') === '1', PART = q.get('part') || '', REQ = q.get('req') || '';
+  var objectId = q.get('objectId') || '', partKey = q.get('partKey') || '', assetUrl = q.get('assetUrl') || '';
+  var POSES = []; try { POSES = JSON.parse(q.get('poses') || '[]') || []; } catch (e) {}
+  var canvas = document.getElementById('canvas'), stage = null, root = null, lib = null, fps = 30;
+
+  function post(msg) { try { parent.postMessage(msg, '*'); } catch (e) {} }
+  function replacementPost(type, extra) { post(Object.assign({ source: 'characterbazaarstudio-replacement', type: type, objectId: objectId, partKey: partKey, assetUrl: assetUrl }, extra || {})); }
+  function catalogPost(items, error) { post({ source: 'characterbazaarstudio-symbols', type: 'SYMBOL_CATALOG', req: REQ, items: items || [], error: error || '' }); }
+  function fail(err) { console.error(err); if (CATALOG) catalogPost([], String(err && err.message || err)); else replacementPost('ERROR', { message: String(err) }); }
+  // "Headcopy13" → "Head", "Scarf_1" → "Scarf" (same rule as the player bridge).
+  function baseName(name) { return String(name || '').replace(/(?:copy\d*|_\d+)+$/i, ''); }
+  function boundsOf(inst) { var b = null; try { b = inst.nominalBounds || (inst.getBounds && inst.getBounds()); } catch (e) {} return b && b.width > 0 && b.height > 0 ? b : null; }
+
+  var src;
+  try { src = new URL(JS, location.href); } catch (e) { src = null; }
+  if (!src || src.origin !== location.origin) { fail(new Error('Export script must be on this server')); return; }
+
+  function absSrc(path) { try { return new URL(String(path || ''), src.href).href; } catch (e) { return path; } }
+  function loadImages(comp, done) {
+    var manifest = (lib.properties && lib.properties.manifest) || [];
+    var visible = manifest.filter(function (item) { return !/\.(?:mp3|wav|ogg|m4a)(?:\?|$)/i.test(String(item.src || '')); });
+    if (!visible.length) { done(); return; }
+    var queue = new createjs.LoadQueue(false);
+    queue.addEventListener('fileload', function (evt) { if (evt && evt.item && evt.item.type === 'image') comp.getImages()[evt.item.id] = evt.result; });
+    queue.addEventListener('complete', function (evt) {
+      try { var ss = comp.getSpriteSheet(), meta = lib.ssMetadata || []; for (var i = 0; i < meta.length; i++) ss[meta[i].name] = new createjs.SpriteSheet({ images: [evt.target.getResult(meta[i].name)], frames: meta[i].frames }); } catch (e) {}
+      done();
+    });
+    queue.loadManifest(visible.map(function (item) { var copy = Object.assign({}, item); copy.src = absSrc(copy.src); return copy; }));
+  }
+
+  // ---- Player: one symbol, fitted inside the frame and standing on its bottom edge.
+  function fit() {
+    if (!root || !stage) return;
+    var dpr = Math.max(1, window.devicePixelRatio || 1), w = Math.max(1, Math.round(innerWidth * dpr)), h = Math.max(1, Math.round(innerHeight * dpr));
+    canvas.width = w; canvas.height = h;
+    var b = boundsOf(root) || { x: 0, y: 0, width: w, height: h }, s = Math.min(w / b.width, h / b.height);
+    root.scaleX = root.scaleY = s; root.x = (w - b.width * s) / 2 - b.x * s; root.y = h - (b.y + b.height) * s;
+    stage.update();
+  }
+  function play() {
+    var C = lib[SYMBOL]; if (typeof C !== 'function') throw new Error('Missing library symbol ' + SYMBOL);
+    root = new C(); stage = new createjs.Stage(canvas); stage.addChild(root);
+    if (root.gotoAndStop) root.gotoAndStop(0);
+    fit(); window.addEventListener('resize', fit);
+    window.addEventListener('message', function (event) {
+      var d = event.data || {};
+      if (d.source !== 'characterbazaarstudio-editor' || d.type !== 'REPLACEMENT_SEEK' || !root.gotoAndStop) return;
+      var total = Math.max(1, root.totalFrames || 1), f = Math.max(0, Math.round(Number(d.timeSeconds || 0) * fps));
+      root.gotoAndStop(total > 1 ? f % total : 0); stage.update();
+    });
+    replacementPost('READY');
+  }
+
+  // ---- Catalog: every symbol of one part family, with a thumbnail and the pose that uses it.
+  function protoName(map, node) { try { return map.get(Object.getPrototypeOf(node)) || ''; } catch (e) { return ''; } }
+  function findIn(node, wanted, map, depth) {
+    var kids = (node && node.children) || [];
+    for (var i = 0; i < kids.length; i++) { var n = protoName(map, kids[i]); if (wanted[n]) return n; }
+    if (depth > 8) return '';
+    for (var j = 0; j < kids.length; j++) { var hit = findIn(kids[j], wanted, map, depth + 1); if (hit) return hit; }
+    return '';
+  }
+  function thumb(C) {
+    var inst = new C(); try { if (inst.gotoAndStop) inst.gotoAndStop(0); } catch (e) {}
+    var b = boundsOf(inst); if (!b) return '';
+    var size = 160, pad = 8, s = Math.min((size - pad * 2) / b.width, (size - pad * 2) / b.height);
+    var c = document.createElement('canvas'); c.width = c.height = size;
+    var ctx = c.getContext('2d');
+    ctx.setTransform(s, 0, 0, s, (size - b.width * s) / 2 - b.x * s, (size - b.height * s) / 2 - b.y * s);
+    try { inst.draw(ctx); } catch (e) { return ''; }
+    return c.toDataURL('image/png');
+  }
+  function catalog() {
+    var family = baseName(PART).toLowerCase();
+    var map = new Map(), wanted = {};
+    Object.keys(lib).forEach(function (name) { var f = lib[name]; if (typeof f === 'function' && f.prototype) map.set(f.prototype, name); });
+    var symbols = Object.keys(lib).filter(function (name) { return typeof lib[name] === 'function' && baseName(name).toLowerCase() === family; }).slice(0, 48);
+    symbols.forEach(function (name) { wanted[name] = true; });
+    var labels = {};
+    POSES.forEach(function (pose) {
+      var C = pose && lib[pose.symbol]; if (typeof C !== 'function') return;
+      try { var inst = new C(); if (inst.gotoAndStop) inst.gotoAndStop(0); var used = findIn(inst, wanted, map, 0); if (used && !labels[used]) labels[used] = String(pose.label || pose.symbol); } catch (e) {}
+    });
+    var n = 0;
+    catalogPost(symbols.map(function (name) { n += 1; return { symbol: name, label: labels[name] || (baseName(name).replace(/([a-z])([A-Z])/g, '$1 $2') + ' ' + n), thumb: thumb(lib[name]) }; }));
+  }
+
+  var script = document.createElement('script');
+  script.src = src.href;
+  script.onerror = function () { fail(new Error('Could not load ' + src.href)); };
+  script.onload = function () {
+    try {
+      var an = window.AdobeAn, ids = an && an.compositions ? Object.keys(an.compositions) : [];
+      var comp = an && an.getComposition && an.getComposition(COMP || ids[0]);
+      if (!comp) throw new Error('Animate composition not found: ' + COMP);
+      lib = comp.getLibrary(); fps = (lib.properties && lib.properties.fps) || 30;
+      loadImages(comp, function () { try { if (CATALOG) catalog(); else play(); } catch (err) { fail(err); } });
+    } catch (err) { fail(err); }
+  };
+  document.body.appendChild(script);
+})();
+</script>
+</body></html>
