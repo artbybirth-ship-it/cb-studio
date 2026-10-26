@@ -7,11 +7,13 @@
  *
  * Editor → player messages (source "characterbazaarstudio-editor"):
  *   SEEK, PAUSE, PLAY, CHARACTER_EDITS, HIT_TEST_PART, BEGIN/MOVE/END_PART_DRAG,
- *   SET_VIEW { pixelScale, x, y, width, height }  — device pixels per player CSS px and
+ *   SET_VIEW { pixelScale, x, y, width, height, exact }  — device pixels per player CSS px and
  *            the visible part of the player (0..1). The vectors are redrawn at exactly that
- *            resolution, for the visible region only, so zooming never pixelates.
+ *            resolution, for the visible region only, so zooming never pixelates. exact: the
+ *            host zooms with CSS zoom, so this page's devicePixelRatio is used and the canvas is
+ *            aligned to whole device pixels. minStroke: thinnest outline in device pixels (1).
  * Player → editor messages (source "characterbazaarstudio-animate"):
- *   READY, CONTENT_BOUNDS, PART_SELECTED, PART_DRAG_PREVIEW, PART_DRAG_END, ERROR
+ *   READY, CONTENT_BOUNDS, PART_SELECTED, PART_DRAG_PREVIEW, PART_DRAG_END, SEEK_DONE, ERROR
  */
 (function () {
   var script = document.currentScript;
@@ -685,23 +687,45 @@
     var cssW = Math.max(1, window.innerWidth || document.documentElement.clientWidth || W);
     var cssH = Math.max(1, window.innerHeight || document.documentElement.clientHeight || H);
     var v = cbView, s = cv.style;
+    cbViewSig = viewSig();
     if (v.width <= 0 || v.height <= 0) { s.visibility = 'hidden'; return; }
-    var q = Math.max(.05, v.scale);
+    // Exact mode (the editor zooms with CSS zoom): this page's devicePixelRatio is then exactly the
+    // device pixels per CSS pixel on screen, so the canvas can cover whole device pixels 1:1 and the
+    // browser never resamples it. Otherwise the editor's measured pixelScale is used.
+    var exactDpr = v.exact && window.devicePixelRatio > 0 ? window.devicePixelRatio : 0;
+    var q = exactDpr || Math.max(.05, v.scale);
     var bw = v.width * cssW * q, bh = v.height * cssH * q;
     var shrink = Math.min(1, MAX_EDGE / Math.max(bw, bh), Math.sqrt(MAX_AREA / Math.max(1, bw * bh)));
-    q *= shrink;
-    bw = Math.max(1, Math.ceil(v.width * cssW * q));
-    bh = Math.max(1, Math.ceil(v.height * cssH * q));
     // Raw Animate exports wrap the canvas in a fixed-size #animation_container.
     var host = cv.parentElement;
     if (host && host !== document.body && host.id === 'animation_container') {
       host.style.position = 'absolute'; host.style.left = '0'; host.style.top = '0'; host.style.width = '100%'; host.style.height = '100%';
     }
+    s.position = 'absolute'; s.display = 'block'; s.visibility = 'visible';
+    if (exactDpr && shrink >= 1) {
+      // The visible region rounded out to whole device pixels; position and size in CSS px that land
+      // exactly on those pixels.
+      var x0 = Math.floor(v.x * cssW * q), y0 = Math.floor(v.y * cssH * q);
+      var x1 = Math.ceil((v.x + v.width) * cssW * q), y1 = Math.ceil((v.y + v.height) * cssH * q);
+      bw = Math.max(1, x1 - x0); bh = Math.max(1, y1 - y0);
+      if (cv.width !== bw) cv.width = bw;
+      if (cv.height !== bh) cv.height = bh;
+      s.left = (x0 / q) + 'px'; s.top = (y0 / q) + 'px';
+      s.width = (bw / q) + 'px'; s.height = (bh / q) + 'px';
+      st.scaleX = cssW * q / W; st.scaleY = cssH * q / H;
+      st.x = -x0; st.y = -y0;
+      if (st.update) st.update();
+      return;
+    }
+    q *= shrink;
+    bw = Math.max(1, Math.ceil(v.width * cssW * q));
+    bh = Math.max(1, Math.ceil(v.height * cssH * q));
     if (cv.width !== bw) cv.width = bw;
     if (cv.height !== bh) cv.height = bh;
-    s.position = 'absolute'; s.display = 'block'; s.visibility = 'visible';
     s.left = (v.x * 100) + '%'; s.top = (v.y * 100) + '%';
-    s.width = (v.width * 100) + '%'; s.height = (v.height * 100) + '%';
+    // bw × bh pixels shown on exactly bw × bh device pixels (not the rounded-down view size), so the
+    // browser never resizes the drawing.
+    s.width = (bw / (cssW * q) * 100) + '%'; s.height = (bh / (cssH * q) * 100) + '%';
     st.scaleX = cssW * q / W; st.scaleY = cssH * q / H;
     st.x = -v.x * cssW * q; st.y = -v.y * cssH * q;
     if (st.update) st.update();
@@ -776,8 +800,33 @@
   }
   function scheduleBounds() { if (cbScanTimer) return; cbScanTimer = setTimeout(function () { cbScanTimer = 0; if (cbRoot()) reportBounds(); }, 120); }
 
+  // ---- Outlines never thinner than cbMinStroke device pixels, as Animate draws them on its stage. The
+  // canvas has no such floor, so thin strokes of a scaled-down character (0.5–2 units at 75% zoom ≈
+  // a quarter of a pixel) would fade to faint grey. 1 px by default (4K screens, library thumbnails);
+  // the editor asks for 1.5 px on 1× (Full HD) screens and the video export for 1.5 px of the final
+  // frame, which matches Animate's outline weight there (SET_VIEW minStroke).
+  var cbMinStroke = 1;
+  function installMinStroke() {
+    var G = window.createjs && window.createjs.Graphics, S = G && G.Stroke && G.Stroke.prototype;
+    if (!S || S.__cbMinStroke) return;
+    var exec = S.exec;
+    S.__cbMinStroke = true;
+    S.exec = function (ctx) {
+      var lw = ctx.lineWidth;
+      if (!(lw > 0) || !ctx.getTransform) return exec.call(this, ctx);
+      // ignoreScale strokes are drawn with the transform reset, so their width is already in pixels.
+      var scale = 1;
+      if (!this.ignoreScale) { var m = ctx.getTransform(); scale = Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) || 1; }
+      if (lw * scale >= cbMinStroke) return exec.call(this, ctx);
+      ctx.lineWidth = cbMinStroke / scale;
+      try { return exec.call(this, ctx); } finally { ctx.lineWidth = lw; }
+    };
+  }
+  installMinStroke();
+
   function cbReady() {
     if (cbReadySent) return;
+    installMinStroke();
     var root = cbRoot(); if (!root) return;
     discover();
     cbReadySent = true;
@@ -793,6 +842,22 @@
   setTimeout(cbTryReady, 180);
   // Animate's responsive handler resizes the canvas on window resize; re-apply our view after it.
   window.addEventListener('resize', function () { setTimeout(applyView, 0); });
+  // The drawing must always match this page's current size and pixel ratio. The ratio changes with
+  // the editor's zoom (CSS zoom) and when the window moves to a screen with another density (4K ↔
+  // Full HD), which fires no resize: redraw on a ratio change, and check once a second as a backstop.
+  var cbViewSig = '';
+  function viewSig() {
+    return [window.devicePixelRatio, window.innerWidth, window.innerHeight, cbMinStroke,
+      cbView && [cbView.scale, cbView.x, cbView.y, cbView.width, cbView.height, cbView.exact].join(',')].join('|');
+  }
+  function refreshView() { if (!cbView) return; var sig = viewSig(); if (sig !== cbViewSig) applyView(); }
+  (function watchPixelRatio() {
+    if (!window.matchMedia) return;
+    var mq = window.matchMedia('(resolution: ' + window.devicePixelRatio + 'dppx)');
+    var onChange = function () { if (mq.removeEventListener) mq.removeEventListener('change', onChange); refreshView(); watchPixelRatio(); };
+    if (mq.addEventListener) mq.addEventListener('change', onChange);
+  })();
+  setInterval(refreshView, 1000);
 
   window.addEventListener('message', function (event) {
     var d = event.data || {};
@@ -801,8 +866,11 @@
       cbView = {
         scale: Number(d.pixelScale) || 1,
         x: clamp(Number(d.x) || 0, 0, 1), y: clamp(Number(d.y) || 0, 0, 1),
-        width: clamp(Number(d.width), 0, 1), height: clamp(Number(d.height), 0, 1)
+        width: clamp(Number(d.width), 0, 1), height: clamp(Number(d.height), 0, 1),
+        exact: !!d.exact
       };
+      cbMinStroke = clamp(Number(d.minStroke) || 1, 1, 8);
+      cbViewSig = '';
       applyView();
       return;
     }
@@ -810,7 +878,8 @@
     if (!root) return;
     try {
       // loop: wrap past the last frame (Animate "Loop"); otherwise hold the last frame ("Play Once").
-      if (d.type === 'SEEK') { var f = Math.max(0, Math.round(Number(d.seekMs || 0) / 1000 * FPS)), total = Math.max(1, root.totalFrames || 1); if (root.gotoAndStop) root.gotoAndStop(d.loop && total > 1 ? f % total : Math.min(total - 1, f)); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); }
+      // SEEK_DONE tells the video export (render harness) the frame is drawn and can be captured.
+      if (d.type === 'SEEK') { var f = Math.max(0, Math.round(Number(d.seekMs || 0) / 1000 * FPS)), total = Math.max(1, root.totalFrames || 1); if (root.gotoAndStop) root.gotoAndStop(d.loop && total > 1 ? f % total : Math.min(total - 1, f)); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
       else if (d.type === 'CHARACTER_EDITS') { cbLastOv = d.partOverrides || {}; applyEdits(d); scheduleBounds(); }

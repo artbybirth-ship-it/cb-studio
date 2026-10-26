@@ -10,8 +10,8 @@
     *{box-sizing:border-box}
     #stage{position:absolute;left:0;top:0;overflow:hidden;background:#fff;font-family:Arial,sans-serif;transform-origin:0 0}
     .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none;image-rendering:auto;filter:none}
-    .char-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none}
-    .char-layer iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;pointer-events:none}
+    .char-layer{position:absolute;transform-origin:50% 50%;pointer-events:none}
+    .char-layer iframe{display:block;width:100%;height:100%;border:0;background:transparent;pointer-events:none}
     .text-layer{position:absolute;transform-origin:center;color:#fff;font:800 52px/1.1 Arial,sans-serif;text-shadow:0 2px 8px #000;white-space:pre-wrap}
     .prop-layer{position:absolute;width:130px;height:130px;border-radius:22px;border:4px solid #49c9c7;background:#17343a;color:#dffafa;display:grid;place-items:center;text-align:center;transform-origin:center}
     .prop-layer span{font-size:48px}.prop-layer small{position:absolute;top:136px;font-size:18px;white-space:nowrap;color:#dffafa}
@@ -36,9 +36,12 @@
   var stage = document.getElementById('stage');
   var fatal = document.getElementById('fatal');
   var characterFrames = [];
+  var timedLayers = [];
   var readySources = new Set();
   var pendingImages = 0;
   var pendingSeek = null;
+  var seekCounter = 0;
+  var stageZoomed = false;
   var currentTimeSeconds = 0;
 
   function fail(message){
@@ -48,6 +51,17 @@
     fatal.style.display = 'grid';
     if(pendingSeek){ clearTimeout(pendingSeek.timer); pendingSeek.resolve(); pendingSeek = null; }
     console.error('[CBS render harness]', text);
+  }
+
+  function supportsStandardZoom(){
+    var host = document.createElement('div');
+    host.style.cssText = 'position:absolute;left:-9999px;top:0;width:100px;height:100px;visibility:hidden';
+    host.innerHTML = '<div style="position:absolute;left:10px;top:0;zoom:2"><div style="width:10px;height:10px"></div></div>';
+    document.body.appendChild(host);
+    var child = host.firstElementChild.firstElementChild, hostRect = host.getBoundingClientRect(), childRect = child.getBoundingClientRect();
+    var ok = Math.abs(childRect.width - 20) < 0.5 && child.offsetWidth === 10 && Math.abs(childRect.left - hostRect.left - 20) < 0.5;
+    host.remove();
+    return ok;
   }
 
   function resolveUrl(url){
@@ -91,6 +105,17 @@
     el.style.zIndex = String(z);
     el.style.transform = layerTransform(object);
     stage.appendChild(el);
+    timedLayers.push({el:el,object:object});
+  }
+
+  // Layers draw only inside their time span (StageCanvas): from startTime for actionDurationMs.
+  function inTimeSpan(object, seconds){
+    var start = Math.max(0, Number(object.startTime || 0));
+    var length = object.actionDurationMs ? Math.max(0.1, Number(object.actionDurationMs) / 1000) : null;
+    return seconds + 0.0001 >= start && (length == null || seconds <= start + length + 0.0001);
+  }
+  function updateVisibility(seconds){
+    timedLayers.forEach(function(entry){ entry.el.style.visibility = inTimeSpan(entry.object, seconds) ? 'visible' : 'hidden'; });
   }
 
   // Same transform as the editor canvas (StageCanvas layerTransformCss): rotation, skew, scale with
@@ -116,35 +141,125 @@
     if (object.fillColor) el.style.background = object.fillColor;
     el.style.transform = layerTransform(object);
     stage.appendChild(el);
+    timedLayers.push({el:el,object:object});
   }
 
+  // ---- Characters are laid out exactly like the editor (StageCanvas): a box centred on the
+  // character's position, sourceWidth × sourceHeight × scale × stretch, rotated / skewed / flipped
+  // about its centre, with the player filling it. Keep in sync with lib/keyframes.ts and
+  // lib/partKeyframes.ts.
+  var KEY_EPSILON = 1 / 120;
+  function byTime(frames){ return (Array.isArray(frames) ? frames.slice() : []).sort(function(a,b){return Number(a.time||0)-Number(b.time||0);}); }
+  function easeProgress(t, easeIn, easeOut){
+    var i = Math.max(0, Math.min(1, Number(easeIn || 0) / 100)), o = Math.max(0, Math.min(1, Number(easeOut || 0) / 100));
+    var y1 = (1 - i) / 3, y2 = 1 - (1 - o) / 3, u = 1 - t;
+    return 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t;
+  }
   function resolveCharacterTransform(object, seconds){
     var base={x:Number(object.x||0),y:Number(object.y||0),scale:Number(object.scale||1),rotation:Number(object.rotation||0)};
-    var frames=Array.isArray(object.keyframes)?object.keyframes.slice().sort(function(a,b){return Number(a.time||0)-Number(b.time||0);}):[];
+    var frames=byTime(object.keyframes);
     if(!frames.length)return base;
     var t=Math.max(0,Number(seconds||0)),first=frames[0],last=frames[frames.length-1];
-    if(t<=Number(first.time||0))return{x:Number(first.x||0),y:Number(first.y||0),scale:base.scale,rotation:base.rotation};
-    if(t>=Number(last.time||0))return{x:Number(last.x||0),y:Number(last.y||0),scale:base.scale,rotation:base.rotation};
+    var at=function(f){return{x:Number(f.x||0),y:Number(f.y||0),scale:base.scale,rotation:base.rotation};};
+    if(t<=Number(first.time||0)+KEY_EPSILON)return at(first);
+    if(t>=Number(last.time||0)-KEY_EPSILON)return at(last);
     for(var i=0;i<frames.length-1;i++){
       var left=frames[i],right=frames[i+1],lt=Number(left.time||0),rt=Number(right.time||0);
-      if(t<lt||t>rt)continue;
-      var span=Math.max(0.000001,rt-lt),ratio=Math.max(0,Math.min(1,(t-lt)/span));
-      return{x:Number(left.x||0)+(Number(right.x||0)-Number(left.x||0))*ratio,y:Number(left.y||0)+(Number(right.y||0)-Number(left.y||0))*ratio,scale:base.scale,rotation:base.rotation};
+      if(t<lt-KEY_EPSILON||t>rt+KEY_EPSILON)continue;
+      // No tween: the position holds until the next keyframe (Animate).
+      if(left.tween===false)return at(left);
+      var linear=Math.max(0,Math.min(1,(t-lt)/Math.max(KEY_EPSILON,rt-lt)));
+      var r=left.tween?easeProgress(linear,left.tween.easeIn,left.tween.easeOut):linear;
+      return{x:Number(left.x||0)+(Number(right.x||0)-Number(left.x||0))*r,y:Number(left.y||0)+(Number(right.y||0)-Number(left.y||0))*r,scale:base.scale,rotation:base.rotation};
     }
     return base;
   }
 
+  // Part edits with their part keyframes at a time (lib/partKeyframes.ts resolvePartOverridesAtTime).
+  function partEase(value, mode){
+    var t = Math.max(0, Math.min(1, value));
+    if(mode === 'linear') return t;
+    if(mode === 'easeIn') return t * t;
+    if(mode === 'easeOut') return 1 - (1 - t) * (1 - t);
+    return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  }
+  function atLeast(value){ return Math.max(0.02, Number(value == null ? 1 : value) || 1); }
+  function resolvePartTransform(object, key, seconds){
+    var o = (object.partOverrides && object.partOverrides[key]) || {};
+    var base = {offsetX:Number(o.offsetX||0), offsetY:Number(o.offsetY||0), rotation:Number(o.rotation||0), scale:Math.max(0.02, Number(o.scale == null ? 1 : o.scale)), flipX:!!o.flipX, skewX:Number(o.skewX||0), skewY:Number(o.skewY||0), stretchX:atLeast(o.stretchX), stretchY:atLeast(o.stretchY)};
+    var frames = byTime(object.partKeyframes && object.partKeyframes[key]);
+    if(!frames.length) return base;
+    var t = Math.max(0, Number(seconds || 0));
+    if(t < frames[0].time - KEY_EPSILON) return base;
+    var num = function(v){ return Number(v || 0); };
+    var last = frames[frames.length - 1];
+    if(t >= last.time - KEY_EPSILON){
+      return {offsetX:base.offsetX + num(last.offsetX), offsetY:base.offsetY + num(last.offsetY), rotation:base.rotation + num(last.rotation), scale:base.scale * Math.max(0.02, Number(last.scale == null ? 1 : last.scale)),
+        flipX:typeof last.flipX === 'boolean' ? last.flipX : base.flipX, skewX:base.skewX + num(last.skewX), skewY:base.skewY + num(last.skewY),
+        stretchX:base.stretchX * Math.max(0.02, Number(last.stretchX == null ? 1 : last.stretchX)), stretchY:base.stretchY * Math.max(0.02, Number(last.stretchY == null ? 1 : last.stretchY))};
+    }
+    for(var i = 0; i < frames.length - 1; i++){
+      var l = frames[i], r = frames[i + 1];
+      if(t < l.time - KEY_EPSILON || t > r.time + KEY_EPSILON) continue;
+      var k = partEase((t - l.time) / Math.max(KEY_EPSILON, r.time - l.time), r.easing || l.easing);
+      var lerp = function(a, b){ return a + (b - a) * k; };
+      var fs = function(f){ return Math.max(0.02, Number(f.scale == null ? 1 : f.scale)); };
+      var fst = function(f, axis){ return Math.max(0.02, Number(f[axis] == null ? 1 : f[axis])); };
+      var leftFlip = typeof l.flipX === 'boolean' ? l.flipX : base.flipX;
+      return {offsetX:base.offsetX + lerp(num(l.offsetX), num(r.offsetX)), offsetY:base.offsetY + lerp(num(l.offsetY), num(r.offsetY)), rotation:base.rotation + lerp(num(l.rotation), num(r.rotation)),
+        scale:base.scale * lerp(fs(l), fs(r)), skewX:base.skewX + lerp(num(l.skewX), num(r.skewX)), skewY:base.skewY + lerp(num(l.skewY), num(r.skewY)),
+        stretchX:base.stretchX * lerp(fst(l, 'stretchX'), fst(r, 'stretchX')), stretchY:base.stretchY * lerp(fst(l, 'stretchY'), fst(r, 'stretchY')),
+        // Flip is discrete: the new state starts exactly on the right-hand keyframe.
+        flipX:t >= r.time - KEY_EPSILON ? (typeof r.flipX === 'boolean' ? r.flipX : leftFlip) : leftFlip};
+    }
+    return base;
+  }
+  function resolvePartOverrides(object, seconds){
+    var keys = {}, result = {};
+    Object.keys(object.partOverrides || {}).concat(Object.keys(object.partKeyframes || {})).forEach(function(key){ keys[key] = true; });
+    Object.keys(keys).forEach(function(key){ result[key] = Object.assign({}, (object.partOverrides && object.partOverrides[key]) || {}, resolvePartTransform(object, key, seconds)); });
+    return result;
+  }
+
+  // The source animation's time for a layer (lib/partKeyframes.ts resolveSourceSeekMs).
+  function resolveSourceSeekMs(object, seconds){
+    var localTime = Math.max(0, seconds - Math.max(0, Number(object.startTime || 0)));
+    var clips = byTime((object.sourceAnimationClips || []).map(function(c){ return Object.assign({}, c, {time:c.start}); }));
+    if(!clips.length) return localTime * 1000;
+    var active = clips.find(function(c){ return localTime >= c.start && localTime < c.start + c.duration; });
+    return active ? Math.max(0, (localTime - active.start) * 1000) : 0;
+  }
+
+  function placeCharacter(entry, seconds){
+    var object = entry.object, transform = resolveCharacterTransform(object, seconds);
+    var clamp = function(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); };
+    var sx = clamp(Number(object.stretchX == null ? 1 : object.stretchX) || 1, 0.02, 50);
+    var sy = clamp(Number(object.stretchY == null ? 1 : object.stretchY) || 1, 0.02, 50);
+    var kx = clamp(Number(object.skewX || 0), -80, 80), ky = clamp(Number(object.skewY || 0), -80, 80);
+    var scale = transform.scale || 0.28, s = entry.layer.style;
+    var w = Number(object.sourceWidth || 1920) * scale * sx, h = Number(object.sourceHeight || 1920) * scale * sy;
+    // Centred with margins, not translate(-50%,-50%): no transform at all for an upright character,
+    // so its bitmap is never resampled (StageCanvas characterBoxCss / characterTransformCss).
+    s.left = transform.x + 'px'; s.top = transform.y + 'px';
+    s.width = w + 'px'; s.height = h + 'px';
+    s.marginLeft = (-w / 2) + 'px'; s.marginTop = (-h / 2) + 'px';
+    var rotation = transform.rotation || 0;
+    s.transform = rotation || kx || ky || object.flipX ? 'rotate(' + rotation + 'deg) skew(' + kx + 'deg,' + ky + 'deg) scaleX(' + (object.flipX ? -1 : 1) + ')' : 'none';
+    return transform;
+  }
+
   function sendEdits(entry, seconds){
     if(!entry.frame.contentWindow) return;
-    var object = entry.object;
-    var transform=resolveCharacterTransform(object,seconds==null?currentTimeSeconds:seconds);
+    var object = entry.object, time = seconds == null ? currentTimeSeconds : seconds;
+    var transform = placeCharacter(entry, time);
     entry.frame.contentWindow.postMessage({
       source:'characterbazaarstudio-editor',
       type:'CHARACTER_EDITS',
-      partOverrides:object.partOverrides || {},
+      partOverrides:resolvePartOverrides(object, time),
       colorOverrides:object.colorOverrides || {},
       colorReplacements:object.colorReplacements || [],
       selectedPart:'',
+      focusPart:'',
       viewport:{width:requestedWidth || innerWidth,height:requestedHeight || innerHeight},
       characterTransform:{
         x:transform.x,
@@ -154,6 +269,10 @@
         flipX:!!object.flipX
       }
     }, '*');
+    // Sharp vectors: draw the whole player at the captured resolution (stage scale × device pixels).
+    // Outlines at least 1.5 px of the final (Full HD) video frame, Animate's weight; the frame is
+    // captured at captureScale and scaled down afterwards.
+    entry.frame.contentWindow.postMessage({source:'characterbazaarstudio-editor', type:'SET_VIEW', pixelScale:captureScale * Math.max(0.25, Number(window.devicePixelRatio || 1)), x:0, y:0, width:1, height:1, exact:stageZoomed, minStroke:1.5 * captureScale}, '*');
   }
 
   function addCharacter(object, z){
@@ -167,11 +286,10 @@
     src.searchParams.set('autoplay','0');
     src.searchParams.set('muted','1');
     src.searchParams.set('interactive','0');
-    src.searchParams.set('editorStage','1');
-    src.searchParams.set('viewportWidth', String(requestedWidth || innerWidth));
-    src.searchParams.set('viewportHeight', String(requestedHeight || innerHeight));
-    src.searchParams.set('qualityScale', String(captureScale));
-    src.searchParams.set('bridge','render-v29');
+    src.searchParams.set('embeddedMode','1');
+    src.searchParams.set('viewportWidth', String(object.sourceWidth || 1920));
+    src.searchParams.set('viewportHeight', String(object.sourceHeight || 1920));
+    src.searchParams.set('bridge','render-v30');
     frame.src = src.toString();
     var hue = Number(object.characterHue == null ? 0 : object.characterHue);
     var sat = Number(object.characterSaturation == null ? 100 : object.characterSaturation);
@@ -179,7 +297,10 @@
     frame.style.filter = 'hue-rotate(' + hue + 'deg) saturate(' + sat + '%) brightness(' + bright + '%)';
     layer.appendChild(frame);
     stage.appendChild(layer);
-    characterFrames.push({frame:frame,object:object});
+    var entry = {frame:frame,layer:layer,object:object};
+    placeCharacter(entry, 0);
+    characterFrames.push(entry);
+    timedLayers.push({el:layer,object:object});
   }
 
   function markReadyWhenPossible(){
@@ -204,8 +325,7 @@
       return;
     }
     if(data.type === 'SEEK_DONE' && pendingSeek){
-      var seekMs = Number(data.seekMs || 0);
-      if(Math.abs(seekMs - pendingSeek.targetMs) > 2) return;
+      if(data.token !== pendingSeek.token) return;
       if(event.source) pendingSeek.sources.add(event.source);
       if(pendingSeek.sources.size >= characterFrames.length){
         var done = pendingSeek;
@@ -222,20 +342,23 @@
       var safeSeconds = Math.max(0, Number(seconds) || 0);
       currentTimeSeconds = safeSeconds;
       var targetMs = safeSeconds * 1000;
+      var token = 'seek-' + (++seekCounter);
       if(pendingSeek){ clearTimeout(pendingSeek.timer); pendingSeek.resolve(); pendingSeek = null; }
+      updateVisibility(safeSeconds);
       if(characterFrames.length === 0){ requestAnimationFrame(function(){requestAnimationFrame(resolve);}); return; }
       var timer = setTimeout(function(){
-        if(pendingSeek && pendingSeek.targetMs === targetMs){
+        if(pendingSeek && pendingSeek.token === token){
           pendingSeek = null;
           fail('Timed out seeking source animation to ' + targetMs.toFixed(0) + ' ms');
           resolve();
         }
       }, 5000);
-      pendingSeek = {targetMs:targetMs,sources:new Set(),resolve:resolve,timer:timer};
+      pendingSeek = {token:token,targetMs:targetMs,sources:new Set(),resolve:resolve,timer:timer};
       characterFrames.forEach(function(entry){
         if(entry.frame.contentWindow){
           sendEdits(entry,safeSeconds);
-          entry.frame.contentWindow.postMessage({source:'characterbazaarstudio-editor',type:'SEEK',seekMs:targetMs}, '*');
+          // Each layer plays its own source time (start time, clips) and loop mode, as in the editor.
+          entry.frame.contentWindow.postMessage({source:'characterbazaarstudio-editor',type:'SEEK',seekMs:resolveSourceSeekMs(entry.object, safeSeconds),loop:entry.object.loopMode === 'loop',token:token}, '*');
         }
       });
     });
@@ -250,7 +373,11 @@
       var height = requestedHeight || Number(project.height || 1080);
       stage.style.width = width + 'px';
       stage.style.height = height + 'px';
-      stage.style.transform = 'scale(' + captureScale + ')';
+      // CSS zoom, not a scale transform: characters are then drawn straight onto the captured
+      // pixels instead of being resampled (same as the editor stage, StageCanvas supportsStandardZoom).
+      stageZoomed = supportsStandardZoom();
+      if (stageZoomed) stage.style.zoom = String(captureScale);
+      else stage.style.transform = 'scale(' + captureScale + ')';
       stage.style.background = (scene.editor_data && scene.editor_data.background) || '#ffffff';
       var data = scene.editor_data || {objects:[]};
       if(data.backgroundImage) addBackground(data.backgroundImage,1,1);
@@ -266,6 +393,7 @@
         else if(object.type === 'text') addText(object,z);
         else addProp(object,z);
       });
+      updateVisibility(0);
       if(characterFrames.length === 0){
         markReadyWhenPossible();
       } else {

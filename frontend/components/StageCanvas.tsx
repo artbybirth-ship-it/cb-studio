@@ -72,6 +72,31 @@ const MAX_ZOOM = 200;
 const clampZoom = (value: number) => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, value));
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+/**
+ * The stage is zoomed with CSS `zoom`, not `transform: scale`. A transform makes the browser
+ * resample each character player's finished bitmap on its way to the screen (a half-pixel blur,
+ * plain on 1× / Full HD screens), while `zoom` lays the players out at their real screen size so
+ * the vectors are drawn straight onto the pixel grid, as in Animate. Needs standard zoom (Chrome
+ * 128+ / Electron 32+, Firefox 126+): the zoomed element's own left/top and its children's
+ * layout scale, element sizes stay unzoomed. Otherwise the stage keeps the transform.
+ */
+let standardZoomSupport: boolean | null = null;
+const supportsStandardZoom = () => {
+  if (standardZoomSupport !== null) return standardZoomSupport;
+  if (typeof document === "undefined" || !document.body) return false;
+  const host = document.createElement("div");
+  host.style.cssText = "position:absolute;left:-9999px;top:0;width:100px;height:100px;visibility:hidden";
+  host.innerHTML = '<div style="position:absolute;left:10px;top:0;zoom:2"><div style="width:10px;height:10px"></div></div>';
+  document.body.appendChild(host);
+  const zoomed = host.firstElementChild as HTMLElement;
+  const child = zoomed.firstElementChild as HTMLElement;
+  const hostRect = host.getBoundingClientRect();
+  const childRect = child.getBoundingClientRect();
+  standardZoomSupport = Math.abs(childRect.width - 20) < 0.5 && child.offsetWidth === 10 && Math.abs(childRect.left - hostRect.left - 20) < 0.5;
+  host.remove();
+  return standardZoomSupport;
+};
 const normalizeDegrees = (value: number) => {
   let next = value % 360;
   if (next > 180) next -= 360;
@@ -99,9 +124,23 @@ const skewOf = (object: EditorObject): Skew => ({
 /** CSS transform for non-character layers (characters are sized in px instead). */
 const layerTransformCss = (object: EditorObject, rotation: number, scale: number, stretchX: number, stretchY: number, skew: Skew = skewOf(object)) =>
   `translate(-50%, -50%) rotate(${rotation}deg) skew(${skew.x}deg, ${skew.y}deg) scale(${scale * stretchX}, ${scale * stretchY})${object.flipX ? " scaleX(-1)" : ""}`;
-/** CSS transform for a character element (sized in px; rotation, skew and flip only). */
+/**
+ * CSS transform for a character element (sized in px; rotation, skew and flip only). It is centred
+ * on left/top by negative margins (characterBoxCss), not translate(-50%, -50%): a transform makes
+ * the browser resample the player's bitmap (soft on Full HD screens), layout snaps to the pixel
+ * grid. So an upright, unskewed, unflipped character has no transform at all.
+ */
 const characterTransformCss = (object: EditorObject, rotation: number, skew: Skew = skewOf(object)) =>
-  `translate(-50%, -50%) rotate(${rotation}deg) skew(${skew.x}deg, ${skew.y}deg) scaleX(${object.flipX ? -1 : 1})`;
+  rotation || skew.x || skew.y || object.flipX
+    ? `rotate(${rotation}deg) skew(${skew.x}deg, ${skew.y}deg) scaleX(${object.flipX ? -1 : 1})`
+    : "none";
+/** Size of a character element, centred on its left/top. */
+const characterBoxCss = (width: number, height: number) => ({
+  width: `${width}px`,
+  height: `${height}px`,
+  marginLeft: `${-width / 2}px`,
+  marginTop: `${-height / 2}px`,
+});
 const SKEW_CURSOR_H = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26"><g stroke="#fff" stroke-width="3.2" stroke-linejoin="round"><path d="M5 9h12V5.5l6 4.5-6 4.5V11H5z"/><path d="M21 15H9v-3.5L3 16l6 4.5V17h12z"/></g><path d="M5 9h12V5.5l6 4.5-6 4.5V11H5z"/><path d="M21 15H9v-3.5L3 16l6 4.5V17h12z"/></svg>')}") 13 13, ew-resize`;
 const SKEW_CURSOR_V = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26"><g stroke="#fff" stroke-width="3.2" stroke-linejoin="round"><path d="M9 21V9H5.5L10 3l4.5 6H11v12z"/><path d="M15 5v12h-3.5l4.5 6 4.5-6H17V5z"/></g><path d="M9 21V9H5.5L10 3l4.5 6H11v12z"/><path d="M15 5v12h-3.5l4.5 6 4.5-6H17V5z"/></svg>')}") 13 13, ns-resize`;
 /** A client (screen) point in a character player's own CSS px, undoing the element's
@@ -203,6 +242,10 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   // editor mount as the baseline and counter-scale the entire stage viewport.
   const initialDevicePixelRatioRef = useRef(typeof window !== "undefined" ? Math.max(0.25, Number(window.devicePixelRatio || 1)) : 1);
   const [browserZoomFactor, setBrowserZoomFactor] = useState(1);
+  // The screen's own density without page zoom: 1 on Full HD, 2 on 4K / Retina.
+  const [screenDpr, setScreenDpr] = useState(1);
+  const [useCssZoom, setUseCssZoom] = useState(false);
+  useEffect(() => { setUseCssZoom(supportsStandardZoom()); }, []);
 
   if (frameAccessRef) frameAccessRef.current = (objectId: string) => frameRefs.current.get(objectId);
 
@@ -536,16 +579,41 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
 
   useEffect(() => {
     if (renderMode || typeof window === "undefined") return;
+    // Page zoom changes the page's width against the window's (outerWidth / innerWidth); moving the
+    // window to a screen of another density (4K ↔ Full HD) changes devicePixelRatio but not that. A
+    // screen move must not count as page zoom, so it moves the baseline instead.
+    const zoomRatio = () => (window.innerWidth > 0 && window.outerWidth > 0 ? window.outerWidth / window.innerWidth : 1);
+    let lastDpr = Math.max(0.25, Number(window.devicePixelRatio || 1));
+    let lastRatio = zoomRatio();
+    let densityQuery: MediaQueryList | null = null;
     const updateBrowserZoom = () => {
       const currentDpr = Math.max(0.25, Number(window.devicePixelRatio || 1));
+      const ratio = zoomRatio();
+      if (Math.abs(currentDpr - lastDpr) > 0.001 && Math.abs(ratio - lastRatio) < 0.02) {
+        initialDevicePixelRatioRef.current = Math.max(0.25, initialDevicePixelRatioRef.current || 1) * currentDpr / lastDpr;
+      }
+      lastDpr = currentDpr;
+      lastRatio = ratio;
       const baselineDpr = Math.max(0.25, initialDevicePixelRatioRef.current || 1);
       const next = clamp(currentDpr / baselineDpr, 0.5, 3);
       setBrowserZoomFactor((current) => Math.abs(current - next) < 0.001 ? current : next);
+      setScreenDpr((current) => Math.abs(current - currentDpr / next) < 0.001 ? current : currentDpr / next);
+      watchDensity();
     };
+    // A screen move fires no resize event: listen for the pixel ratio itself.
+    function watchDensity() {
+      densityQuery?.removeEventListener("change", updateBrowserZoom);
+      densityQuery = window.matchMedia?.(`(resolution: ${window.devicePixelRatio}dppx)`) || null;
+      densityQuery?.addEventListener("change", updateBrowserZoom);
+    }
     updateBrowserZoom();
     window.addEventListener("resize", updateBrowserZoom);
     window.visualViewport?.addEventListener("resize", updateBrowserZoom);
+    // Backstop where the media query does not report the change.
+    const densityCheck = window.setInterval(() => { if (Math.abs(Number(window.devicePixelRatio || 1) - lastDpr) > 0.001) updateBrowserZoom(); }, 1000);
     return () => {
+      window.clearInterval(densityCheck);
+      densityQuery?.removeEventListener("change", updateBrowserZoom);
       window.removeEventListener("resize", updateBrowserZoom);
       window.visualViewport?.removeEventListener("resize", updateBrowserZoom);
     };
@@ -938,20 +1006,28 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         const y1 = clamp(Math.ceil((maxV + 0.03) / step) * step, 0, 1);
         view = { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
       }
-      const pixelScale = Math.max(0.05, Math.round(screenScale * dpr * 20) / 20);
-      const key = `${pixelScale}|${view.x}|${view.y}|${view.width}|${view.height}`;
+      // Exactly the device pixels the screen shows (not rounded to 5% steps, which made the
+      // browser resize the drawing by up to ~2% and soften every edge).
+      const pixelScale = Math.max(0.05, Math.round(screenScale * dpr * 1000) / 1000);
+      // exact: with CSS zoom the player's own devicePixelRatio is exact, so it sizes and aligns its
+      // canvas to whole screen pixels from that (cb-animate-bridge.js applyView).
+      const exact = useCssZoom && !renderMode;
+      // Thinnest outline in device pixels: 1.5 on 1× (Full HD) screens, Animate's outline weight there;
+      // 1 on 4K / Retina screens, unchanged.
+      const minStroke = screenDpr < 1.5 ? 1.5 : 1;
+      const key = `${pixelScale}|${view.x}|${view.y}|${view.width}|${view.height}|${exact}|${minStroke}|${dpr}`;
       if (lastViewKeyRef.current.get(object.id) === key) continue;
       lastViewKeyRef.current.set(object.id, key);
-      frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SET_VIEW", pixelScale, ...view }, "*");
+      frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SET_VIEW", pixelScale, ...view, exact, minStroke }, "*");
     }
-  }, [characterObjects, playhead, renderMode]);
+  }, [characterObjects, playhead, renderMode, useCssZoom, screenDpr]);
   const postCharacterViewsRef = useRef(postCharacterViews);
   postCharacterViewsRef.current = postCharacterViews;
 
   useEffect(() => {
     const frameId = window.requestAnimationFrame(() => postCharacterViews());
     return () => window.cancelAnimationFrame(frameId);
-  }, [postCharacterViews, effectiveScale, pan.x, pan.y, hostSize.width, hostSize.height, browserZoomFactor, readyCharacterIds]);
+  }, [postCharacterViews, effectiveScale, pan.x, pan.y, hostSize.width, hostSize.height, browserZoomFactor, screenDpr, readyCharacterIds]);
 
   useEffect(() => {
     const findObjectForSource = (source: MessageEventSource | null) => {
@@ -1286,8 +1362,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     element.style.left = `${x}px`;
     element.style.top = `${y}px`;
     if (object.type === "character") {
-      element.style.width = `${(object.sourceWidth || 1920) * scale * stretchX}px`;
-      element.style.height = `${(object.sourceHeight || 1920) * scale * stretchY}px`;
+      Object.assign(element.style, characterBoxCss((object.sourceWidth || 1920) * scale * stretchX, (object.sourceHeight || 1920) * scale * stretchY));
       const frame = frameRefs.current.get(object.id);
       if (frame) postCharacterEdits(frame, object, undefined, { ...start, x, y, scale });
     } else {
@@ -2499,7 +2574,9 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           width: `${hostSize.width}px`,
           height: `${hostSize.height}px`,
           transformOrigin: "0 0",
-          transform: renderMode ? "none" : `scale(${1 / Math.max(0.001, browserZoomFactor)})`,
+          ...(renderMode ? { transform: "none" }
+            : useCssZoom ? { zoom: 1 / Math.max(0.001, browserZoomFactor) }
+              : { transform: `scale(${1 / Math.max(0.001, browserZoomFactor)})` }),
         }}
       >
       <div
@@ -2507,9 +2584,16 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         style={{
           width: `${width}px`,
           height: `${height}px`,
-          left: `${fit.left + pan.x}px`,
-          top: `${fit.top + pan.y}px`,
-          transform: `scale(${effectiveScale})`,
+          // With CSS zoom the element's own left/top are zoomed too, so they are given in stage px.
+          ...(useCssZoom ? {
+            left: `${(fit.left + pan.x) / effectiveScale}px`,
+            top: `${(fit.top + pan.y) / effectiveScale}px`,
+            zoom: effectiveScale,
+          } : {
+            left: `${fit.left + pan.x}px`,
+            top: `${fit.top + pan.y}px`,
+            transform: `scale(${effectiveScale})`,
+          }),
           background: data.background || "#ffffff",
           // Grid squares and lines keep a fixed on-screen size at every zoom (world px = screen px / scale).
           ...(showTransparencyGrid ? {
@@ -2567,8 +2651,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
               const placeholderStyle = {
                 left: `${resolvedTransform.x}px`,
                 top: `${resolvedTransform.y}px`,
-                width: `${sourceWidth * scale}px`,
-                height: `${sourceHeight * scale}px`,
+                ...characterBoxCss(sourceWidth * scale, sourceHeight * scale),
                 transform: characterTransformCss(object, resolvedTransform.rotation || 0),
                 transformOrigin: "50% 50%",
                 zIndex: 350 + index,
@@ -2612,8 +2695,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                 className={`cb-stage-character ${lockClass} ${selected && !renderMode ? "selected" : ""} ${selected && activeCharacterPart && !renderMode ? "part-edit-mode" : ""}`}
                 style={{
                   ...baseStyle,
-                  width: `${sourceWidth * scale * stretchOf(object).x}px`,
-                  height: `${sourceHeight * scale * stretchOf(object).y}px`,
+                  ...characterBoxCss(sourceWidth * scale * stretchOf(object).x, sourceHeight * scale * stretchOf(object).y),
                   transform: characterTransformCss(object, resolvedTransform.rotation || 0),
                   transformOrigin: "50% 50%",
                   pointerEvents: "none",
