@@ -1,4 +1,4 @@
-.env
+
 __pycache__/
 *.py[cod]
 *.sqlite3
@@ -19,11 +19,7 @@ node_modules/
 # macOS installers
 *.dmg
 
-# Environment and secrets
-.env
-.env.local
-.env.production
-
+# Environment and 
 # Generated builds
 frontend/dist/
 frontend/out/
