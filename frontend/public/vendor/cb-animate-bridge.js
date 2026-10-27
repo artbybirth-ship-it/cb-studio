@@ -12,6 +12,7 @@
  *            resolution, for the visible region only, so zooming never pixelates. exact: the
  *            host zooms with CSS zoom, so this page's devicePixelRatio is used and the canvas is
  *            aligned to whole device pixels. minStroke: thinnest outline in device pixels (1).
+ *            seal: edge in device pixels that closes seams between touching fills (0 = off).
  * Player → editor messages (source "characterbazaarstudio-animate"):
  *   READY, CONTENT_BOUNDS, PART_SELECTED, PART_DRAG_PREVIEW, PART_DRAG_END, SEEK_DONE, ERROR
  */
@@ -824,9 +825,40 @@
   }
   installMinStroke();
 
+  // ---- Seamless joins (SET_VIEW seal, device px). The canvas anti-aliases every fill on its own, so
+  // where two pieces only touch (tie stripes on the tie) a sliver of what lies behind shows through as
+  // a light seam; Animate's renderer joins them. Each solid, fully opaque fill also gets an edge of its
+  // own colour cbSeal px wide (0.5 → a quarter pixel outward), so touching pieces overlap and the seam
+  // closes. See-through fills and bitmap fills are left alone. Off (0) on 4K screens and thumbnails.
+  var cbSeal = 0;
+  function opaqueColor(c) { var m = /^rgba\(([^)]*)\)$/i.exec(String(c || '').trim()); return !m || !(parseFloat(m[1].split(',')[3]) < 1); }
+  function opaqueStyle(style) {
+    if (typeof style === 'string') return opaqueColor(style);
+    var p = style && style.props;
+    return !!(p && p.colors && p.colors.every(opaqueColor));
+  }
+  function installSeal() {
+    var G = window.createjs && window.createjs.Graphics, F = G && G.Fill && G.Fill.prototype;
+    if (!F || F.__cbSeal) return;
+    var exec = F.exec;
+    F.__cbSeal = true;
+    F.exec = function (ctx) {
+      var result = exec.call(this, ctx);
+      if (!(cbSeal > 0) || this.matrix || !ctx.getTransform || ctx.globalAlpha < 1 || !opaqueStyle(this.style)) return result;
+      var m = ctx.getTransform(), scale = Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) || 1;
+      ctx.save();
+      ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = cbSeal / scale; ctx.lineJoin = 'round';
+      ctx.stroke();
+      ctx.restore();
+      return result;
+    };
+  }
+  installSeal();
+
   function cbReady() {
     if (cbReadySent) return;
     installMinStroke();
+    installSeal();
     var root = cbRoot(); if (!root) return;
     discover();
     cbReadySent = true;
@@ -847,7 +879,7 @@
   // Full HD), which fires no resize: redraw on a ratio change, and check once a second as a backstop.
   var cbViewSig = '';
   function viewSig() {
-    return [window.devicePixelRatio, window.innerWidth, window.innerHeight, cbMinStroke,
+    return [window.devicePixelRatio, window.innerWidth, window.innerHeight, cbMinStroke, cbSeal,
       cbView && [cbView.scale, cbView.x, cbView.y, cbView.width, cbView.height, cbView.exact].join(',')].join('|');
   }
   function refreshView() { if (!cbView) return; var sig = viewSig(); if (sig !== cbViewSig) applyView(); }
@@ -870,6 +902,7 @@
         exact: !!d.exact
       };
       cbMinStroke = clamp(Number(d.minStroke) || 1, 1, 8);
+      cbSeal = clamp(Number(d.seal) || 0, 0, 4);
       cbViewSig = '';
       applyView();
       return;

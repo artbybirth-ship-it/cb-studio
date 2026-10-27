@@ -1015,10 +1015,12 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       // Thinnest outline in device pixels: 1.5 on 1× (Full HD) screens, Animate's outline weight there;
       // 1 on 4K / Retina screens, unchanged.
       const minStroke = screenDpr < 1.5 ? 1.5 : 1;
-      const key = `${pixelScale}|${view.x}|${view.y}|${view.width}|${view.height}|${exact}|${minStroke}|${dpr}`;
+      // Seamless joins between touching pieces, as in Animate, on 1× screens (4K unchanged).
+      const seal = screenDpr < 1.5 ? 0.5 : 0;
+      const key = `${pixelScale}|${view.x}|${view.y}|${view.width}|${view.height}|${exact}|${minStroke}|${seal}|${dpr}`;
       if (lastViewKeyRef.current.get(object.id) === key) continue;
       lastViewKeyRef.current.set(object.id, key);
-      frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SET_VIEW", pixelScale, ...view, exact, minStroke }, "*");
+      frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SET_VIEW", pixelScale, ...view, exact, minStroke, seal }, "*");
     }
   }, [characterObjects, playhead, renderMode, useCssZoom, screenDpr]);
   const postCharacterViewsRef = useRef(postCharacterViews);

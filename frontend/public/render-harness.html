@@ -270,9 +270,9 @@
       }
     }, '*');
     // Sharp vectors: draw the whole player at the captured resolution (stage scale × device pixels).
-    // Outlines at least 1.5 px of the final (Full HD) video frame, Animate's weight; the frame is
-    // captured at captureScale and scaled down afterwards.
-    entry.frame.contentWindow.postMessage({source:'characterbazaarstudio-editor', type:'SET_VIEW', pixelScale:captureScale * Math.max(0.25, Number(window.devicePixelRatio || 1)), x:0, y:0, width:1, height:1, exact:stageZoomed, minStroke:1.5 * captureScale}, '*');
+    // Outlines at least 1.5 px of the final (Full HD) video frame, Animate's weight, and seamless joins
+    // between touching pieces; the frame is captured at captureScale and scaled down afterwards.
+    entry.frame.contentWindow.postMessage({source:'characterbazaarstudio-editor', type:'SET_VIEW', pixelScale:captureScale * Math.max(0.25, Number(window.devicePixelRatio || 1)), x:0, y:0, width:1, height:1, exact:stageZoomed, minStroke:1.5 * captureScale, seal:0.5 * captureScale}, '*');
   }
 
   function addCharacter(object, z){
