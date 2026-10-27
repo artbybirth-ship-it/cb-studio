@@ -31,6 +31,22 @@ For the current server PC LAN IP `192.168.1.42`:
 
 Inside the Studio, API requests use `/backend-api`, AI requests use `/ai-api`, and uploaded media uses `/media`. Next.js proxies those paths to the Docker services, so background/voice uploads work through the same `:3000` origin.
 
+## Use a Django backend on another server
+
+The browser continues to call the Studio on port `3000`; Next.js forwards API and media requests to Django. Set `CB_BACKEND_ORIGIN` in the root `.env` to the backend server origin (Django uses port `8000` in this project):
+
+```env
+CB_BACKEND_ORIGIN=http://122.180.242.125:8000
+```
+
+The backend server must accept connections from the frontend host on port `8000`, and its `DJANGO_ALLOWED_HOSTS` must include `122.180.242.125`. Then restart the frontend:
+
+```bash
+docker compose up -d --build frontend
+```
+
+Use HTTPS instead of HTTP when the backend is exposed beyond a trusted private network. The Django API in this project currently has no application authentication, so do not expose it publicly without adding appropriate access controls.
+
 ## If the LAN IP changes
 
 The Studio itself no longer needs `NEXT_PUBLIC_API_URL` to be changed. If you also want to open ports `8000`/`8100` directly from other PCs, update these `.env` values with the new LAN IP:

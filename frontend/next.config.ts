@@ -9,9 +9,8 @@ const aiOrigin = (process.env.CB_AI_ORIGIN || process.env.AI_ORIGIN || "").trim(
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   output: "standalone",
-  // Development only: other computers on the local network (the Mac mini at 192.168.1.58) may use
-  // the dev server's live-update connection, so open pages update without a refresh.
-  allowedDevOrigins: ["192.168.1.58"],
+  // Development only: allow LAN and public-IP clients to use the dev server's live-update connection.
+  allowedDevOrigins: ["192.168.1.58", "192.168.1.114", "122.180.242.125"],
   async rewrites() {
     const beforeFiles: { source: string; destination: string }[] = [];
     if (backendOrigin) {
