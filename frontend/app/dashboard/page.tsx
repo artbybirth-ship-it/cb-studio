@@ -153,7 +153,7 @@ export default function Dashboard() {
 
           <div className="cb-welcome-panel">
             {mode !== "open" && <>
-              <div className="cb-welcome-copy"><strong>Welcome to Character Bazaar studio, <b>Rohit</b></strong><span>Learn How to Use CB studio!</span></div>
+              <div className="cb-welcome-copy"><strong>Welcome to Character Bazaar studio, <b>Rohit!</b></strong><span>Learn How to Use CB studio!</span></div>
               <div className="cb-tutorial-grid">
                 {[1,2,3,4,5,6,7,8].map((item) => (
                   <button key={item} type="button" onClick={() => setTutorialNotice(item)} aria-label={`Tutorial ${String(item).padStart(2, "0")}: video coming soon`}>
