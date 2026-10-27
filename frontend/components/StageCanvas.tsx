@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, MutableRefObject, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import type { CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject } from "@/types";
 import { fontCss } from "@/lib/fonts";
+import RenderDiagnostics, { type RenderDiagnosticsInfo } from "@/components/RenderDiagnostics";
 import { resolveCharacterTransformAtTime, type CharacterTransform } from "@/lib/keyframes";
 import { resolvePartOverridesAtTime, resolvePartTransformAtTime, resolveSourceSeekMs, type PartTransform } from "@/lib/partKeyframes";
 
@@ -957,6 +958,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   // at exactly that resolution for the visible region (cb-animate-bridge.js SET_VIEW), so
   // zooming in never stretches a bitmap and memory stays bounded by the screen size.
   const lastViewKeyRef = useRef<Map<string, string>>(new Map());
+  const lastViewSentRef = useRef<Map<string, Record<string, unknown>>>(new Map());
   const postCharacterViews = useCallback(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -1020,11 +1022,29 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       const key = `${pixelScale}|${view.x}|${view.y}|${view.width}|${view.height}|${exact}|${minStroke}|${seal}|${dpr}`;
       if (lastViewKeyRef.current.get(object.id) === key) continue;
       lastViewKeyRef.current.set(object.id, key);
+      lastViewSentRef.current.set(object.id, { pixelScale, ...view, exact, minStroke, seal });
       frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SET_VIEW", pixelScale, ...view, exact, minStroke, seal }, "*");
     }
   }, [characterObjects, playhead, renderMode, useCssZoom, screenDpr]);
   const postCharacterViewsRef = useRef(postCharacterViews);
   postCharacterViewsRef.current = postCharacterViews;
+
+  // Sharpness readout for diagnosing a screen (?cbdiag=1 in the address; never in render mode).
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  useEffect(() => { setShowDiagnostics(!renderMode && new URLSearchParams(window.location.search).get("cbdiag") === "1"); }, [renderMode]);
+  const diagnosticsRef = useRef<() => RenderDiagnosticsInfo>(() => ({ stageZoom: 1, cssZoom: false, screenDpr: 1, browserZoomFactor: 1, frame: null, lastView: null }));
+  diagnosticsRef.current = () => {
+    const first = characterObjects.find((object) => frameRefs.current.get(object.id));
+    return {
+      stageZoom: effectiveScale,
+      cssZoom: useCssZoom,
+      screenDpr,
+      browserZoomFactor,
+      frame: first ? frameRefs.current.get(first.id) || null : null,
+      lastView: first ? lastViewSentRef.current.get(first.id) || null : null,
+    };
+  };
+  const readDiagnostics = useCallback(() => diagnosticsRef.current(), []);
 
   useEffect(() => {
     const frameId = window.requestAnimationFrame(() => postCharacterViews());
@@ -2567,6 +2587,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       onPointerCancel={endPan}
     >
       {marquee && <div className="cb-selection-marquee" style={marquee} aria-hidden="true" />}
+      {showDiagnostics && <RenderDiagnostics read={readDiagnostics} />}
       <div
         className="cb-browser-zoom-stable-viewport"
         style={{
