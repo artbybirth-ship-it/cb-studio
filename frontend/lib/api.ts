@@ -80,6 +80,16 @@ export const api = {
     form.append("file", file);
     return request<Asset>(`${API}/assets/upload`, { method: "POST", body: form });
   },
+  /** A font from this computer (Text panel), with its family and style for the team's font list. */
+  uploadFont: (projectId: string, file: File, meta: Record<string, string>) => {
+    const form = new FormData();
+    form.append("project", projectId);
+    form.append("kind", "font");
+    form.append("file", file);
+    for (const [key, value] of Object.entries(meta)) form.append(key, value);
+    return request<Asset>(`${API}/assets/upload`, { method: "POST", body: form });
+  },
+  listFonts: () => request<import("@/lib/localFonts").TeamFont[]>(`${API}/assets/fonts`),
   listCharacterLibraries: () => request<CharacterLibraryResponse>(`${API}/assets/character-library`),
   uploadCharacterLibrary: (file: File) => {
     const form = new FormData();

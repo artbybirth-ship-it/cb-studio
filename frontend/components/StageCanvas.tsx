@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, MutableRefObject, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import type { CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject } from "@/types";
-import { fontCss } from "@/lib/fonts";
+import { textCss } from "@/lib/textStyle";
 import RenderDiagnostics, { type RenderDiagnosticsInfo } from "@/components/RenderDiagnostics";
 import type { LayerGeometry } from "@/lib/layerTransform";
 import { resolveCharacterTransformAtTime, type CharacterTransform } from "@/lib/keyframes";
@@ -23,7 +23,19 @@ type Props = {
   onDuplicateMoved?: (moves: Array<{ id: string; x: number; y: number }>) => void;
   /** Adobe Animate tools: "select" (V) shows a blue outline; "transform" (Q) shows the handles;
    *  "scale" (S, Illustrator) drags anywhere to scale the selection about its registration point. */
-  toolMode?: "select" | "transform" | "scale" | "zoom";
+  toolMode?: "select" | "transform" | "scale" | "zoom" | "text";
+  /** Text tool (Illustrator point type): the text layer being typed into (caret at clientX/Y, else
+   *  at the end). The text is uncontrolled while editing; every change goes out through onTextInput. */
+  editingText?: { id: string; clientX?: number; clientY?: number; nonce: number } | null;
+  /** Text tool: a press on the stage (not on a text layer) starts new text there (stage px). */
+  onCreateText?: (x: number, y: number) => void;
+  /** Text tool press, or a double-click with the selection tools, on a text layer. */
+  onEditText?: (id: string, clientX?: number, clientY?: number) => void;
+  onTextInput?: (id: string, text: string) => void;
+  /** Esc in the text being typed. */
+  onTextEditEnd?: () => void;
+  /** Filled by the canvas: a text layer's box in its own (unscaled) stage px. */
+  textSizeRef?: MutableRefObject<((objectId: string) => { width: number; height: number } | null) | null>;
   /** Show the graph-paper transparency grid instead of the canvas colour (editor view only). */
   transparencyGrid?: boolean;
   /** Animate's "Clip content outside the Stage". Off: objects overlap the pasteboard while editing. Render mode always clips. */
@@ -221,7 +233,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, previewColorReplacement = null, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, previewColorReplacement = null, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -709,6 +721,30 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     if (!element) return null;
     const kx = Number(object.scale || 1) * stretch.x, ky = Number(object.scale || 1) * stretch.y;
     return { left: (-element.offsetWidth / 2) * kx, top: (-element.offsetHeight / 2) * ky, width: element.offsetWidth * kx, height: element.offsetHeight * ky };
+  };
+  // Text being typed: filled once when editing starts (then left to the browser), focused, with the
+  // caret where the text was clicked (else at the end).
+  const textEditRef = useRef<HTMLSpanElement | null>(null);
+  useLayoutEffect(() => {
+    const element = textEditRef.current;
+    if (!editingText || !element) return;
+    const object = objects.find((item) => item.id === editingText.id);
+    element.textContent = object?.text ?? "";
+    element.focus({ preventScroll: true });
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = editingText.clientX != null && editingText.clientY != null
+      ? (document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null }).caretRangeFromPoint?.(editingText.clientX, editingText.clientY)
+      : null;
+    const caret = range && element.contains(range.startContainer) ? range : document.createRange();
+    if (caret !== range) { caret.selectNodeContents(element); caret.collapse(false); }
+    selection.removeAllRanges();
+    selection.addRange(caret);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingText?.id, editingText?.nonce]);
+  if (textSizeRef) textSizeRef.current = (objectId: string) => {
+    const element = hostRef.current?.querySelector<HTMLElement>(`.cb-stage-text[data-editor-object-id="${CSS.escape(objectId)}"]`);
+    return element ? { width: element.offsetWidth, height: element.offsetHeight } : null;
   };
   const showTransparencyGrid = transparencyGrid && !renderMode;
   const gridScreenScale = Math.max(0.001, effectiveScale / Math.max(0.001, browserZoomFactor));
@@ -2588,7 +2624,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   return (
     <div
       ref={hostRef}
-      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""}`}
+      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""}`}
       onWheel={handleWheel}
       // Scale tool (S) takes the drag before objects or the marquee see it.
       onPointerDownCapture={(event) => {
@@ -2598,6 +2634,18 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         // Hand tool (Space held): pan from anywhere on the canvas. Taken here, before any part, handle
         // or object sees the press, so nothing is picked or moved in any mode.
         if (spacePanning) { beginPan(event); return; }
+        // A press in the text being typed moves the caret: nothing is selected or dragged.
+        if ((event.target as HTMLElement).closest?.(".cb-stage-text-editing")) { event.stopPropagation(); return; }
+        // Text tool (T): a press on a text layer types into it; anywhere else starts new text there.
+        if (toolMode === "text" && !renderMode && event.button === 0) {
+          event.preventDefault();
+          event.stopPropagation();
+          const id = (event.target as HTMLElement).closest?.<HTMLElement>("[data-editor-object-id]")?.dataset.editorObjectId;
+          const hit = id ? objects.find((item) => item.id === id) : undefined;
+          if (hit?.type === "text" && !hit.locked) onEditText?.(hit.id, event.clientX, event.clientY);
+          else { const point = clientToWorld(event.clientX, event.clientY); onCreateText?.(point.x, point.y); }
+          return;
+        }
         // Zoom tool: every press zooms; nothing is selected or moved.
         if (toolMode === "zoom" && !renderMode && event.button === 0) { beginZoomTool(event); return; }
         // Eyedropper (Recolour panel): this press samples a colour and selects nothing.
@@ -2832,14 +2880,23 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           }
 
           if (object.type === "text") {
+            const editing = !renderMode && editingText?.id === object.id;
             return (
               <div
                 key={object.id}
                 data-editor-object-id={object.id}
-                className={`cb-stage-text ${lockClass} ${selected && !renderMode ? "selected" : ""}`}
-                style={{ ...baseStyle, color: object.fillColor || "#fff", fontFamily: fontCss(object.fontFamily), fontSize: `${Number(object.fontSize || 52)}px`, transform: layerTransformCss(object, object.rotation || 0, object.scale || 1, stretchOf(object).x, stretchOf(object).y), transformOrigin: "50% 50%" }}
-                onPointerDown={(event) => beginDrag(event, object)}
-              >{object.text || object.name}{renderSelectionGizmo(object, selected)}</div>
+                className={`cb-stage-text ${lockClass} ${selected && !renderMode && !editing ? "selected" : ""} ${editing ? "cb-stage-text-editing" : ""}`}
+                style={{ ...baseStyle, ...textCss(object), transform: layerTransformCss(object, object.rotation || 0, object.scale || 1, stretchOf(object).x, stretchOf(object).y), transformOrigin: "50% 50%" }}
+                onPointerDown={(event) => { if (!editing) beginDrag(event, object); }}
+                onDoubleClick={(event) => { if (!editing && !object.locked && toolMode !== "zoom") { event.stopPropagation(); onEditText?.(object.id, event.clientX, event.clientY); } }}
+              >
+                {editing
+                  ? <span key={`edit-${editingText?.nonce}`} ref={textEditRef} className="cb-stage-text-input" contentEditable="plaintext-only" suppressContentEditableWarning spellCheck={false}
+                      onInput={(event) => onTextInput?.(object.id, event.currentTarget.innerText.replace(/\n$/, ""))}
+                      onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onTextEditEnd?.(); } }} />
+                  : <span className="cb-stage-text-content">{object.text ?? object.name}</span>}
+                {!editing && renderSelectionGizmo(object, selected)}
+              </div>
             );
           }
 

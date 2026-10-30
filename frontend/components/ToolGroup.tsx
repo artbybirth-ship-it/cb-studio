@@ -7,7 +7,7 @@ import PanelClose from "@/components/PanelClose";
 /**
  * A tool rail group (Illustrator): a labelled button whose corner mark shows it holds more tools.
  * A plain click runs `onPrimary` (the group's current tool), or opens the panel when there is none;
- * a half-second press, or a click on the corner mark, opens the panel beside the rail.
+ * a double-click, a half-second press, or a click on the corner mark, opens the panel beside the rail.
  */
 export type ToolGroupItem = {
   id: string;
@@ -50,11 +50,14 @@ type Props = {
   buttonRef?: RefObject<HTMLButtonElement | null>;
   /** Any press on the button (click, hold or the corner mark): the rail highlights this group. */
   onPress?: () => void;
+  /** The group's panel is the editor's own (Text panel): hold or the corner mark call this instead. */
+  onOpenPanel?: () => void;
+  panelOpen?: boolean;
 };
 
 const LONG_PRESS_MS = 500;
 
-export default function ToolGroup({ label, icon, title, active = false, onPrimary, items = [], children, panelTitle, panelClassName = "", buttonRef, onPress }: Props) {
+export default function ToolGroup({ label, icon, title, active = false, onPrimary, items = [], children, panelTitle, panelClassName = "", buttonRef, onPress, onOpenPanel, panelOpen = false }: Props) {
   const ownRef = useRef<HTMLButtonElement>(null);
   const anchorRef = buttonRef || ownRef;
   const [open, setOpen] = useState(false);
@@ -63,7 +66,8 @@ export default function ToolGroup({ label, icon, title, active = false, onPrimar
   useEffect(() => { if (!open) setSubmenu(null); }, [open]);
   const pressTimer = useRef(0);
   const longPressed = useRef(false);
-  const hasPanel = items.length > 1 || Boolean(children);
+  const hasPanel = items.length > 1 || Boolean(children) || Boolean(onOpenPanel);
+  const openPanel = () => (onOpenPanel ? onOpenPanel() : setOpen(true));
 
   const cancelPress = () => window.clearTimeout(pressTimer.current);
   return (
@@ -72,19 +76,19 @@ export default function ToolGroup({ label, icon, title, active = false, onPrimar
       <button
         type="button"
         ref={anchorRef}
-        className={`cb-tool-group-button ${active ? "active" : ""} ${open ? "open" : ""}`}
+        className={`cb-tool-group-button ${active ? "active" : ""} ${open || panelOpen ? "open" : ""}`}
         aria-label={label}
         aria-haspopup={hasPanel ? "menu" : undefined}
-        aria-expanded={hasPanel ? open : undefined}
+        aria-expanded={hasPanel ? open || panelOpen : undefined}
         aria-pressed={onPrimary ? active : undefined}
-        title={hasPanel ? `${title} · hold, or click the corner mark, for more` : title}
+        title={hasPanel ? `${title} · double-click, hold, or click the corner mark, for more` : title}
         onPointerDown={(event) => {
           if (event.button !== 0) return;
           onPress?.();
           if (!hasPanel) return;
           longPressed.current = false;
           cancelPress();
-          pressTimer.current = window.setTimeout(() => { longPressed.current = true; setOpen(true); }, LONG_PRESS_MS);
+          pressTimer.current = window.setTimeout(() => { longPressed.current = true; openPanel(); }, LONG_PRESS_MS);
         }}
         onPointerUp={cancelPress}
         onPointerLeave={cancelPress}
@@ -92,15 +96,18 @@ export default function ToolGroup({ label, icon, title, active = false, onPrimar
           cancelPress();
           if (event.detail === 0) onPress?.(); // keyboard: Enter / Space
           if (longPressed.current) { longPressed.current = false; return; }
+          // The second click of a double-click opens the panel (never closes it); the first one has
+          // already done its usual job (the group's tool, or opening the panel).
+          if (hasPanel && event.detail >= 2) { if (onOpenPanel) { if (!panelOpen) onOpenPanel(); } else setOpen(true); return; }
           const onMark = (event.target as HTMLElement).closest?.(".cb-tool-group-mark");
-          if (hasPanel && (onMark || !onPrimary)) { setOpen((value) => !value); return; }
+          if (hasPanel && (onMark || !onPrimary)) { if (onOpenPanel) onOpenPanel(); else setOpen((value) => !value); return; }
           onPrimary?.();
         }}
       >
         {icon}
         {hasPanel && <span className="cb-tool-group-mark" aria-hidden="true" />}
       </button>
-      {hasPanel && (
+      {hasPanel && !onOpenPanel && (
         <Popover open={open} anchorRef={anchorRef} onClose={() => setOpen(false)} placement="right" offset={10} className={`cb-tool-flyout ${panelClassName}`} aria-label={panelTitle || label}>
           <div className="cb-tool-flyout-head"><PanelClose onClose={() => setOpen(false)} label={`Close ${panelTitle || label}`} />{panelTitle || label}</div>
           {items.length > 0 && (

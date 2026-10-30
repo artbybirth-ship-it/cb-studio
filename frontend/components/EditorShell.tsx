@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { api } from "@/lib/api";
 import { SCRUB_END, SCRUB_START } from "@/lib/scrub";
 import { useEscClose } from "@/lib/escClose";
@@ -18,7 +18,6 @@ import { buildProjectFile, formatEditedAgo, openProjectFileAsNew, saveProjectFil
 import Timeline, { selectionLayerIds, type FrameAction, type FrameSelection } from "./Timeline";
 import CharacterEditPanel from "./CharacterEditPanel";
 import RecolorPanel from "./RecolorPanel";
-import TextLayerPanel from "./TextLayerPanel";
 import FindReplaceDialog from "./FindReplaceDialog";
 import { addColorRule, addCounts, applyToEditorData, charactersUsingColour, describeCounts, emptyCounts, libraryIdOf, normalizeHex, totalCount, visibleAt, type FindRequest } from "@/lib/findReplace";
 import { shiftLightness } from "@/lib/color";
@@ -36,6 +35,12 @@ import {
   AlignBottomIcon, AlignHCenterIcon, AlignIcon, AlignLeftIcon, AlignRightIcon, AlignTopIcon, AlignVCenterIcon, ColourIcon, DistributeHIcon, DistributeVIcon,
   ExportIcon, FileIcon, FillIcon, ImportIcon, NewFileIcon, OpenFileIcon, RecolourIcon, ReflectIcon, SaveAsIcon, SaveIcon, ScaleIcon, SelectIcon, StrokeIcon, SwapIcon, TextIcon, TransformIcon,
 } from "./toolIcons";
+import TextPanel, { type TextValues } from "./TextPanel";
+import TextColourPalette from "./TextColourPalette";
+import { keepTextAnchor } from "@/lib/textStyle";
+import { renderStage, setStageRenderer } from "@/lib/stageSnapshot";
+import { BUILTIN_FAMILIES, ensureFontFace, type FontFaceInfo, type FontFamilyInfo } from "@/lib/fonts";
+import { teamFamilies, uploadSystemFont, type TeamFont } from "@/lib/localFonts";
 import ExportPanel, { exportExtension, exportFormatLabel, type ExportFormat, type ExportResolution } from "./ExportPanel";
 import { deliverExport, pickExportTarget, type ExportTarget } from "@/lib/exportFile";
 import { playChime, unlockChime } from "@/lib/chime";
@@ -1412,6 +1417,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         setRailHighlight("edit");
         return;
       }
+      if (plainKey && !event.shiftKey && event.key.toLowerCase() === "t") {
+        // Text tool (Illustrator T); then Return opens the Text panel.
+        event.preventDefault();
+        setActiveTool("text");
+        setRailHighlight("text");
+        return;
+      }
       if (plainKey && !event.shiftKey && event.key.toLowerCase() === "z") {
         // Illustrator's Zoom tool (Cmd/Ctrl+Z stays Undo).
         event.preventDefault();
@@ -1432,7 +1444,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         setRailHighlight("edit");
         return;
       }
-      if (event.key === "Escape" && !activeCharacterPart) setActiveTool((tool) => (tool === "scale" || tool === "tone" || tool === "reflect" || tool === "zoom" ? "select" : tool));
+      if (event.key === "Escape" && !activeCharacterPart) setActiveTool((tool) => (tool === "scale" || tool === "tone" || tool === "reflect" || tool === "zoom" || tool === "text" ? "select" : tool));
 
       const commandOrControl = event.metaKey || event.ctrlKey;
       // Cmd/Ctrl+S save (.cb), Shift = Save As; Cmd/Ctrl+O open a .cb — also while typing.
@@ -1478,6 +1490,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         event.preventDefault();
         transformToggleRef.current();
         return;
+      }
+      if (commandOrControl && event.shiftKey && !event.altKey && (event.code === "KeyL" || event.code === "KeyC" || event.code === "KeyR")
+        && (!isEditableTarget(event.target) || (event.target as HTMLElement).closest?.(".cb-stage-text-editing"))) {
+        if (textAlignRef.current(event.code === "KeyL" ? "left" : event.code === "KeyC" ? "center" : "right")) { event.preventDefault(); event.stopImmediatePropagation(); return; }
       }
       if (!commandOrControl || isEditableTarget(event.target)) return;
 
@@ -1557,15 +1573,152 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return () => window.removeEventListener("keydown", onEditorShortcut, { capture: true });
   }, [activeCharacterPart, changeSelection, redo, resetCanvasView, showNotice, undo]);
 
-  const addText = () => {
+  // ---- Text tool (Illustrator point type, horizontal) and the Text panel. Click the stage with the
+  // Text tool (T) to type new text there, or click / double-click text to type into it; Esc ends.
+  // While typing, the first change is the undo step and a colour palette sits beside the text.
+  const [editingText, setEditingText] = useState<{ id: string; clientX?: number; clientY?: number; nonce: number } | null>(null);
+  const editingTextRef = useRef(editingText);
+  editingTextRef.current = editingText;
+  const [textPanelOpen, setTextPanelOpen] = useState(false);
+  const textRailRef = useRef<HTMLButtonElement>(null);
+  const textSizeRef = useRef<((id: string) => { width: number; height: number } | null) | null>(null);
+  // The Text panel's settings for the next text typed (Illustrator keeps the last ones used).
+  const [textDefaults, setTextDefaults] = useState<TextValues & { fillColor?: string }>({
+    fontFamily: "Arial", fontWeight: 400, fontStyle: "normal", fontSize: 52, textAlign: "left", letterSpacing: 0, fillColor: "#000000",
+  });
+  const [teamFonts, setTeamFonts] = useState<TeamFont[]>([]);
+  useEffect(() => { void api.listFonts().then(setTeamFonts).catch(() => setTeamFonts([])); }, []);
+  const installedFamilies = useMemo(() => [
+    ...BUILTIN_FAMILIES,
+    ...teamFamilies(teamFonts).filter((family) => !BUILTIN_FAMILIES.some((builtin) => builtin.name === family.name)),
+  ], [teamFonts]);
+  // Uploaded fonts (from someone's computer) used by this scene's text.
+  useEffect(() => {
+    for (const object of draft?.objects || []) {
+      if (object.type === "text" && object.fontUrl && object.fontFamily) ensureFontFace(object.fontFamily, object.fontWeight ?? 400, object.fontStyle === "italic", object.fontUrl);
+    }
+  }, [draft]);
+  const selectedText = selected?.type === "text" && selectedObjectIds.length <= 1 ? selected : null;
+  const editingLayer = editingText ? draft?.objects.find((item) => item.id === editingText.id) || null : null;
+  const textTarget = editingLayer || selectedText;
+
+  // Point text keeps its anchor (left / middle / right of the first line) still while it is typed
+  // into or restyled, including when a font arrives later (lib/textStyle keepTextAnchor).
+  const anchorTrackRef = useRef<{ id: string; width: number; height: number; align: "left" | "center" | "right" } | null>(null);
+  const [fontsLoadedTick, setFontsLoadedTick] = useState(0);
+  useEffect(() => {
+    const loaded = () => setFontsLoadedTick((tick) => tick + 1);
+    document.fonts?.addEventListener?.("loadingdone", loaded);
+    return () => document.fonts?.removeEventListener?.("loadingdone", loaded);
+  }, []);
+  useLayoutEffect(() => {
+    const object = textTarget?.type === "text" ? draft?.objects.find((item) => item.id === textTarget.id) : null;
+    if (!object) { anchorTrackRef.current = null; return; }
+    const size = textSizeRef.current?.(object.id);
+    if (!size) return;
+    const align = object.textAlign || "center";
+    const track = anchorTrackRef.current;
+    anchorTrackRef.current = { id: object.id, ...size, align };
+    if (!track || track.id !== object.id || (track.width === size.width && track.height === size.height && track.align === align)) return;
+    const next = keepTextAnchor(object, track, size, track.align, align);
+    if (Math.abs(next.x - object.x) < 0.01 && Math.abs(next.y - object.y) < 0.01) return;
+    setDirty(true);
+    setDraft((current) => (current ? { ...current, objects: current.objects.map((item) => (item.id === object.id ? { ...item, x: next.x, y: next.y } : item)) } : current));
+  }, [draft, textTarget?.id, fontsLoadedTick]);
+
+  // The canvas eyedropper (every colour picker) draws the scene at the playhead through this.
+  const playheadNowRef = useRef(playhead);
+  playheadNowRef.current = playhead;
+  useEffect(() => {
+    setStageRenderer(async (scale) => {
+      const data = draftRef.current;
+      const current = useEditorStore.getState().project;
+      if (!data || !current) return null;
+      return renderStage(data, current.width, current.height, {
+        width: current.width * scale, seconds: playheadNowRef.current, characterCap: 4096,
+        elementFor: (id) => document.querySelector<HTMLElement>(`.cb-stage-world [data-editor-object-id="${CSS.escape(id)}"]`),
+      });
+    });
+    return () => setStageRenderer(null);
+  }, []);
+
+  /** Ends typing; empty text is removed. Esc also goes back to the Selection tool (Illustrator). */
+  const endTextEdit = (toSelection: boolean) => {
+    const current = editingTextRef.current;
+    if (!current) return;
+    editingTextRef.current = null;
+    setEditingText(null);
+    scrubHistoryRef.current = "idle";
+    const object = draftRef.current?.objects.find((item) => item.id === current.id);
+    if (object && !(object.text || "").trim()) {
+      setDraft((data) => (data ? { ...data, objects: data.objects.filter((item) => item.id !== current.id) } : data));
+      selectObject(null);
+    }
+    if (toSelection) { setActiveTool("select"); setRailHighlight("edit"); }
+  };
+  const startTextEdit = (id: string, clientX?: number, clientY?: number) => {
+    if (editingTextRef.current && editingTextRef.current.id !== id) endTextEdit(false);
+    selectObject(id);
+    setActiveCharacterPart(null);
+    scrubHistoryRef.current = "armed"; // the first change while typing is one undo step
+    setEditingText({ id, clientX, clientY, nonce: Date.now() });
+  };
+  const createTextAt = (x: number, y: number) => {
     if (!project) return;
+    endTextEdit(false);
+    const defaults = textDefaults;
     const object: EditorObject = {
-      id: `text-${Date.now()}`, type: "text", name: "Text", text: "Your text",
-      x: project.width / 2, y: project.height / 2, scale: 1, rotation: 0, opacity: 1, startTime: 0,
+      id: `text-${Date.now()}`, type: "text", name: "Text", text: "", x, y, scale: 1, rotation: 0, opacity: 1, startTime: 0,
+      fillColor: defaults.fillColor || "#000000", fontFamily: defaults.fontFamily, fontWeight: defaults.fontWeight, fontStyle: defaults.fontStyle,
+      fontUrl: defaults.fontUrl, fontSize: defaults.fontSize, lineHeight: defaults.lineHeight, letterSpacing: defaults.letterSpacing,
+      textAlign: defaults.textAlign || "left", textShadow: false,
     };
     mutate((data) => placeInLayer(data, object, selectedIdsRef.current[0]));
     selectObject(object.id);
+    scrubHistoryRef.current = "recorded"; // adding the text was the undo step
+    setEditingText({ id: object.id, nonce: Date.now() });
   };
+  const addText = () => { if (project) createTextAt(project.width / 2, project.height / 2); };
+  const typeText = (id: string, text: string) => {
+    mutate((data) => { const item = data.objects.find((object) => object.id === id); if (item) item.text = text; });
+  };
+  /** Text panel / palette change: the text being typed or the selected text layer, and the defaults. */
+  const applyTextPatch = (patch: Partial<EditorObject>) => {
+    setTextDefaults((current) => ({ ...current, ...patch }));
+    const id = editingTextRef.current?.id || (selected?.type === "text" ? selected.id : null);
+    if (!id) return;
+    mutate((data) => { const item = data.objects.find((object) => object.id === id); if (item) Object.assign(item, patch); });
+  };
+  const pickFontFace = async (family: FontFamilyInfo, face: FontFaceInfo) => {
+    let fontUrl = face.url;
+    if (family.source === "system" && face.postscriptName && project) {
+      try {
+        showNotice(`Adding ${family.name} to the project…`);
+        fontUrl = await uploadSystemFont(project.id, face.postscriptName, teamFonts);
+        void api.listFonts().then(setTeamFonts).catch(() => undefined);
+      } catch (error) { showNotice(error instanceof Error ? error.message : "The font could not be added", "error"); return; }
+    }
+    if (fontUrl) ensureFontFace(family.name, face.weight, face.italic, fontUrl);
+    applyTextPatch({ fontFamily: family.name, fontWeight: face.weight, fontStyle: face.italic ? "italic" : "normal", fontUrl });
+  };
+  const textAlignRef = useRef<(align: "left" | "center" | "right") => boolean>(() => false);
+  textAlignRef.current = (align) => {
+    if (!editingTextRef.current && selected?.type !== "text" && !textPanelOpen) return false;
+    applyTextPatch({ textAlign: align });
+    return true;
+  };
+  useEscClose(Boolean(editingText), () => endTextEdit(true));
+  // A press outside the text (and outside the Text panel, palette and colour picker) ends typing.
+  useEffect(() => {
+    if (!editingText) return;
+    const press = (event: PointerEvent) => {
+      if ((event.target as HTMLElement | null)?.closest?.(".cb-stage-text-editing, [data-text-ui], .cb-cp-backdrop")) return;
+      endTextEdit(false);
+    };
+    document.addEventListener("pointerdown", press, true);
+    return () => document.removeEventListener("pointerdown", press, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingText]);
 
   const addProp = (name = "Static Prop") => {
     if (!project) return;
@@ -2281,7 +2434,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       const node = target as HTMLElement | null;
       if (!node) return false;
       const tag = (node.tagName || "").toLowerCase();
-      return tag === "input" || tag === "textarea" || tag === "select" || Boolean(typeof node.closest === "function" && node.closest('[contenteditable="true"]'));
+      return tag === "input" || tag === "textarea" || tag === "select" || node.isContentEditable;
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2303,6 +2456,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         // Reflect tool + Enter = the Reflect dialog (Illustrator); otherwise Enter plays (Animate).
         event.preventDefault();
         openReflectRef.current();
+        return;
+      }
+      if (event.key === "Enter" && activeToolRef.current === "text" && !editingTextRef.current) {
+        event.preventDefault();
+        setTextPanelOpen((open) => !open);
         return;
       }
       if (event.key === "Enter") {
@@ -2976,6 +3134,22 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       {reflectOpen && (
         <ReflectDialog target={reflectTarget} canCopy={!reflectTarget} onPreview={previewReflect} onApply={applyReflect} onCancel={cancelReflect} />
       )}
+      {textPanelOpen && (
+        <TextPanel values={textTarget || textDefaults} installed={installedFamilies} textToolActive={activeTool === "text"} anchorRef={textRailRef}
+          onTextTool={() => { setActiveTool("text"); setRailHighlight("text"); }} onChange={applyTextPatch}
+          onPickFace={(family, face) => void pickFontFace(family, face)} onClose={() => setTextPanelOpen(false)} />
+      )}
+      {editingLayer && (
+        <TextColourPalette colour={editingLayer.fillColor || "#ffffff"} onPick={(hex) => applyTextPatch({ fillColor: hex })}
+          effects={{ stroke: Boolean(editingLayer.textStrokeColor), shadow: Boolean(editingLayer.textShadowColor) }}
+          // Fill/Stroke › Create: the text colour, plus an outline / a shadow in it when ticked (unticked removes them).
+          onFillStroke={(hex, effects) => applyTextPatch({
+            fillColor: hex,
+            textStrokeColor: effects.stroke ? hex : undefined,
+            textShadowColor: effects.shadow ? hex : undefined,
+            ...(effects.shadow ? {} : { textShadow: false }),
+          })} />
+      )}
       {exportOpen && <ExportPanel portrait={Boolean(project && project.height > project.width)} onClose={() => setExportOpen(false)} onExport={(format, resolution) => void beginExport(format, resolution)} />}
       {transformOpen && (
         <TransformPanel read={readTransform} onChange={changeTransform} onClose={() => setTransformOpen(false)} shortcut={transformShortcut}
@@ -3018,7 +3192,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               { id: "open", label: "Open file", shortcut: "⌘ O", icon: <OpenFileIcon />, title: "Recent projects, or open a .cb file from this device", onSelect: () => { if (!openPanel) toggleOpenPanel(); } },
               { id: "new", label: "New file", shortcut: transformShortcut === "⌘T" ? "⌘ N" : "⌥ ⌘ N", icon: <NewFileIcon />, title: "Start a new project", onSelect: newFile },
             ]} />
-          <ToolGroup label="Text" icon={<TextIcon />} active={railHighlight === "text"} onPress={() => setRailHighlight("text")} title="Text tool" onPrimary={() => { setActiveTool("text"); addText(); }} />
+          <ToolGroup label="Text" icon={<TextIcon />} active={railHighlight === "text"} onPress={() => setRailHighlight("text")} buttonRef={textRailRef}
+            title="Text tool (T): click the canvas to type; double-click, hold, or T then Return, for the Text panel"
+            onPrimary={() => setActiveTool("text")} onOpenPanel={() => setTextPanelOpen((open) => !open)} panelOpen={textPanelOpen} />
           <ToolGroup label="Colour" panelTitle="Colour" icon={<ColourIcon />} active={railHighlight === "colour"} onPress={() => setRailHighlight("colour")} title="Fill and stroke colours, and recolouring"
             items={[
               { id: "fill", label: "Fill colour", icon: <FillIcon />, disabled: !boxState.fill, title: boxState.fill ? `Fill ${boxState.fill}: choose a colour` : "This layer has no fill colour", onSelect: () => { setActiveBox("fill"); setBoxPicker("fill"); } },
@@ -3230,7 +3406,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               selectedObjectId={selectedObjectId}
               selectedObjectIds={selectedObjectIds}
               onSelectionChange={changeSelectionFromCanvas}
-              toolMode={activeTool === "scale" ? "scale" : activeTool === "zoom" ? "zoom" : "transform"}
+              toolMode={activeTool === "scale" ? "scale" : activeTool === "zoom" ? "zoom" : activeTool === "text" ? "text" : "transform"}
+              editingText={editingText}
+              onCreateText={createTextAt}
+              onEditText={startTextEdit}
+              onTextInput={typeText}
+              onTextEditEnd={() => endTextEdit(true)}
+              textSizeRef={textSizeRef}
               transparencyGrid={transparencyGrid}
               clipToStage={clipToStage}
               isPlaying={isPlaying}
@@ -3334,8 +3516,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onOpenRecolor={() => openRecolor("both")}
             onDelete={() => deleteLayer(selected.id)}
           />
-        ) : selected?.type === "text" ? (
-          <TextLayerPanel layer={selected} onPatch={patchSelected} onBack={() => selectObject(null)} />
         ) : (
           <AssetPanel
             onAddReferenceCharacter={addReferenceBrowserCharacter}

@@ -88,3 +88,25 @@ export const DistributeHIcon = () => (
 export const DistributeVIcon = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true">{[8, 16, 24].map((y) => <g key={y}><rect x="10" y={y - 2.5} width="12" height="5" fill="none" stroke="currentColor" strokeWidth="1.2" /><path d={`M6 ${y}h20`} stroke="currentColor" strokeWidth="1" strokeDasharray="1.5 1.5" /></g>)}</svg>
 );
+
+/** Eyedropper (mockup): a solid dropper — bulb, collar and body — with an outlined tube, tip down-left. */
+// Eyedropper and Fill / Stroke: the user's vectors ("Colour picker and fill and Stroke.svg"), exact.
+// Their grey rounded tile (#838383) is the button's own background, so each viewBox is that tile.
+export const EyedropperIcon = () => (
+  <svg viewBox="0 0 18.95 18.95" aria-hidden="true">
+    <rect x="9.24" y="6.56" width="3.45" height="2.88" transform="translate(8.87 -5.41) rotate(45)" fill="currentColor" />
+    <path d="M12.78,7.78l1.38-1.4c.44-.44.44-1.16,0-1.6h0c-.44-.44-1.16-.44-1.6,0l-1.38,1.4" fill="currentColor" />
+    <path d="M9.32,8.4l-4.6,4.6c-.34.34-.34.9,0,1.24h0c.34.34.9.34,1.24,0l4.6-4.6" fill="none" stroke="currentColor" strokeWidth=".5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+export const FillStrokeIcon = () => (
+  <svg viewBox="0 24.18 18.95 18.95" aria-hidden="true">
+    <path d="M14.03,39.94h-4.15c-1.21,0-2.2-.99-2.2-2.2v-4.15c0-1.21.99-2.2,2.2-2.2h4.15c1.21,0,2.2.99,2.2,2.2v4.15c0,1.21-.99,2.2-2.2,2.2ZM9.89,32.64c-.53,0-.96.43-.96.96v4.15c0,.53.43.96.96.96h4.15c.53,0,.96-.43.96-.96v-4.15c0-.53-.43-.96-.96-.96h-4.15Z" fill="currentColor" />
+    <rect x="3.11" y="27.44" width="9.02" height="9.02" rx="1.61" ry="1.61" fill="#fff" />
+    <path d="M10.55,36.53h-5.86c-.91,0-1.66-.74-1.66-1.66v-5.86c0-.91.74-1.66,1.66-1.66h5.86c.91,0,1.66.74,1.66,1.66v5.86c0,.91-.74,1.66-1.66,1.66ZM4.68,27.52c-.83,0-1.5.67-1.5,1.5v5.86c0,.83.67,1.5,1.5,1.5h5.86c.83,0,1.5-.67,1.5-1.5v-5.86c0-.83-.67-1.5-1.5-1.5h-5.86Z" fill="#000" />
+    <path d="M14.61,27.96h.15c.97,0,1.76.79,1.76,1.76v.11" fill="none" stroke="currentColor" strokeWidth=".25" strokeMiterlimit="10" />
+    <polygon points="14.75 28.43 13.93 27.96 14.75 27.48 14.75 28.43" fill="currentColor" />
+    <polygon points="16.04 29.68 16.52 30.5 16.99 29.68 16.04 29.68" fill="currentColor" />
+  </svg>
+);

@@ -172,6 +172,21 @@ export type EditorObject = {
   /** Text layers: font name from lib/fonts (default Arial) and size in stage px (default 52). */
   fontFamily?: string;
   fontSize?: number;
+  /** Text panel (Illustrator): weight 100–900 (older text layers: 800), italic, an uploaded font file
+   *  for a font from someone's computer, paragraph alignment (older layers: centre), leading in px
+   *  (none = Auto, 120%), tracking in 1/1000 em, and the old drop shadow (older layers keep it). */
+  fontWeight?: number;
+  fontStyle?: "normal" | "italic";
+  fontUrl?: string;
+  textAlign?: "left" | "center" | "right";
+  lineHeight?: number;
+  letterSpacing?: number;
+  textShadow?: boolean;
+  /** Fill/Stroke (Include Stroke / Include Shadow): an outline of textStrokeWidth px (default 2)
+   *  outside the letters, and a soft shadow, in these colours. */
+  textStrokeColor?: string;
+  textStrokeWidth?: number;
+  textShadowColor?: string;
   assetKind?: EditorAssetKind;
   assetUrl?: string;
   /** Static library thumbnail for source actions. */
@@ -257,7 +272,7 @@ export type RenderJob = {
 export type Asset = {
   id: string;
   project: string | null;
-  kind: "character" | "background" | "prop" | "audio";
+  kind: "character" | "background" | "prop" | "audio" | "font";
   name: string;
   url: string;
   metadata: Record<string, unknown>;

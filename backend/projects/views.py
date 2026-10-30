@@ -114,6 +114,10 @@ def _clean_color_rules(value) -> list[dict]:
     return rules
 
 
+FONT_EXTENSIONS = {".ttf", ".otf", ".woff", ".woff2"}
+FONT_FIELDS = ("family", "style", "weight", "italic", "postscriptName", "fullName")
+
+
 class AssetViewSet(viewsets.ModelViewSet):
     queryset = Asset.objects.select_related("project").all()
     serializer_class = AssetSerializer
@@ -396,8 +400,8 @@ class AssetViewSet(viewsets.ModelViewSet):
 
         if not uploaded:
             return Response({"detail": "file is required"}, status=status.HTTP_400_BAD_REQUEST)
-        if kind not in {"background", "audio"}:
-            return Response({"detail": "kind must be background or audio"}, status=status.HTTP_400_BAD_REQUEST)
+        if kind not in {"background", "audio", "font"}:
+            return Response({"detail": "kind must be background, audio or font"}, status=status.HTTP_400_BAD_REQUEST)
 
         project = None
         if project_id:
@@ -411,6 +415,9 @@ class AssetViewSet(viewsets.ModelViewSet):
             return Response({"detail": "background upload must be an image"}, status=status.HTTP_400_BAD_REQUEST)
         if kind == "audio" and not content_type.startswith("audio/"):
             return Response({"detail": "voice upload must be an audio file"}, status=status.HTTP_400_BAD_REQUEST)
+        # A font from the person's computer (Text panel), so exports and other computers draw the same text.
+        if kind == "font" and Path(uploaded.name).suffix.lower() not in FONT_EXTENSIONS:
+            return Response({"detail": "font upload must be a .ttf, .otf, .woff or .woff2 file"}, status=status.HTTP_400_BAD_REQUEST)
 
         max_size = 50 * 1024 * 1024 if kind == "background" else 30 * 1024 * 1024
         if uploaded.size > max_size:
@@ -431,9 +438,25 @@ class AssetViewSet(viewsets.ModelViewSet):
                 "mimeType": content_type,
                 "size": uploaded.size,
                 "originalName": Path(uploaded.name).name,
+                **({key: str(request.data.get(key) or "")[:200] for key in FONT_FIELDS} if kind == "font" else {}),
             },
         )
         return Response(AssetSerializer(asset).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"])
+    def fonts(self, request):
+        """Fonts uploaded from people's computers (newest first, one per PostScript name): the Text
+        panel's "Installed font" list, so the whole team can use them."""
+        seen: set[str] = set()
+        fonts = []
+        for asset in Asset.objects.filter(kind="font").order_by("-created_at"):
+            meta = asset.metadata or {}
+            key = str(meta.get("postscriptName") or asset.url)
+            if key in seen:
+                continue
+            seen.add(key)
+            fonts.append({"url": asset.url, **{field: meta.get(field, "") for field in FONT_FIELDS}})
+        return Response(fonts)
 
 
 class RenderJobViewSet(viewsets.ReadOnlyModelViewSet):
