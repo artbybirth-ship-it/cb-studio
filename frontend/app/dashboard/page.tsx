@@ -8,6 +8,7 @@ import { clearRecentProjects, recentProjectsOf } from "@/lib/openProjects";
 import type { Project } from "@/types";
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import HeaderUserIcon from "@/components/HeaderUserIcon";
+import { scrubProps } from "@/lib/scrub";
 
 type DocumentPreset = {
   id: string;
@@ -226,8 +227,8 @@ export default function Dashboard() {
               <div className="cb-create-size-row">
                 <div className="cb-create-size-label">Video Size</div>
                 <div className="cb-create-size-fields">
-                  <label><input aria-label="Canvas width in pixels" type="number" min="64" max="7680" value={documentWidth} onChange={event => updateDimension("width",event.target.value)} /><span>Width</span></label>
-                  <label><input aria-label="Canvas height in pixels" type="number" min="64" max="7680" value={documentHeight} onChange={event => updateDimension("height",event.target.value)} /><span>Height</span></label>
+                  <label><input aria-label="Canvas width in pixels" type="number" min="64" max="7680" value={documentWidth} onChange={event => updateDimension("width",event.target.value)} {...scrubProps({ value: Number(documentWidth) || null, onChange: (next) => updateDimension("width", String(next)), min: 64, max: 7680 })} /><span>Width</span></label>
+                  <label><input aria-label="Canvas height in pixels" type="number" min="64" max="7680" value={documentHeight} onChange={event => updateDimension("height",event.target.value)} {...scrubProps({ value: Number(documentHeight) || null, onChange: (next) => updateDimension("height", String(next)), min: 64, max: 7680 })} /><span>Height</span></label>
                 </div>
                 <div className="cb-create-orientation" role="group" aria-label="Canvas orientation">
                   <button type="button" className={orientation === "horizontal" ? "selected" : ""} onClick={() => chooseOrientation("horizontal")} aria-pressed={orientation === "horizontal"}><span className="cb-orient-landscape"/>Horizontal</button>

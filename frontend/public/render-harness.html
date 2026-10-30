@@ -14,6 +14,7 @@
     .char-layer iframe{display:block;width:100%;height:100%;border:0;background:transparent;pointer-events:none}
     .text-layer{position:absolute;transform-origin:center;color:#fff;font:800 52px/1.1 Arial,sans-serif;text-shadow:0 2px 8px #000;white-space:pre-wrap}
     .prop-layer{position:absolute;width:130px;height:130px;border-radius:22px;border:4px solid #49c9c7;background:#17343a;color:#dffafa;display:grid;place-items:center;text-align:center;transform-origin:center}
+    .image-layer{position:absolute;transform-origin:50% 50%;pointer-events:none}.image-layer img{display:block;width:100%;height:100%;object-fit:contain}
     .prop-layer span{font-size:48px}.prop-layer small{position:absolute;top:136px;font-size:18px;white-space:nowrap;color:#dffafa}
     #fatal{position:absolute;inset:0;display:none;place-items:center;padding:30px;background:#fff;color:#b91c1c;font:700 18px/1.4 Arial,sans-serif;text-align:center;z-index:999999}
   </style>
@@ -127,6 +128,29 @@
     var sy = clamp(Number(object.stretchY == null ? 1 : object.stretchY) || 1, 0.02, 50);
     var kx = clamp(Number(object.skewX || 0), -80, 80), ky = clamp(Number(object.skewY || 0), -80, 80);
     return 'translate(-50%,-50%) rotate(' + Number(object.rotation || 0) + 'deg) skew(' + kx + 'deg,' + ky + 'deg) scale(' + (scale * sx) + ',' + (scale * sy) + ')' + (object.flipX ? ' scaleX(-1)' : '');
+  }
+
+  // Picture layers (Import to Stage, library FX): the real image at its own pixel size, with the
+  // layer transform, exactly as the editor draws them (StageCanvas cb-stage-prop-image).
+  function addImageLayer(object, z){
+    var el = document.createElement('div');
+    el.className = 'image-layer';
+    el.style.left = Number(object.x || 0) + 'px';
+    el.style.top = Number(object.y || 0) + 'px';
+    el.style.width = Number(object.sourceWidth || 300) + 'px';
+    el.style.height = Number(object.sourceHeight || 300) + 'px';
+    el.style.opacity = String(object.opacity == null ? 1 : object.opacity);
+    el.style.zIndex = String(z);
+    el.style.transform = layerTransform(object);
+    var img = document.createElement('img');
+    pendingImages += 1;
+    img.onload = function(){ pendingImages = Math.max(0, pendingImages - 1); markReadyWhenPossible(); };
+    // A missing picture must not stop the whole export: it is left out and reported.
+    img.onerror = function(){ pendingImages = Math.max(0, pendingImages - 1); console.error('Picture layer failed to load: ' + object.assetUrl); markReadyWhenPossible(); };
+    img.src = resolveUrl(object.assetUrl);
+    el.appendChild(img);
+    stage.appendChild(el);
+    timedLayers.push({el:el,object:object});
   }
 
   function addProp(object, z){
@@ -392,6 +416,7 @@
         if(object.type === 'background' || object.type === 'audio') return;
         if(object.type === 'character' && object.assetKind === 'animate-createjs' && object.assetUrl) addCharacter(object,z);
         else if(object.type === 'text') addText(object,z);
+        else if(object.type === 'prop' && object.assetKind === 'image' && object.assetUrl) addImageLayer(object,z);
         else addProp(object,z);
       });
       updateVisibility(0);

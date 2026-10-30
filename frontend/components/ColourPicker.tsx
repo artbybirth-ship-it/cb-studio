@@ -3,6 +3,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { hexToRgb, hsbToRgb, rgbToHex, rgbToHsb, type Hsb, type Rgb } from "@/lib/color";
 import { normalizeHex } from "@/lib/findReplace";
+import { scrubProps } from "@/lib/scrub";
+import { useEscClose } from "@/lib/escClose";
+import PanelClose from "./PanelClose";
 
 /**
  * Colour Picker, after Adobe Illustrator's: a colour field and a strip, H/S/B and R/G/B boxes whose
@@ -83,6 +86,7 @@ function NumberBox({ label, value, max, unit, onValue }: { label: string; value:
   const shown = draft ?? `${Math.round(value)}${unit}`;
   return (
     <input className="cb-cp-number" value={shown} aria-label={label} inputMode="numeric"
+      {...scrubProps({ value: Math.round(value), onChange: onValue, min: 0, max })}
       onFocus={(event) => { setDraft(String(Math.round(value))); requestAnimationFrame(() => event.target.select()); }}
       onBlur={() => setDraft(null)}
       onChange={(event) => {
@@ -109,6 +113,8 @@ type Props = {
 };
 
 export default function ColourPicker({ initial, title = "Colour Picker", onOk, onCancel }: Props) {
+  // Its own Enter / Esc keys stay (OK / Cancel); registering keeps panels behind it from closing first.
+  useEscClose(true, onCancel);
   const original = normalizeHex(initial) || "#000000";
   const [colour, setColour] = useState<Colour>(() => fromRgb(hexToRgb(original)!, { h: 0, s: 0, b: 0 }));
   const [mode, setModeState] = useState<Mode>("h");
@@ -203,7 +209,7 @@ export default function ColourPicker({ initial, title = "Colour Picker", onOk, o
   return (
     <div className="cb-cp-backdrop" onKeyDown={onKeyDown}>
       <div className="cb-cp-dialog" role="dialog" aria-modal="true" aria-label={title} ref={dialogRef}>
-        <header>{title}</header>
+        <header><PanelClose onClose={onCancel} label="Cancel" />{title}</header>
         <div className="cb-cp-body">
           <div className="cb-cp-left">
             <div className="cb-cp-field" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); dragField(event); }} onPointerMove={(event) => { if (event.buttons) dragField(event); }}>

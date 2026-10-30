@@ -711,8 +711,11 @@
       bw = Math.max(1, x1 - x0); bh = Math.max(1, y1 - y0);
       if (cv.width !== bw) cv.width = bw;
       if (cv.height !== bh) cv.height = bh;
-      s.left = (x0 / q) + 'px'; s.top = (y0 / q) + 'px';
-      s.width = (bw / q) + 'px'; s.height = (bh / q) + 'px';
+      // In % of this page (the same CSS px at this size), so when the editor resizes the player
+      // (Transform W / H, scale handles) the drawing follows at once instead of showing at its old
+      // size until the redraw: that one-frame mismatch flickered on every step of a drag.
+      s.left = (x0 / q / cssW * 100) + '%'; s.top = (y0 / q / cssH * 100) + '%';
+      s.width = (bw / q / cssW * 100) + '%'; s.height = (bh / q / cssH * 100) + '%';
       st.scaleX = cssW * q / W; st.scaleY = cssH * q / H;
       st.x = -x0; st.y = -y0;
       if (st.update) st.update();
@@ -878,6 +881,9 @@
   setTimeout(cbTryReady, 180);
   // Animate's responsive handler resizes the canvas on window resize; re-apply our view after it.
   window.addEventListener('resize', function () { setTimeout(applyView, 0); });
+  // Redraw at the new size before the browser paints it (ResizeObserver runs after layout, after
+  // Animate's own resize handler), so a resize never shows a stretched drawing for a frame.
+  if (window.ResizeObserver) new ResizeObserver(function () { if (cbView) refreshView(); }).observe(document.documentElement);
   // The drawing must always match this page's current size and pixel ratio. The ratio changes with
   // the editor's zoom (CSS zoom) and when the window moves to a screen with another density (4K ↔
   // Full HD), which fires no resize: redraw on a ratio change, and check once a second as a backstop.

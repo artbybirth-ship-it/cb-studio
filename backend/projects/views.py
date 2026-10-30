@@ -64,7 +64,14 @@ class ProjectViewSet(viewsets.ModelViewSet):
         job = RenderJob.objects.create(project=project)
         project.status = "rendering"
         project.save(update_fields=["status", "updated_at"])
-        render_project.delay(str(job.id))
+        # Export format (mp4 / gif / jpeg / png); a still is the frame at "time" of "scene".
+        export_format = str(request.data.get("format") or "mp4").lower()
+        try:
+            still_time = float(request.data.get("time") or 0)
+        except (TypeError, ValueError):
+            still_time = 0.0
+        resolution = str(request.data.get("resolution") or "fullhd").lower()  # MP4: hd / fullhd / 4k
+        render_project.delay(str(job.id), export_format, still_time, request.data.get("scene") or None, resolution)
         return Response(RenderJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 
 

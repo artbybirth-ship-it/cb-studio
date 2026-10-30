@@ -1,7 +1,8 @@
 "use client";
 
-import { useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import Popover from "@/components/Popover";
+import PanelClose from "@/components/PanelClose";
 
 /**
  * A tool rail group (Illustrator): a labelled button whose corner mark shows it holds more tools.
@@ -14,12 +15,24 @@ export type ToolGroupItem = {
   /** Shown after the label, e.g. "V" → "Select (V)". */
   shortcut?: string;
   icon: ReactNode;
-  onSelect: () => void;
+  onSelect?: () => void;
   active?: boolean;
   disabled?: boolean;
   title?: string;
   /** The panel stays open after this item (Align: several clicks in a row). */
   keepOpen?: boolean;
+  /** A list that opens beside the panel (Animate's File › Import). */
+  submenu?: ToolGroupSubItem[];
+};
+export type ToolGroupSubItem = {
+  id: string;
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  /** Shown instead of the shortcut, e.g. "Coming soon". */
+  note?: string;
+  title?: string;
+  onSelect: () => void;
 };
 
 type Props = {
@@ -35,14 +48,19 @@ type Props = {
   panelClassName?: string;
   /** Lets the editor anchor other popovers (Open Project's recent list) to this button. */
   buttonRef?: RefObject<HTMLButtonElement | null>;
+  /** Any press on the button (click, hold or the corner mark): the rail highlights this group. */
+  onPress?: () => void;
 };
 
 const LONG_PRESS_MS = 500;
 
-export default function ToolGroup({ label, icon, title, active = false, onPrimary, items = [], children, panelTitle, panelClassName = "", buttonRef }: Props) {
+export default function ToolGroup({ label, icon, title, active = false, onPrimary, items = [], children, panelTitle, panelClassName = "", buttonRef, onPress }: Props) {
   const ownRef = useRef<HTMLButtonElement>(null);
   const anchorRef = buttonRef || ownRef;
   const [open, setOpen] = useState(false);
+  // The open submenu (File › Import) and its top inside the panel; it closes with the panel.
+  const [submenu, setSubmenu] = useState<{ id: string; top: number } | null>(null);
+  useEffect(() => { if (!open) setSubmenu(null); }, [open]);
   const pressTimer = useRef(0);
   const longPressed = useRef(false);
   const hasPanel = items.length > 1 || Boolean(children);
@@ -61,7 +79,9 @@ export default function ToolGroup({ label, icon, title, active = false, onPrimar
         aria-pressed={onPrimary ? active : undefined}
         title={hasPanel ? `${title} · hold, or click the corner mark, for more` : title}
         onPointerDown={(event) => {
-          if (!hasPanel || event.button !== 0) return;
+          if (event.button !== 0) return;
+          onPress?.();
+          if (!hasPanel) return;
           longPressed.current = false;
           cancelPress();
           pressTimer.current = window.setTimeout(() => { longPressed.current = true; setOpen(true); }, LONG_PRESS_MS);
@@ -70,6 +90,7 @@ export default function ToolGroup({ label, icon, title, active = false, onPrimar
         onPointerLeave={cancelPress}
         onClick={(event) => {
           cancelPress();
+          if (event.detail === 0) onPress?.(); // keyboard: Enter / Space
           if (longPressed.current) { longPressed.current = false; return; }
           const onMark = (event.target as HTMLElement).closest?.(".cb-tool-group-mark");
           if (hasPanel && (onMark || !onPrimary)) { setOpen((value) => !value); return; }
@@ -81,18 +102,41 @@ export default function ToolGroup({ label, icon, title, active = false, onPrimar
       </button>
       {hasPanel && (
         <Popover open={open} anchorRef={anchorRef} onClose={() => setOpen(false)} placement="right" offset={10} className={`cb-tool-flyout ${panelClassName}`} aria-label={panelTitle || label}>
-          <div className="cb-tool-flyout-head">{panelTitle || label}</div>
+          <div className="cb-tool-flyout-head"><PanelClose onClose={() => setOpen(false)} label={`Close ${panelTitle || label}`} />{panelTitle || label}</div>
           {items.length > 0 && (
             <div className="cb-tool-flyout-grid">
               {items.map((item) => (
-                <button key={item.id} type="button" role="menuitem" className={`cb-tool-flyout-item ${item.active ? "active" : ""}`} disabled={item.disabled} title={item.title}
-                  onClick={() => { if (!item.keepOpen) setOpen(false); item.onSelect(); }}>
+                <button key={item.id} type="button" role="menuitem" className={`cb-tool-flyout-item ${item.active || submenu?.id === item.id ? "active" : ""}`} disabled={item.disabled} title={item.title}
+                  aria-haspopup={item.submenu ? "menu" : undefined} aria-expanded={item.submenu ? submenu?.id === item.id : undefined}
+                  onClick={(event) => {
+                    if (item.submenu) {
+                      const top = event.currentTarget.offsetTop;
+                      setSubmenu((current) => (current?.id === item.id ? null : { id: item.id, top }));
+                      return;
+                    }
+                    if (!item.keepOpen) setOpen(false);
+                    item.onSelect?.();
+                  }}>
                   {item.icon}
                   <span>{item.label}{item.shortcut ? ` (${item.shortcut})` : ""}</span>
                 </button>
               ))}
             </div>
           )}
+          {submenu && (() => {
+            const parent = items.find((item) => item.id === submenu.id);
+            return parent?.submenu ? (
+              <div className="cb-tool-submenu" role="menu" aria-label={parent.label} style={{ top: submenu.top }}>
+                {parent.submenu.map((entry) => (
+                  <button key={entry.id} type="button" role="menuitem" disabled={entry.disabled} title={entry.title || entry.note}
+                    onClick={() => { setOpen(false); entry.onSelect(); }}>
+                    <span>{entry.label}</span>
+                    {(entry.note || entry.shortcut) && <kbd>{entry.note || entry.shortcut}</kbd>}
+                  </button>
+                ))}
+              </div>
+            ) : null;
+          })()}
           {children}
         </Popover>
       )}

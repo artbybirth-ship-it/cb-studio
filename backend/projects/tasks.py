@@ -1,3 +1,4 @@
+import asyncio
 import math
 import os
 import shutil
@@ -6,13 +7,14 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
+import urllib.request
 from urllib.parse import urlparse
 
 from celery import shared_task
 from django.conf import settings
 from django.db import close_old_connections
 from django.utils import timezone
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 from .models import RenderJob
 
@@ -79,23 +81,21 @@ def _media_file_from_url(url: str) -> Path | None:
     return candidate if candidate.exists() else None
 
 
-def _goto_render_page(page, url: str):
+async def _goto_render_page(page, url: str):
     last_error = None
     for attempt in range(1, 6):
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
             return
         except Exception as exc:
             last_error = exc
             if attempt >= 5:
                 break
-            time.sleep(min(1.5 * attempt, 5.0))
+            await asyncio.sleep(min(1.5 * attempt, 5.0))
     raise RuntimeError(f"Could not open frontend render page after retries: {last_error}")
 
 
-
-
-def _preflight_frontend_runtime(page):
+def _preflight_frontend_runtime():
     base_url = os.getenv("FRONTEND_RENDER_URL", "http://frontend:3000").rstrip("/")
     checks = [
         ("CreateJS runtime", f"{base_url}/vendor/createjs"),
@@ -104,50 +104,49 @@ def _preflight_frontend_runtime(page):
     failures = []
     for label, url in checks:
         try:
-            response = page.request.get(url, timeout=30_000)
-            if not response.ok:
-                failures.append(f"{label}: HTTP {response.status}")
+            with urllib.request.urlopen(url, timeout=30) as response:
+                if response.status >= 400:
+                    failures.append(f"{label}: HTTP {response.status}")
         except Exception as exc:
             failures.append(f"{label}: {exc}")
     if failures:
         raise RuntimeError("Render preflight failed - " + " | ".join(failures))
 
-def _full_hd_target(width: int, height: int) -> tuple[int, int]:
-    """Return a standard Full-HD canvas without distorting the project orientation."""
-    if height > width:
-        return 1080, 1920
-    return 1920, 1080
+
+# MP4 sizes (landscape; a portrait project gets them turned): the long and short edge.
+VIDEO_SIZES = {"hd": (1280, 720), "fullhd": (1920, 1080), "4k": (3840, 2160)}
 
 
-def _capture_scale(width: int, height: int) -> float:
-    """
-    Supersample up to 2x, but cap the Chromium capture surface near 4K pixels
-    to keep memory use predictable inside Docker.
-    """
-    requested = max(1.0, min(float(os.getenv("RENDER_SUPERSAMPLE", "2")), 4.0))
-    pixels = max(1, width * height)
-    max_pixels = 3840 * 2160
-    memory_safe = math.sqrt(max_pixels / pixels)
-    return max(1.0, min(requested, memory_safe))
+def _video_target(width: int, height: int, resolution: str) -> tuple[int, int]:
+    long_edge, short_edge = VIDEO_SIZES.get(resolution, VIDEO_SIZES["fullhd"])
+    return (short_edge, long_edge) if height > width else (long_edge, short_edge)
 
 
-def _capture_scene_frames(page, scene, width: int, height: int, fps: int, frames_dir: Path, capture_scale: float):
+def _capture_scale_for(width: int, height: int, target_width: int, target_height: int, sharp: bool) -> float:
+    """Capture scale: at least the output size (4K needs it), supersampled up to 2x when `sharp`,
+    capped near 4K pixels to keep memory use predictable inside Docker."""
+    needed = max(target_width / max(1, width), target_height / max(1, height))
+    requested = max(1.0, min(float(os.getenv("RENDER_SUPERSAMPLE", "2")), 4.0)) if sharp else 1.0
+    memory_safe = math.sqrt((3840 * 2160) / max(1, width * height))
+    return max(1.0, min(max(requested, needed), memory_safe))
+
+
+async def _open_harness(context, scene, width: int, height: int, capture_scale: float):
     base_url = os.getenv("FRONTEND_RENDER_URL", "http://frontend:3000").rstrip("/")
     # v27 intentionally bypasses the Next.js/React render route. The dedicated static
     # harness has no hydration/build delay and talks directly to the saved scene API +
     # original CreateJS player iframe.
     url = f"{base_url}/render-harness.html?scene={scene.id}&width={width}&height={height}&scale={capture_scale:.6f}"
-    _goto_render_page(page, url)
-
+    page = await context.new_page()
+    # Errors only: four tabs repeating every CreateJS deprecation warning drowned the log.
+    page.on("console", lambda message: print(f"[render-browser] {message.text}") if message.type == "error" else None)
+    page.on("pageerror", lambda error: print(f"[render-browser-pageerror] {error}"))
+    await _goto_render_page(page, url)
     try:
-        page.wait_for_function(
-            "window.__CBS_RENDER_ERROR__ || window.__CBS_RENDER_READY__ === true",
-            timeout=60_000,
-            polling=100,
-        )
+        await page.wait_for_function("window.__CBS_RENDER_ERROR__ || window.__CBS_RENDER_READY__ === true", timeout=60_000, polling=100)
     except Exception as exc:
         try:
-            diagnostic = page.evaluate("""() => ({
+            diagnostic = await page.evaluate("""() => ({
                 href: location.href,
                 readyState: document.readyState,
                 booted: !!window.__CBS_RENDER_BOOTED__,
@@ -158,41 +157,90 @@ def _capture_scene_frames(page, scene, width: int, height: int, fps: int, frames
         except Exception:
             diagnostic = {}
         raise RuntimeError(f"Static render harness did not become ready: {diagnostic} :: {exc}") from exc
-
-    browser_error = page.evaluate("window.__CBS_RENDER_ERROR__ || ''")
+    browser_error = await page.evaluate("window.__CBS_RENDER_ERROR__ || ''")
     if browser_error:
         raise RuntimeError(f"Browser render harness failed: {browser_error}")
+    return page
 
-    duration = max(0.1, float(scene.duration_seconds or 0.1))
-    frame_count = max(1, math.ceil(duration * fps))
+
+async def _capture_frames(context, scene, width: int, height: int, capture_scale: float, times: list[float],
+                          frames_dir: Path, start_number: int, image_type: str, on_frame, tabs: int):
+    """Screenshots of the scene at `times`, numbered from start_number. The frames are split into
+    `tabs` runs captured at the same time, each by its own tab (its own renderer process)."""
     frames_dir.mkdir(parents=True, exist_ok=True)
-    for index in range(frame_count):
-        time_seconds = min(duration, index / fps)
-        page.evaluate("async t => { if (!window.__CBS_SET_TIME__) throw new Error('Render seek bridge missing'); await window.__CBS_SET_TIME__(t); }", time_seconds)
-        frame_error = page.evaluate("window.__CBS_RENDER_ERROR__ || ''")
-        if frame_error:
-            raise RuntimeError(f"Browser frame seek failed: {frame_error}")
-        page.screenshot(path=str(frames_dir / f"frame-{index + 1:06d}.png"), full_page=False)
-    return duration, frame_count
+    extension = "jpg" if image_type == "jpeg" else "png"
+    count = len(times)
+    tabs = max(1, min(tabs, count))
+    runs = [range(count * index // tabs, count * (index + 1) // tabs) for index in range(tabs)]
+    done = {"frames": 0}
+
+    async def capture(run):
+        page = await _open_harness(context, scene, width, height, capture_scale)
+        try:
+            for index in run:
+                await page.evaluate("async t => { if (!window.__CBS_SET_TIME__) throw new Error('Render seek bridge missing'); await window.__CBS_SET_TIME__(t); }", times[index])
+                frame_error = await page.evaluate("window.__CBS_RENDER_ERROR__ || ''")
+                if frame_error:
+                    raise RuntimeError(f"Browser frame seek failed: {frame_error}")
+                path = str(frames_dir / f"frame-{start_number + index:06d}.{extension}")
+                if image_type == "jpeg":
+                    await page.screenshot(path=path, type="jpeg", quality=95, full_page=False)
+                else:
+                    await page.screenshot(path=path, type="png", full_page=False)
+                done["frames"] += 1
+                if on_frame:
+                    on_frame(done["frames"], count)
+        finally:
+            await page.close()
+
+    await asyncio.gather(*(capture(run) for run in runs))
+    return extension
 
 
-def _encode_frames(frames_dir: Path, output: Path, fps: int, duration: float, final_width: int, final_height: int):
+def _encode_frames(frames_dir: Path, output: Path, fps: int, duration: float, final_width: int, final_height: int, extension: str = "png"):
     # Frames are captured at up to 2x logical resolution. Lanczos downsamples them
     # to Full HD, which gives cleaner vector/text edges and preserves high-res imports.
     video_filter = (
-        f"scale={final_width}:{final_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
-        f"pad={final_width}:{final_height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+        f"scale={final_width}:{final_height}:force_original_aspect_ratio=decrease:flags=lanczos:out_range=tv,"
+        f"pad={final_width}:{final_height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p"
     )
+    # JPEG frames are full-range: out_range=tv and the bt709 tags give standard video colour, so
+    # every player shows the same colours as the editor.
     _run([
         "ffmpeg", "-y", "-framerate", str(fps),
-        "-i", str(frames_dir / "frame-%06d.png"),
+        "-i", str(frames_dir / f"frame-%06d.{extension}"),
         "-t", f"{duration:.6f}",
         "-vf", video_filter,
         "-c:v", "libx264", "-preset", "medium", "-crf", "17",
-        "-pix_fmt", "yuv420p", "-r", str(fps), "-an",
+        "-pix_fmt", "yuv420p", "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+        "-r", str(fps), "-an",
         "-movflags", "+faststart",
         str(output),
     ])
+
+
+def _fit_within(width: int, height: int, limit: int) -> tuple[int, int]:
+    scale = min(1.0, limit / max(width, height))
+    w, h = max(2, int(round(width * scale))), max(2, int(round(height * scale)))
+    return w - w % 2, h - h % 2
+
+
+def _encode_gif(frames_dir: Path, output: Path, fps: int, width: int, height: int, extension: str = "png"):
+    # One palette for the whole animation (palettegen), dithered for smooth shading.
+    _run([
+        "ffmpeg", "-y", "-framerate", str(fps), "-i", str(frames_dir / f"frame-%06d.{extension}"),
+        "-vf", f"scale={width}:{height}:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4",
+        "-loop", "0", str(output),
+    ])
+
+
+def _encode_still(frame: Path, output: Path, width: int, height: int, fmt: str):
+    video_filter = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+    )
+    quality = ["-q:v", "2"] if fmt == "jpeg" else []
+    _run(["ffmpeg", "-y", "-i", str(frame), "-vf", video_filter, "-frames:v", "1", *quality, str(output)])
 
 
 def _scene_audio(scene, output: Path, duration: float):
@@ -274,8 +322,21 @@ def _concat_scenes(scene_files: list[Path], output_path: Path):
     concat_file.unlink(missing_ok=True)
 
 
+EXPORT_FORMATS = {"mp4": "mp4", "gif": "gif", "jpeg": "jpg", "png": "png"}
+GIF_FPS = 15
+GIF_MAX_EDGE = 960
+
+
 @shared_task(bind=True)
-def render_project(self, job_id: str):
+def render_project(self, job_id: str, export_format: str = "mp4", still_time: float = 0.0, still_scene_id: str | None = None,
+                   resolution: str = "fullhd"):
+    """MP4 (video with sound), GIF (animation, no sound), or a JPEG / PNG of one frame (the
+    playhead's frame of the scene being edited). Progress moves frame by frame.
+
+    Speed: frames are captured by RENDER_TABS tabs at once (default 4) as JPEG (95%, invisible after
+    the video encode). MP4 resolution: "hd" 1280x720 (captured at 1x, quickest), "fullhd"
+    1920x1080 or "4k" 3840x2160 (captured at up to 2x for sharp edges). GIF is captured at 1x
+    (960 px at most); a JPEG / PNG is Full HD, captured at up to 2x."""
     job = RenderJob.objects.select_related("project").get(id=job_id)
     project = job.project
     work_dir: Path | None = None
@@ -292,8 +353,11 @@ def render_project(self, job_id: str):
         width = max(320, int(project.width))
         height = max(240, int(project.height))
         width, height = width - width % 2, height - height % 2
-        final_width, final_height = _full_hd_target(width, height)
-        capture_scale = _capture_scale(width, height)
+        fmt = export_format if export_format in EXPORT_FORMATS else "mp4"
+        resolution = resolution if fmt == "mp4" and resolution in VIDEO_SIZES else "fullhd"
+        final_width, final_height = _video_target(width, height, resolution)
+        sharp = fmt in ("jpeg", "png") or (fmt == "mp4" and resolution != "hd")
+        capture_scale = _capture_scale_for(width, height, final_width, final_height, sharp) if fmt != "gif" else 1.0
         capture_width = max(2, int(round(width * capture_scale)))
         capture_height = max(2, int(round(height * capture_scale)))
         capture_width -= capture_width % 2
@@ -301,54 +365,93 @@ def render_project(self, job_id: str):
         # Use the exact realized scale after even-pixel rounding.
         capture_scale = min(capture_width / width, capture_height / height)
         fps = max(8, min(int(os.getenv("RENDER_FPS", "30")), 30))
+        still = fmt in ("jpeg", "png")
+        if fmt == "gif":
+            fps = GIF_FPS
+        if still:
+            scenes = [next((item for item in scenes if str(item.id) == str(still_scene_id)), scenes[0])]
 
         media_root = Path(settings.MEDIA_ROOT)
         media_root.mkdir(parents=True, exist_ok=True)
-        filename = f"render-{job.id}.mp4"
+        filename = f"render-{job.id}.{EXPORT_FORMATS[fmt]}"
         output_path = media_root / filename
         work_dir = Path(tempfile.mkdtemp(prefix=f"cbs-render-{job.id}-"))
         scene_outputs: list[Path] = []
 
-        chromium_path = os.getenv("CHROMIUM_PATH", "/usr/bin/chromium")
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(
-                headless=True,
-                executable_path=chromium_path,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-            )
-            try:
-                context = browser.new_context(
-                    viewport={"width": capture_width, "height": capture_height},
-                    screen={"width": capture_width, "height": capture_height},
-                    device_scale_factor=1,
+        _preflight_frontend_runtime()
+
+        # Capture is 3% → 85% of the progress, frame by frame (saved at most once a percent).
+        shown = {"value": 3}
+
+        def frame_progress(scene_index: int):
+            def report(done: int, total: int):
+                value = 3 + int(82 * (scene_index + done / max(1, total)) / len(scenes))
+                if value > shown["value"]:
+                    shown["value"] = value
+                    _set_progress_from_playwright(job, value)
+            return report
+
+        tabs = max(1, min(int(os.getenv("RENDER_TABS", "4")), 8))
+        # A still keeps PNG frames (one frame, no speed to gain); video and GIF use JPEG.
+        image_type = "png" if still else "jpeg"
+        captured: list[tuple[Path, float, str]] = []
+
+        async def capture_all():
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(
+                    headless=True,
+                    executable_path=os.getenv("CHROMIUM_PATH", "/usr/bin/chromium"),
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
                 )
-                page = context.new_page()
-                page.on("console", lambda message: print(f"[render-browser] {message.type}: {message.text}"))
-                page.on("pageerror", lambda error: print(f"[render-browser-pageerror] {error}"))
-                page.on("requestfailed", lambda request: print(f"[render-browser-requestfailed] {request.url} :: {request.failure}"))
+                try:
+                    context = await browser.new_context(
+                        viewport={"width": capture_width, "height": capture_height},
+                        screen={"width": capture_width, "height": capture_height},
+                        device_scale_factor=1,
+                    )
+                    next_frame = 1
+                    for scene_index, scene in enumerate(scenes):
+                        duration = max(0.1, float(scene.duration_seconds or 0.1))
+                        times = ([min(duration, max(0.0, float(still_time or 0)))] if still
+                                 else [min(duration, index / fps) for index in range(max(1, math.ceil(duration * fps)))])
+                        # GIF: every scene's frames in one numbered sequence (one GIF, one palette).
+                        frames_dir = work_dir / ("gif-frames" if fmt == "gif" else f"scene-{scene_index:03d}/frames")
+                        start = next_frame if fmt == "gif" else 1
+                        extension = await _capture_frames(context, scene, width, height, capture_scale, times, frames_dir,
+                                                          start, image_type, frame_progress(scene_index), tabs)
+                        next_frame += len(times)
+                        captured.append((frames_dir, duration, extension))
+                    await context.close()
+                finally:
+                    await browser.close()
 
-                _preflight_frontend_runtime(page)
+        asyncio.run(capture_all())
 
-                for scene_index, scene in enumerate(scenes):
-                    scene_dir = work_dir / f"scene-{scene_index:03d}"
-                    frames_dir = scene_dir / "frames"
-                    scene_dir.mkdir(parents=True, exist_ok=True)
-                    duration, _ = _capture_scene_frames(page, scene, width, height, fps, frames_dir, capture_scale)
-                    video_only = scene_dir / "video.mp4"
-                    audio_only = scene_dir / "audio.m4a"
-                    final_scene = scene_dir / "scene.mp4"
-                    _encode_frames(frames_dir, video_only, fps, duration, final_width, final_height)
-                    _scene_audio(scene, audio_only, duration)
-                    _mux_scene(video_only, audio_only, final_scene, duration)
-                    scene_outputs.append(final_scene)
-                    _set_progress_from_playwright(job, 8 + int(((scene_index + 1) / len(scenes)) * 78))
-                context.close()
-            finally:
-                browser.close()
+        if still:
+            frames_dir, _, extension = captured[0]
+            _set_progress(job, 90)
+            _encode_still(frames_dir / f"frame-000001.{extension}", output_path, final_width, final_height, fmt)
+        elif fmt == "mp4":
+            for scene_index, (scene, (frames_dir, duration, extension)) in enumerate(zip(scenes, captured)):
+                scene_dir = frames_dir.parent
+                video_only = scene_dir / "video.mp4"
+                audio_only = scene_dir / "audio.m4a"
+                final_scene = scene_dir / "scene.mp4"
+                _encode_frames(frames_dir, video_only, fps, duration, final_width, final_height, extension)
+                _scene_audio(scene, audio_only, duration)
+                _mux_scene(video_only, audio_only, final_scene, duration)
+                scene_outputs.append(final_scene)
+                _set_progress(job, 85 + int(5 * (scene_index + 1) / len(scenes)))
 
         _set_progress(job, 90)
-        _concat_scenes(scene_outputs, output_path)
-        _validate_mp4(output_path)
+        if fmt == "gif":
+            gif_width, gif_height = _fit_within(final_width, final_height, GIF_MAX_EDGE)
+            _encode_gif(work_dir / "gif-frames", output_path, fps, gif_width, gif_height, captured[0][2])
+        elif fmt == "mp4":
+            _concat_scenes(scene_outputs, output_path)
+            _validate_mp4(output_path)
+        if not output_path.exists() or output_path.stat().st_size < 100:
+            raise RuntimeError(f"The {fmt.upper()} export was not created")
 
         job.status, job.progress, job.output_url, job.error = "complete", 100, f"{settings.MEDIA_URL}{filename}", ""
         job.save(update_fields=["status", "progress", "output_url", "error", "updated_at"])

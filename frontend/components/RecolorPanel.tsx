@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { ColourSwatch } from "./ColourPicker";
 import { partLabel } from "@/lib/partLabels";
+import { useEscClose } from "@/lib/escClose";
+import PanelClose from "./PanelClose";
 import type { ColorReplacement, EditorObject } from "@/types";
 
 /**
@@ -45,6 +47,7 @@ export default function RecolorPanel({
   character, activePart, activePartLabel, getFrame, initialTarget, pickedColor, pickNonce, pickActive,
   onRequestPick, onPreview, onCommit, onRemove, onResetAll, onClose, position,
 }: Props) {
+  useEscClose(true, onClose);
   const [scope, setScope] = useState<string>(activePart || "*");
   const [find, setFind] = useState("");
   const [replace, setReplace] = useState("#c4702d");
@@ -119,8 +122,8 @@ export default function RecolorPanel({
   return (
     <div className="cb-recolor-panel" role="dialog" aria-label="Recolour character" style={{ left: position.left, bottom: position.bottom }}>
       <header>
+        <PanelClose onClose={onClose} label="Close Recolour" />
         <strong>Recolour</strong>
-        <button type="button" className="cb-recolor-close" onClick={onClose} aria-label="Close">×</button>
       </header>
 
       {!character ? (
@@ -184,7 +187,7 @@ export default function RecolorPanel({
               </label>
             </div>
             <button type="button" className="cb-recolor-apply" disabled={!ready} onClick={commit}>Recolour · {scopeLabel(scope)}</button>
-            <p className="cb-recolor-hint">Text, fonts, other scenes or files: Find and Replace (Cmd/Ctrl+F).</p>
+            <p className="cb-recolor-hint">Text, fonts, other scenes or files: Find and Replace (Shift+Cmd/Ctrl+F).</p>
           </section>
 
           {rules.length > 0 && (

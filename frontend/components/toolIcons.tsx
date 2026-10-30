@@ -11,19 +11,47 @@ export const ScaleIcon = () => (
 export const ReflectIcon = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 6v20" stroke="currentColor" strokeWidth="1.1" strokeDasharray="2 1.8" /><path d="M14 10l-7 12h7z" fill="currentColor" /><path d="M18 10l7 12h-7z" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" /></svg>
 );
+// A selection frame: 8 hollow handles joined by lines, and the filled centre (as the Transform panel).
+const FRAME = [8, 16, 24];
+const HANDLE = 1.9;
+const frameSegments = FRAME.slice(0, 2).flatMap((from, index) => {
+  const a = from + HANDLE, b = FRAME[index + 1] - HANDLE;
+  return [`M${a} 8H${b}`, `M${a} 24H${b}`, `M8 ${a}V${b}`, `M24 ${a}V${b}`];
+}).join("");
 export const TransformIcon = () => (
-  <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="9" y="9" width="14" height="14" {...line} strokeDasharray="2 1.6" />{[9, 16, 23].map((x) => [9, 16, 23].map((y) => <rect key={`${x}-${y}`} x={x - 1.6} y={y - 1.6} width="3.2" height="3.2" fill={x === 16 && y === 16 ? "currentColor" : "#2b2b2b"} stroke="currentColor" strokeWidth="1" />))}</svg>
+  <svg viewBox="0 0 32 32" aria-hidden="true">
+    <path d={frameSegments} fill="none" stroke="currentColor" strokeWidth="1" />
+    {FRAME.map((x) => FRAME.map((y) => (x === 16 && y === 16
+      ? <rect key="centre" x={16 - HANDLE} y={16 - HANDLE} width={HANDLE * 2} height={HANDLE * 2} fill="currentColor" />
+      : <rect key={`${x}-${y}`} x={x - HANDLE} y={y - HANDLE} width={HANDLE * 2} height={HANDLE * 2} fill="none" stroke="currentColor" strokeWidth="1" />)))}
+  </svg>
 );
 export const TextIcon = () => (
   <svg viewBox="31.86 152.09 32 32" aria-hidden="true"><path d="M47.86,160.92v14.34M55.49,160.92h-15.25M55.49,160.92v1.8M40.24,160.92v1.8M49.66,175.26h-3.6" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" /></svg>
 );
-export const FileIcon = () => (
-  <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M10 6.5h8.5l4.5 4.5v14.5H10z" {...line} /><path d="M18.5 6.5V11H23" {...line} /><path d="M13.5 18.5a3 3 0 0 1 5.2-2M18.5 19.5a3 3 0 0 1-5.2 2" {...line} strokeWidth={1.2} /><path d="M18.9 14.6v1.9H17M13.1 23.4v-1.9H15" {...line} strokeWidth={1.2} /></svg>
+export const FileIcon = () => <SaveAsIcon />;
+// File menu (as the mockup): Save, Import, Export / Save As, Open file, New file.
+export const SaveIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M10 8h10.5L24 11.5V22a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z" {...line} /><path d="M12 8v5h7V8M11.5 24v-6.5h9V24" {...line} /></svg>);
+export const ImportIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M15 8.5h9v15h-9M15 8.5v3M15 23.5v-3" {...line} /><path d="M10 8.5v8.5h10.5M17.5 14l3 3-3 3" {...line} /></svg>);
+export const ExportIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 9H8.5v15h15v-7" {...line} /><path d="M13.5 19.5v-3.5a4.5 4.5 0 0 1 4.5-4.5h6M21 8.5l3 3-3 3" {...line} /></svg>);
+// Save As / the File group (mockup): a floppy disk in the middle, two arrows round it, clockwise, with
+// solid tips (top → right, pointing down; bottom → left, pointing up).
+export const SaveAsIcon = () => (
+  <svg viewBox="0 0 32 32" aria-hidden="true">
+    <g fill="none" stroke="currentColor" strokeWidth="1" strokeLinejoin="round">
+      <path d="M11 10h8.8l2.2 2.2V21a1 1 0 0 1-1 1H11a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1z" />
+      <path d="M12.6 10v3.4h6V10M12.6 22v-4.6h6.8V22" />
+    </g>
+    <path d="M16 4.5A11.5 11.5 0 0 1 27.25 13.6M16 27.5A11.5 11.5 0 0 1 4.75 18.4" fill="none" stroke="currentColor" strokeWidth="1.15" strokeLinecap="round" />
+    <path d="M28.8 13.25L25.7 13.95L27.8 16.15zM3.2 18.75L6.3 18.05L4.2 15.85z" fill="currentColor" />
+  </svg>
 );
-export const NewIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M10 6.5h8.5l4.5 4.5v14.5H10z" {...line} /><path d="M16.5 14v8M12.5 18h8" {...line} /></svg>);
-export const OpenIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6.5 10.5h6l2 2h10v11h-18z" {...line} /><path d="M6.5 23.5l3-7.5h18l-3 7.5" {...line} /></svg>);
-export const SaveIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 7.5h13l3.5 3.5v13.5H8z" {...line} /><path d="M11.5 7.5v5.5h8V7.5M11.5 24.5v-7h9v7" {...line} /></svg>);
-export const ExportIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 6v13M11 11l5-5 5 5" {...line} /><path d="M8 17.5v7h16v-7" {...line} /></svg>);
+export const OpenFileIcon = () => (
+  <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 15l8-4 8 4v8.5l-8 4-8-4z" {...line} /><path d="M8 15l8 4 8-4M16 19v8.5" {...line} /><path d="M8 15l-2.5-3 8-4 2.5 3M24 15l2.5-3-8-4-2.5 3" {...line} /><path d="M16 11V4.5M13.5 7L16 4.5 18.5 7" {...line} strokeDasharray="0" /></svg>
+);
+export const NewFileIcon = () => (
+  <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M14 12.5h10.5V24H8V17" {...line} /><path d="M11 18h10.5M11 21h10.5" {...line} /><path d="M10.5 6.5v8M6.5 10.5h8" {...line} /></svg>
+);
 export const ColourIcon = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="13" y="13" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="3" /><rect x="7.5" y="7.5" width="11" height="11" fill="currentColor" stroke="#2b2b2b" strokeWidth="1" /></svg>
 );

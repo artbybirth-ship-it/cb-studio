@@ -2,6 +2,9 @@
 
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { axisAngle, type ReflectAxis } from "@/lib/reflect";
+import { scrubProps } from "@/lib/scrub";
+import { useEscClose } from "@/lib/escClose";
+import PanelClose from "./PanelClose";
 
 /**
  * Adobe Illustrator "Reflect" (Reflect tool O, then Enter): Horizontal, Vertical or an Angle axis
@@ -39,6 +42,7 @@ const VerticalIcon = () => (
 );
 
 export default function ReflectDialog({ target, canCopy, onPreview, onApply, onCancel }: Props) {
+  useEscClose(true, onCancel);
   const [initial] = useState(readSaved);
   const [axis, setAxis] = useState<ReflectAxis>(initial.axis);
   const [angleText, setAngleText] = useState(initial.axis === "angle" ? initial.angle : String(axisAngle(initial.axis, 0)));
@@ -107,7 +111,7 @@ export default function ReflectDialog({ target, canCopy, onPreview, onApply, onC
     <div className="cb-rf-backdrop">
       <div className="cb-rf-dialog" role="dialog" aria-modal="true" aria-labelledby="cb-reflect-title" ref={dialogRef}
         onKeyDown={(event) => event.stopPropagation() /* other keys stay inside the dialog */}>
-        <header id="cb-reflect-title">Reflect{target ? ` · ${target}` : ""}</header>
+        <header id="cb-reflect-title"><PanelClose onClose={onCancel} label="Cancel" />Reflect{target ? ` · ${target}` : ""}</header>
         <div className="cb-rf-body">
           <div className="cb-rf-axes" role="radiogroup" aria-label="Axis">
             <label className="cb-rf-radio"><input type="radio" name="cb-reflect-axis" checked={axis === "horizontal"} onChange={() => chooseAxis("horizontal")} /><span>Horizontal</span><HorizontalIcon /></label>
@@ -117,6 +121,7 @@ export default function ReflectDialog({ target, canCopy, onPreview, onApply, onC
             <label className="cb-rf-radio"><input type="radio" name="cb-reflect-axis" checked={axis === "angle"} onChange={() => chooseAxis("angle")} /><span>Angle</span></label>
             <span className="cb-rf-anglebox">
               <input type="text" inputMode="decimal" value={angleText} aria-label="Axis angle in degrees" aria-invalid={!valid}
+                {...scrubProps({ value: Number.isFinite(angle) ? angle : null, onChange: (next) => { setAngleText(String(next)); setAxis("angle"); }, decimals: 1 })}
                 onChange={(event) => { setAngleText(event.target.value.replace("°", "")); setAxis("angle"); }}
                 onKeyDown={(event) => {
                   if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;

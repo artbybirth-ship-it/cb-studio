@@ -5,6 +5,7 @@ import type { EditorObject } from "@/types";
 import { DEFAULT_FONT, FONT_OPTIONS, fontCss } from "@/lib/fonts";
 import Popover from "./Popover";
 import { ColourSwatch } from "./ColourPicker";
+import { scrubProps } from "@/lib/scrub";
 
 /** Right-hand panel for a selected text layer: words, font, colour and size. */
 type Props = {
@@ -59,6 +60,7 @@ export default function TextLayerPanel({ layer, onPatch, onBack }: Props) {
         </label>
         <label className="cb-text-field">Size
           <input type="number" min={8} max={400} value={Number(layer.fontSize || 52)}
+            {...scrubProps({ value: Number(layer.fontSize || 52), onChange: (next) => onPatch({ fontSize: next }, true), min: 8, max: 400 })}
             onChange={(event) => onPatch({ fontSize: Math.max(8, Math.min(400, Number(event.target.value) || 52)) }, true)} />
         </label>
       </div>

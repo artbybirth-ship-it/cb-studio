@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, MutableRefObject, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import type { CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject } from "@/types";
 import { fontCss } from "@/lib/fonts";
@@ -19,6 +19,8 @@ type Props = {
   onSelectionChange?: (ids: string[]) => void;
   /** Batch move (multi-selection drag) committed as one edit. */
   onMoveMany?: (moves: Array<{ id: string; x: number; y: number }>) => void;
+  /** Option/Alt + drag: duplicate (a copy stays at the start) instead of a plain move. */
+  onDuplicateMoved?: (moves: Array<{ id: string; x: number; y: number }>) => void;
   /** Adobe Animate tools: "select" (V) shows a blue outline; "transform" (Q) shows the handles;
    *  "scale" (S, Illustrator) drags anywhere to scale the selection about its registration point. */
   toolMode?: "select" | "transform" | "scale" | "zoom";
@@ -219,7 +221,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, toolMode = "transform", transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, previewColorReplacement = null, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, previewColorReplacement = null, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -241,6 +243,8 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   const pendingPartDoubleClickRef = useRef<Set<string>>(new Set());
   const previousZoomRef = useRef(clampZoom(Number(zoom || 1)));
   const wheelZoomTargetRef = useRef<number | null>(null);
+  // Set when a zoom step has just corrected the pan: the players' view waits for that re-render.
+  const zoomPanPendingRef = useRef(false);
   // Keep the editor canvas visually stable when the browser page zoom changes.
   // Chrome/Safari desktop page zoom changes devicePixelRatio; we use the DPR at
   // editor mount as the baseline and counter-scale the entire stage viewport.
@@ -735,7 +739,9 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
 
   // Toolbar +/- zoom keeps the current viewport center stable instead of scaling
   // everything away from the top-left corner. Mouse-wheel zoom has its own cursor anchor.
-  useEffect(() => {
+  // A layout effect: the corrected pan renders before the browser paints, so a zoom step never
+  // shows one frame of the new zoom at the old position (Cmd +/- made the stage jump).
+  useLayoutEffect(() => {
     if (renderMode) return;
     const previousZoom = previousZoomRef.current;
     if (Math.abs(previousZoom - editorZoom) < 0.00001) return;
@@ -757,6 +763,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         x: screenX - fit.left - anchor.x * newScale,
         y: screenY - fit.top - anchor.y * newScale,
       });
+      zoomPanPendingRef.current = true;
     } else {
       const centerX = hostSize.width / 2;
       const centerY = hostSize.height / 2;
@@ -766,6 +773,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         x: centerX - fit.left - worldX * newScale,
         y: centerY - fit.top - worldY * newScale,
       });
+      zoomPanPendingRef.current = true;
     }
     previousZoomRef.current = editorZoom;
   }, [editorZoom, fit.left, fit.scale, fit.top, hostSize.height, hostSize.width, objects, pan.x, pan.y, playhead, renderMode, selectedObjectId]);
@@ -979,6 +987,20 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   // covers on screen and which part of it is visible. The shared bridge redraws the vectors
   // at exactly that resolution for the visible region (cb-animate-bridge.js SET_VIEW), so
   // zooming in never stretches a bitmap and memory stays bounded by the screen size.
+  // Same-origin players get the message at once (dispatched, not posted), so they redraw before the
+  // browser paints this frame; players on another origin fall back to postMessage.
+  const sendToPlayerNow = (frame: HTMLIFrameElement, message: Record<string, unknown>) => {
+    const target = frame.contentWindow;
+    if (!target) return;
+    try {
+      if (target.location.origin === window.location.origin) {
+        const PlayerMessageEvent = (target as unknown as typeof globalThis).MessageEvent;
+        target.dispatchEvent(new PlayerMessageEvent("message", { data: message, origin: window.location.origin, source: window }));
+        return;
+      }
+    } catch { /* another origin */ }
+    target.postMessage(message, "*");
+  };
   const lastViewKeyRef = useRef<Map<string, string>>(new Map());
   const lastViewSentRef = useRef<Map<string, Record<string, unknown>>>(new Map());
   const postCharacterViews = useCallback(() => {
@@ -1045,7 +1067,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       if (lastViewKeyRef.current.get(object.id) === key) continue;
       lastViewKeyRef.current.set(object.id, key);
       lastViewSentRef.current.set(object.id, { pixelScale, ...view, exact, minStroke, seal });
-      frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SET_VIEW", pixelScale, ...view, exact, minStroke, seal }, "*");
+      sendToPlayerNow(frame, { source: "characterbazaarstudio-editor", type: "SET_VIEW", pixelScale, ...view, exact, minStroke, seal });
     }
   }, [characterObjects, playhead, renderMode, useCssZoom, screenDpr]);
   const postCharacterViewsRef = useRef(postCharacterViews);
@@ -1068,9 +1090,16 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   };
   const readDiagnostics = useCallback(() => diagnosticsRef.current(), []);
 
-  useEffect(() => {
-    const frameId = window.requestAnimationFrame(() => postCharacterViews());
-    return () => window.cancelAnimationFrame(frameId);
+  // Before paint, so a zoom or resize shows the players already redrawn for it. Zooming out grows
+  // the visible region; sent a frame later, the old region was all that showed for a frame (flicker).
+  // Skipped while a zoom step's pan correction is still to render (that render sends it).
+  useLayoutEffect(() => {
+    if (zoomPanPendingRef.current) {
+      zoomPanPendingRef.current = false;
+      const frameId = window.requestAnimationFrame(() => postCharacterViewsRef.current());
+      return () => window.cancelAnimationFrame(frameId);
+    }
+    postCharacterViews();
   }, [postCharacterViews, effectiveScale, pan.x, pan.y, hostSize.width, hostSize.height, browserZoomFactor, screenDpr, readyCharacterIds]);
 
   useEffect(() => {
@@ -1290,10 +1319,12 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         }
       }
     };
-    const up = () => {
+    const up = (upEvent: PointerEvent) => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      if (moved) {
+      if (moved && (event.altKey || upEvent.altKey) && onDuplicateMoved) {
+        onDuplicateMoved(movers.map((mover) => ({ id: mover.item.id, x: mover.x, y: mover.y })));
+      } else if (moved) {
         if (movers.length > 1 && onMoveMany) onMoveMany(movers.map((mover) => ({ id: mover.item.id, x: mover.x, y: mover.y })));
         else movers.forEach((mover) => onMove(mover.item.id, mover.x, mover.y));
       } else if (groupIds) {

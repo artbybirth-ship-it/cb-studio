@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { useEscClose } from "@/lib/escClose";
 
 type Props = {
   open: boolean;
@@ -23,6 +24,8 @@ type Props = {
 };
 
 const VIEWPORT_MARGIN = 8;
+// Only one menu open at a time: opening one closes the one already open (mouse or keyboard).
+let closeOpenPopover: (() => void) | null = null;
 
 /**
  * Menu rendered into document.body with fixed positioning, so scroll areas and
@@ -33,6 +36,28 @@ export default function Popover({
   offset = 6, className = "", role = "menu", "aria-label": ariaLabel, children,
 }: Props) {
   const popoverRef = useRef<HTMLDivElement>(null);
+  useEscClose(open, onClose);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useLayoutEffect(() => {
+    if (!open) return;
+    const close = () => closeRef.current();
+    closeOpenPopover?.();
+    closeOpenPopover = close;
+    return () => { if (closeOpenPopover === close) closeOpenPopover = null; };
+  }, [open]);
+  // A press outside closes it. Added once per opening and heard first (capture): re-added on each
+  // render, the listener missed a press that re-rendered the editor (another rail button), so two
+  // menus stayed open.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!popoverRef.current?.contains(target) && !anchorRef.current?.contains(target)) closeRef.current();
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [anchorRef, open]);
   const [style, setStyle] = useState<CSSProperties | null>(null);
   const [side, setSide] = useState(placement);
 
@@ -83,23 +108,14 @@ export default function Popover({
     if (!open) return;
     let frame = 0;
     const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(reposition); };
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!popoverRef.current?.contains(target) && !anchorRef.current?.contains(target)) onClose();
-    };
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     window.addEventListener("resize", schedule);
     window.addEventListener("scroll", schedule, true);
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener("resize", schedule);
       window.removeEventListener("scroll", schedule, true);
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
     };
-  }, [anchorRef, onClose, open, reposition]);
+  }, [open, reposition]);
 
   if (!open || typeof document === "undefined") return null;
   return createPortal(

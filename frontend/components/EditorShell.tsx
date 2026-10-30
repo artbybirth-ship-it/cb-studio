@@ -1,8 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { api } from "@/lib/api";
+import { SCRUB_END, SCRUB_START } from "@/lib/scrub";
+import { useEscClose } from "@/lib/escClose";
 import { compileAnimationPlan } from "@/lib/animationCompiler";
 import { resolveCharacterTransformAtTime, sortKeyframes, upsertCharacterKeyframe } from "@/lib/keyframes";
 import { partEditMatrix, resolvePartTransformAtTime, upsertPartKeyframe } from "@/lib/partKeyframes";
@@ -32,9 +34,12 @@ import ScaleRotateDialog from "./ScaleRotateDialog";
 import ToolGroup from "./ToolGroup";
 import {
   AlignBottomIcon, AlignHCenterIcon, AlignIcon, AlignLeftIcon, AlignRightIcon, AlignTopIcon, AlignVCenterIcon, ColourIcon, DistributeHIcon, DistributeVIcon,
-  ExportIcon, FileIcon, FillIcon, NewIcon, OpenIcon, RecolourIcon, ReflectIcon, SaveIcon, ScaleIcon, SelectIcon, StrokeIcon, SwapIcon, TextIcon, TransformIcon,
+  ExportIcon, FileIcon, FillIcon, ImportIcon, NewFileIcon, OpenFileIcon, RecolourIcon, ReflectIcon, SaveAsIcon, SaveIcon, ScaleIcon, SelectIcon, StrokeIcon, SwapIcon, TextIcon, TransformIcon,
 } from "./toolIcons";
-import TransformPanel, { type TransformField, type TransformReading } from "./TransformPanel";
+import ExportPanel, { exportExtension, exportFormatLabel, type ExportFormat, type ExportResolution } from "./ExportPanel";
+import { deliverExport, pickExportTarget, type ExportTarget } from "@/lib/exportFile";
+import { playChime, unlockChime } from "@/lib/chime";
+import TransformPanel, { spacedShortcut, type TransformField, type TransformReading } from "./TransformPanel";
 import { alignMoves, localReference, positionFor, stageBounds, toStage, type AlignAction, type LayerGeometry, type Orientation } from "@/lib/layerTransform";
 import type { MediaLibraryItem } from "@/lib/mediaLibrary";
 
@@ -212,6 +217,12 @@ const readUrlAudioDuration = (url: string): Promise<number> => new Promise((reso
   audio.src = url;
 });
 
+/** Index above the background pictures at the bottom of the stack (they would hide anything below). */
+const backgroundFloor = (objects: EditorObject[]) => {
+  let index = 0;
+  while (index < objects.length && objects[index].type === "background") index += 1;
+  return index;
+};
 const readImageDimensions = (file: File): Promise<{ width: number; height: number }> => new Promise((resolve, reject) => {
   const objectUrl = URL.createObjectURL(file);
   const image = new Image();
@@ -322,28 +333,93 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // The desktop app may use ⌘T; Chrome always keeps it for "new tab", so the browser uses ⌥⌘T.
   const [transformShortcut, setTransformShortcut] = useState("⌥⌘T");
   useEffect(() => { if (/Electron/i.test(navigator.userAgent)) setTransformShortcut("⌘T"); }, []);
-  const fillStrokeRef = useRef<HTMLDivElement>(null);
   const pickScopeRef = useRef("*");
   // Lighten / Darken tool: click = lighter, Alt/Option = darker, Shift = fine step.
   const [toneShades, setToneShades] = useState(true);
   const [toneDarken, setToneDarken] = useState(false);
-  const [toneBarPosition, setToneBarPosition] = useState({ left: 70, top: 300 });
-  const toneButtonRef = useRef<HTMLButtonElement>(null);
-  // Find and Replace dialog (Cmd/Ctrl+F or the magnifier in the tool palette).
+  const [toneBarPosition] = useState({ left: 70, top: 300 });
+  // Panel borders (Animate): drag the canvas/timeline border and the right panel's left edge.
+  // null = the stylesheet's default size; a custom size is remembered per browser.
+  const [timelineHeight, setTimelineHeight] = useState<number | null>(null);
+  const [sidePanelWidth, setSidePanelWidth] = useState<number | null>(null);
+  const editorGridRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    try {
+      const height = Number(window.localStorage.getItem("cb-timeline-height"));
+      const width = Number(window.localStorage.getItem("cb-side-panel-width"));
+      if (height > 0) setTimelineHeight(height);
+      if (width > 0) setSidePanelWidth(width);
+    } catch { /* storage unavailable */ }
+  }, []);
+  // "y" = canvas/timeline border, "x" = right panel border. The canvas keeps 300px height and
+  // 400px width. Pointer capture keeps the drag alive over the character frames on the canvas.
+  const beginBorderDrag = (event: ReactPointerEvent<HTMLDivElement>, axis: "x" | "y") => {
+    const container = axis === "y" ? workspaceRef.current : editorGridRef.current;
+    if (event.button !== 0 || !container) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const style = getComputedStyle(container);
+    const tracks = (axis === "y" ? style.gridTemplateRows : style.gridTemplateColumns).split(" ").map(parseFloat);
+    const startSize = tracks[2] || 0;
+    const start = axis === "y" ? event.clientY : event.clientX;
+    const max = axis === "y"
+      ? container.clientHeight - tracks[0] - 300
+      : container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - tracks[0] - 2 * parseFloat(style.columnGap || "0") - 400;
+    const min = axis === "y" ? 120 : 280;
+    let size = startSize;
+    const move = (moveEvent: PointerEvent) => {
+      const delta = start - (axis === "y" ? moveEvent.clientY : moveEvent.clientX);
+      size = Math.round(Math.max(min, Math.min(Math.max(min, max), startSize + delta)));
+      (axis === "y" ? setTimelineHeight : setSidePanelWidth)(size);
+    };
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      if (size !== startSize) {
+        try { window.localStorage.setItem(axis === "y" ? "cb-timeline-height" : "cb-side-panel-width", String(size)); } catch { /* not persisted */ }
+      }
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  };
+  // Double-click a border: back to the default size.
+  const resetBorder = (axis: "x" | "y") => {
+    (axis === "y" ? setTimelineHeight : setSidePanelWidth)(null);
+    try { window.localStorage.removeItem(axis === "y" ? "cb-timeline-height" : "cb-side-panel-width"); } catch { /* storage unavailable */ }
+  };
+  // Find and Replace dialog (Shift+Cmd/Ctrl+F or A→B in the tool palette).
   const [findReplaceOpen, setFindReplaceOpen] = useState(false);
   const [frPicking, setFrPicking] = useState<"find" | "replace" | null>(null);
   const [frPicked, setFrPicked] = useState<{ target: "find" | "replace"; color: string; nonce: number } | null>(null);
+  // Picking a colour on the canvas: Esc cancels the pick before it closes the panel that asked for it.
+  useEscClose(Boolean(frPicking), () => setFrPicking(null));
+  useEscClose(boxPicking, () => { setBoxPicking(false); setActiveTool("select"); });
+  useEscClose(colorPickActive, () => setColorPickActive(false));
   const [activeTool, setActiveTool] = useState<"select" | "transform" | "scale" | "reflect" | "zoom" | "import" | "text" | "eyedropper" | "bone" | "tone" | null>("select");
   const activeToolRef = useRef(activeTool);
   activeToolRef.current = activeTool;
   const audioPlayersRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const voiceUploadRef = useRef<HTMLInputElement>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [renderFormat, setRenderFormat] = useState<ExportFormat>("mp4");
+  // Where the running export is saved (chosen in the Save window before it started).
+  const exportTargetRef = useRef<ExportTarget | null>(null);
+  const finishedRenderRef = useRef<string | null>(null); // a finished export is handled once
+  const importInputRef = useRef<HTMLInputElement>(null);
   const playClockRef = useRef(performance.now());
   const historyPastRef = useRef<EditorData[]>([]);
   const historyFutureRef = useRef<EditorData[]>([]);
   const canvasHoverRef = useRef(false);
   const zoomToolbarRef = useRef<HTMLDivElement>(null);
   const zoomValueRef = useRef<HTMLButtonElement>(null);
+  // One dark box on the rail at a time, only once a tool is used: the last tool clicked keeps it
+  // until another is clicked; tool shortcuts (V / Q / S / O, Cmd+F) move it too. None when the
+  // editor opens, and automatic tool changes (back to Select after a pick or Esc) don't move it.
+  const [railHighlight, setRailHighlight] = useState<"edit" | "file" | "text" | "colour" | "align" | "find" | null>(null);
 
   // A refresh must never lose work: every change is also kept in this browser until the
   // autosave reaches the server, and a newer local copy wins when the scene is opened.
@@ -440,16 +516,35 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const timer = window.setInterval(async () => {
       const latest = await api.getRender(render.id);
       setRender(latest);
+      if ((latest.status === "complete" || latest.status === "failed") && finishedRenderRef.current === latest.id) return;
+      if (latest.status === "complete" || latest.status === "failed") finishedRenderRef.current = latest.id;
       if (latest.status === "complete") {
-        showNotice("MP4 render complete - Download MP4 is ready.");
         window.clearInterval(timer);
+        const target = exportTargetRef.current;
+        exportTargetRef.current = null;
+        if (target && latest.output_url) {
+          try {
+            const result = await deliverExport(target, latest.output_url);
+            showNotice(result.status === "saved" ? `Finished: saved to ${result.name}` : `Finished: ${result.name} is in your Downloads folder`);
+          } catch {
+            // The chosen folder could not be written (moved, no permission): the Downloads folder instead.
+            const result = await deliverExport({ name: target.name }, latest.output_url);
+            showNotice(`Finished: couldn't save to the chosen folder, so ${result.name} is in your Downloads folder`);
+          }
+        } else if (latest.output_url) {
+          const result = await deliverExport({ name: `${(project?.title || "Untitled Project").trim()}.${exportExtension(renderFormat)}` }, latest.output_url);
+          showNotice(`Finished: ${result.name} is in your Downloads folder`);
+        }
+        playChime("done");
       } else if (latest.status === "failed") {
-        showNotice(`Render failed: ${latest.error || "Unknown render error"}`, "error");
         window.clearInterval(timer);
+        exportTargetRef.current = null;
+        playChime("error");
+        showNotice(`Export failed: ${latest.error || "Unknown export error"}`, "error");
       }
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [render]);
+  }, [render, renderFormat]);
 
   const resetCanvasView = useCallback(() => {
     setCanvasZoom(1);
@@ -522,12 +617,25 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     }
   }, [audioLayers, duration, isPlaying, playhead]);
 
+  // A drag on a number box (lib/scrub) changes the draft many times; only its first change is
+  // recorded, so one Cmd+Z undoes the whole drag.
+  const scrubHistoryRef = useRef<"idle" | "armed" | "recorded">("idle");
+  useEffect(() => {
+    const start = () => { scrubHistoryRef.current = "armed"; };
+    const end = () => { scrubHistoryRef.current = "idle"; };
+    window.addEventListener(SCRUB_START, start);
+    window.addEventListener(SCRUB_END, end);
+    return () => { window.removeEventListener(SCRUB_START, start); window.removeEventListener(SCRUB_END, end); };
+  }, []);
   const mutate = useCallback((fn: (data: EditorData) => void) => {
     setDirty(true);
     setDraft((current) => {
       if (!current) return current;
-      historyPastRef.current.push(clone(current));
-      if (historyPastRef.current.length > 60) historyPastRef.current.shift();
+      if (scrubHistoryRef.current !== "recorded") {
+        historyPastRef.current.push(clone(current));
+        if (historyPastRef.current.length > 60) historyPastRef.current.shift();
+        if (scrubHistoryRef.current === "armed") scrubHistoryRef.current = "recorded";
+      }
       historyFutureRef.current = [];
       const next = clone(current);
       fn(next);
@@ -543,10 +651,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     });
   }, [mutate, selectedObjectId]);
 
-  // ---- Recolour panel (opened from the Fill/Stroke boxes at the bottom of the tool palette).
+  // ---- Recolour panel (opened from the Colour group in the tool rail, or the character panel).
   const openRecolor = (target: ColorReplacement["target"]) => {
-    const rect = fillStrokeRef.current?.getBoundingClientRect();
-    if (rect) setRecolorPosition({ left: Math.round(rect.right + 14), bottom: Math.max(12, Math.round(window.innerHeight - rect.bottom)) });
     setRecolorTarget(target);
     setRecolorOpen(true);
   };
@@ -576,15 +682,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     } catch { /* player not reachable */ }
   };
 
-  // Cmd/Ctrl+F opens Find and Replace (Animate); Esc cancels its canvas eyedropper.
+  // Shift+Cmd/Ctrl+F opens Find and Replace (Cmd+F is Paste in Front); Esc cancels its canvas eyedropper.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (frPicking && event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); setFrPicking(null); return; }
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "f") {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.shiftKey && event.key.toLowerCase() === "f") {
         const element = event.target as HTMLElement | null;
         if (element && (element.isContentEditable || /^(input|textarea|select)$/i.test(element.tagName))) return;
         event.preventDefault();
         setFindReplaceOpen(true);
+        setRailHighlight("find");
       }
     };
     window.addEventListener("keydown", onKey, { capture: true });
@@ -1295,12 +1402,14 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (plainKey && event.key.toLowerCase() === "v") {
         event.preventDefault();
         setActiveTool("select");
+        setRailHighlight("edit");
         return;
       }
       if (plainKey && event.key.toLowerCase() === "q") {
         // Free Transform is part of the Selection tool now; Q keeps working as a shortcut to it.
         event.preventDefault();
         setActiveTool("select");
+        setRailHighlight("edit");
         return;
       }
       if (plainKey && !event.shiftKey && event.key.toLowerCase() === "z") {
@@ -1313,12 +1422,14 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         // Illustrator's Reflect tool; Enter then opens the Reflect dialog (Cmd+O stays Open).
         event.preventDefault();
         setActiveTool("reflect");
+        setRailHighlight("edit");
         return;
       }
       if (plainKey && !event.shiftKey && event.key.toLowerCase() === "s") {
         // Illustrator's Scale tool (Cmd+S stays Save: plainKey excludes modifiers).
         event.preventDefault();
         setActiveTool("scale");
+        setRailHighlight("edit");
         return;
       }
       if (event.key === "Escape" && !activeCharacterPart) setActiveTool((tool) => (tool === "scale" || tool === "tone" || tool === "reflect" || tool === "zoom" ? "select" : tool));
@@ -1333,6 +1444,33 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (commandOrControl && !event.altKey && !event.shiftKey && event.code === "KeyO") {
         event.preventDefault();
         void fileActionsRef.current.open();
+        return;
+      }
+      // File menu: ⌘R / ⌘I import to stage, ⇧⌘O external library, ⌘E export, ⌘N new file (⌥⌘N in the
+      // browser: Chrome keeps ⌘N for a new window). ⌘R is taken from the browser's reload here.
+      if (commandOrControl && !event.altKey && !event.shiftKey && event.code === "KeyR") {
+        event.preventDefault();
+        fileActionsRef.current.importFile();
+        return;
+      }
+      if (commandOrControl && !event.altKey && event.shiftKey && event.code === "KeyO") {
+        event.preventDefault();
+        fileActionsRef.current.externalLibrary();
+        return;
+      }
+      if (commandOrControl && !event.altKey && !event.shiftKey && event.code === "KeyI") {
+        event.preventDefault();
+        fileActionsRef.current.importFile();
+        return;
+      }
+      if (commandOrControl && !event.altKey && !event.shiftKey && event.code === "KeyE") {
+        event.preventDefault();
+        fileActionsRef.current.exportVideo();
+        return;
+      }
+      if (commandOrControl && !event.shiftKey && event.code === "KeyN" && (event.altKey || /Electron/i.test(navigator.userAgent))) {
+        event.preventDefault();
+        fileActionsRef.current.newFile();
         return;
       }
       // Transform panel: ⌥⌘T (Chrome keeps ⌘T for a new tab); the desktop app also takes ⌘T.
@@ -1354,6 +1492,21 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         if (event.code === "KeyC") clipboardActionsRef.current.copy();
         else if (event.code === "KeyX") { if (!event.shiftKey) clipboardActionsRef.current.cut(); }
         else clipboardActionsRef.current.paste(event.shiftKey);
+        return;
+      }
+      // Arrange: Cmd+Shift+Up / Down = front / back, Cmd+Up / Down = one step.
+      if (!event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && selectedIdsRef.current.length > 0) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const up = event.key === "ArrowUp";
+        clipboardActionsRef.current.arrange(event.shiftKey ? (up ? "front" : "back") : (up ? "forward" : "backward"));
+        return;
+      }
+      // Paste in Front (Cmd+F) / in Back (Cmd+B), in place.
+      if (!event.altKey && !event.shiftKey && (event.code === "KeyF" || event.code === "KeyB") && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        clipboardActionsRef.current.paste(true, event.code === "KeyF" ? "front" : "back");
         return;
       }
       if (key === "a" && !event.shiftKey) {
@@ -1522,6 +1675,24 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (!item) return;
       if (item.type === "character" && (item.keyframes || []).length > 0) moveKeyframedPosition(item, playhead, x, y);
       else { item.x = x; item.y = y; }
+    });
+  }, [mutate, playhead]);
+
+  /** Option/Alt + drag (Illustrator): a copy stays where the layers were, directly below them; the
+   *  dragged layers move and stay selected on top. One edit, so one undo step. */
+  const duplicateMovedObjects = useCallback((moves: Array<{ id: string; x: number; y: number }>) => {
+    const byId = new Map(moves.map((entry) => [entry.id, entry]));
+    const stamp = Date.now();
+    mutate((data) => {
+      data.objects = data.objects.flatMap((item, index) => {
+        const target = byId.get(item.id);
+        if (!target) return [item];
+        const copy = clone(item);
+        copy.id = `${String(item.id).split("-copy-")[0]}-copy-${stamp}${index}`;
+        if (item.type === "character" && (item.keyframes || []).length > 0) moveKeyframedPosition(item, playhead, target.x, target.y);
+        else { item.x = target.x; item.y = target.y; }
+        return [copy, item];
+      });
     });
   }, [mutate, playhead]);
 
@@ -1696,10 +1867,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     mutate((data) => { data.objects = data.objects.filter((item) => !ids.has(item.id)); });
     selectObject(null);
   };
-  const pasteLayers = (inPlace: boolean) => {
+  /** Paste: in the middle of the view, or in place. Front / back (Illustrator): in place, directly
+   *  above / below the selected layers (nothing selected: on top / just above the background). */
+  const pasteLayers = (inPlace: boolean, where: "top" | "front" | "back" = "top") => {
     const clip = readLayerClipboard();
     if (!clip || !draft) { showNotice("Nothing to paste. Select layers and press Cmd/Ctrl+C first."); return; }
-    const target = inPlace ? clip.centre : (viewCenterRef.current?.() || clip.centre);
+    const target = inPlace || where !== "top" ? clip.centre : (viewCenterRef.current?.() || clip.centre);
     const dx = target.x - clip.centre.x, dy = target.y - clip.centre.y;
     const stamp = Date.now();
     const pasted = clip.objects.map((item, index) => {
@@ -1713,13 +1886,46 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
       return copy;
     });
-    mutate((data) => { data.objects.push(...pasted); }); // new layers on top, in the copied order
+    const selectedIds = new Set(selectedIdsRef.current);
+    mutate((data) => {
+      const indexes = data.objects.map((item, index) => (selectedIds.has(item.id) ? index : -1)).filter((index) => index >= 0);
+      const at = where === "front" ? (indexes.length ? Math.max(...indexes) + 1 : data.objects.length)
+        : where === "back" ? (indexes.length ? Math.min(...indexes) : backgroundFloor(data.objects))
+          : data.objects.length; // new layers on top, in the copied order
+      data.objects.splice(at, 0, ...pasted);
+    });
     setActiveCharacterPart(null);
     setPartReplacementBrowserOpen(false);
     changeSelection(pasted.map((item) => item.id));
   };
-  const clipboardActionsRef = useRef({ copy: copyLayers, cut: cutLayers, paste: pasteLayers });
-  clipboardActionsRef.current = { copy: copyLayers, cut: cutLayers, paste: pasteLayers };
+  // Arrange (Illustrator): front / back of everything, or one step past the next layer. "Back" stays
+  // above the background pictures at the bottom, which would otherwise hide the layers.
+  const arrangeLayers = (mode: "front" | "back" | "forward" | "backward") => {
+    const ids = new Set(selectedIdsRef.current);
+    if (ids.size === 0) return;
+    mutate((data) => {
+      const objects = data.objects;
+      if (mode === "front" || mode === "back") {
+        const moving = objects.filter((item) => ids.has(item.id));
+        const rest = objects.filter((item) => !ids.has(item.id));
+        const at = mode === "front" ? rest.length : backgroundFloor(rest);
+        data.objects = [...rest.slice(0, at), ...moving, ...rest.slice(at)];
+        return;
+      }
+      if (mode === "forward") {
+        for (let index = objects.length - 2; index >= 0; index -= 1) {
+          if (ids.has(objects[index].id) && !ids.has(objects[index + 1].id)) [objects[index], objects[index + 1]] = [objects[index + 1], objects[index]];
+        }
+        return;
+      }
+      const floor = backgroundFloor(objects.filter((item) => !ids.has(item.id)));
+      for (let index = 1; index < objects.length; index += 1) {
+        if (ids.has(objects[index].id) && !ids.has(objects[index - 1].id) && index - 1 >= floor) [objects[index], objects[index - 1]] = [objects[index - 1], objects[index]];
+      }
+    });
+  };
+  const clipboardActionsRef = useRef({ copy: copyLayers, cut: cutLayers, paste: pasteLayers, arrange: arrangeLayers });
+  clipboardActionsRef.current = { copy: copyLayers, cut: cutLayers, paste: pasteLayers, arrange: arrangeLayers };
 
   const transformObject = useCallback((id: string, patch: TransformPatch) => {
     mutate((data) => {
@@ -2135,6 +2341,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       // Cmd/Ctrl +/- is handled by the canvas-zoom shortcut above.
       if ((event.metaKey || event.ctrlKey) && (event.key === "+" || event.key === "=" || event.key === "-" || event.code === "NumpadAdd" || event.code === "NumpadSubtract")) return;
 
+      // Cmd/Ctrl + arrows arrange the layers (above); only plain / Shift arrows move the part.
+      if (event.metaKey || event.ctrlKey) return;
       const current = resolvePartTransformAtTime(selectedCharacter, activeCharacterPart, playhead);
       const fineStep = 1;
       const bigStep = 10;
@@ -2615,16 +2823,60 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     setPlaying(false);
     router.push(next ? `/editor/${next.id}` : "/dashboard");
   };
-  const fileActionsRef = useRef({ save, open: openProjectFile });
-  fileActionsRef.current = { save, open: openProjectFile };
-
-  const startRender = async () => {
+  const startRender = async (format: ExportFormat = "mp4", resolution: ExportResolution = "fullhd") => {
     try {
       await saveCurrentScene();
-      showNotice("Render queued…");
-      setRender(await api.startRender(projectId));
-    } catch (error) { showNotice(error instanceof Error ? error.message : "Render failed to start", "error"); }
+      setRenderFormat(format);
+      showNotice(`${exportFormatLabel(format)} export queued…`);
+      setRender(await api.startRender(projectId, { format, resolution, time: playhead, scene: scene?.id }));
+    } catch (error) { showNotice(error instanceof Error ? error.message : "Export failed to start", "error"); }
   };
+  // Export: first the Save window (file name and folder), then the export; cancelling the window
+  // cancels the export. The click also unlocks the "Finished" chime.
+  const beginExport = async (format: ExportFormat, resolution: ExportResolution) => {
+    unlockChime();
+    let target: ExportTarget | null;
+    try {
+      target = await pickExportTarget(`${(project?.title || "Untitled Project").trim()}.${exportExtension(format)}`, exportExtension(format));
+    } catch (error) { showNotice(error instanceof Error ? error.message : "Could not choose where to save", "error"); return; }
+    if (!target) return;
+    exportTargetRef.current = target;
+    setExportOpen(false);
+    void startRender(format, resolution);
+  };
+  // File › Export (⌘E): the Export panel picks MP4, GIF, JPEG or PNG.
+  const exportVideo = () => {
+    if (render?.status === "queued" || render?.status === "running") { showNotice("An export is already running"); return; }
+    setExportOpen(true);
+  };
+  const newFile = () => { void flushAutosave().then(() => router.push("/dashboard?newProject=1")); };
+  // File › Import › Import to Stage (Animate): a picture becomes a picture layer you can select,
+  // move and transform (like FX), at its own size and shrunk to fit the stage; a sound becomes a
+  // voice / sound layer. Pictures are stored with the project's backgrounds (the upload kinds).
+  const importToStage = async (file: File) => {
+    if (!project) return;
+    if (file.type.startsWith("audio/")) { void uploadVoice(file); return; }
+    if (!file.type.startsWith("image/")) { showNotice("Import to Stage takes a picture or a sound file", "error"); return; }
+    try {
+      const dimensions = await readImageDimensions(file);
+      const asset = await api.uploadAsset(project.id, "background", file);
+      const width = dimensions.width || 300;
+      const height = dimensions.height || 300;
+      const layer: EditorObject = {
+        id: `image-${Date.now()}`, type: "prop", name: file.name,
+        x: project.width / 2, y: project.height / 2, scale: Math.min(1, project.width / width, project.height / height), rotation: 0, opacity: 1,
+        assetKind: "image", assetUrl: asset.url, sourceWidth: width, sourceHeight: height,
+        startTime: Math.max(0, playhead), mimeType: String(asset.metadata?.mimeType || file.type),
+      };
+      mutate((data) => placeInLayer(data, layer, selectedIdsRef.current[0]));
+      selectObject(layer.id);
+    } catch (error) { showNotice(error instanceof Error ? error.message : "Import failed", "error"); }
+  };
+  const comingSoon = (name: string) => showNotice(`${name} is coming soon`);
+
+  const fileActions = { save, open: openProjectFile, importFile: () => importInputRef.current?.click(), externalLibrary: () => comingSoon("Open External Library"), exportVideo, newFile };
+  const fileActionsRef = useRef(fileActions);
+  fileActionsRef.current = fileActions;
 
   const resetScene = () => {
     if (!scene) return;
@@ -2702,6 +2954,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
 
   return (
     <main className="cb-editor-shell">
+      <input ref={importInputRef} type="file" accept="image/*,audio/*" hidden onChange={(event) => {
+        const file = event.currentTarget.files?.[0];
+        if (file) void importToStage(file);
+        event.currentTarget.value = "";
+      }} />
       <input ref={voiceUploadRef} type="file" accept="audio/*" hidden onChange={(event) => {
         const file = event.currentTarget.files?.[0];
         if (file) void uploadVoice(file);
@@ -2719,6 +2976,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       {reflectOpen && (
         <ReflectDialog target={reflectTarget} canCopy={!reflectTarget} onPreview={previewReflect} onApply={applyReflect} onCancel={cancelReflect} />
       )}
+      {exportOpen && <ExportPanel portrait={Boolean(project && project.height > project.width)} onClose={() => setExportOpen(false)} onExport={(format, resolution) => void beginExport(format, resolution)} />}
       {transformOpen && (
         <TransformPanel read={readTransform} onChange={changeTransform} onClose={() => setTransformOpen(false)} shortcut={transformShortcut}
           reference={transformReference} onReference={(rx, ry) => setTransformReference({ rx, ry })}
@@ -2727,36 +2985,48 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       {scaleRotateOpen && <ScaleRotateDialog onApply={applyScaleRotate} onClose={() => setScaleRotateOpen(false)}
         target={selectedObjectIds.length === 1 && selected?.type === "character" && activeCharacterPart ? partLabel(selected, activeCharacterPart) : undefined} />}
 
-      <div className="cb-editor-grid">
+      <div className="cb-editor-grid" ref={editorGridRef} style={{
+        ...(timelineHeight ? { ["--cb-timeline-height" as string]: `max(120px, min(${timelineHeight}px, calc(100dvh - 396px)))` } : {}),
+        ...(sidePanelWidth ? { ["--cb-side-panel-width" as string]: `min(${sidePanelWidth}px, 50vw)` } : {}),
+      }}>
         <aside className="cb-tool-rail">
           {/* Tool groups (Illustrator): a corner mark means more inside — hold, or click the mark. */}
           <ToolGroup label="Edit" panelTitle="Edit"
             icon={lastEditTool === "scale" ? <ScaleIcon /> : lastEditTool === "reflect" ? <ReflectIcon /> : <SelectIcon />}
-            active={activeTool === "select" || activeTool === "scale" || activeTool === "reflect"}
+            active={railHighlight === "edit"} onPress={() => setRailHighlight("edit")}
             title={lastEditTool === "scale" ? "Scale tool (S)" : lastEditTool === "reflect" ? "Reflect tool (O), then Enter for the Reflect dialog" : "Selection tool (V): click to select (Shift+click adds), drag to move; handles scale, rotate, stretch and skew"}
             onPrimary={() => setActiveTool(lastEditTool)}
             items={[
-              { id: "select", label: "Select", shortcut: "V", icon: <SelectIcon />, active: activeTool === "select", onSelect: () => setActiveTool("select") },
-              { id: "scale", label: "Scale", shortcut: "S", icon: <ScaleIcon />, active: activeTool === "scale", onSelect: () => setActiveTool("scale") },
-              { id: "reflect", label: "Reflect", shortcut: "O", icon: <ReflectIcon />, active: activeTool === "reflect", onSelect: () => setActiveTool("reflect") },
-              { id: "transform", label: "Transform", shortcut: transformShortcut, icon: <TransformIcon />, active: transformOpen, onSelect: () => setTransformOpen(true) },
+              // One dark box: Transform while its panel is open, else the current tool.
+              { id: "select", label: "Select", shortcut: "V", icon: <SelectIcon />, active: !transformOpen && activeTool === "select", onSelect: () => setActiveTool("select") },
+              { id: "scale", label: "Scale", shortcut: "S", icon: <ScaleIcon />, active: !transformOpen && activeTool === "scale", onSelect: () => setActiveTool("scale") },
+              { id: "reflect", label: "Reflect", shortcut: "O", icon: <ReflectIcon />, active: !transformOpen && activeTool === "reflect", onSelect: () => setActiveTool("reflect") },
+              { id: "transform", label: "Transform", shortcut: spacedShortcut(transformShortcut), icon: <TransformIcon />, active: transformOpen, title: "Open or close the Transform panel", onSelect: () => setTransformOpen((open) => !open) },
             ]} />
-          <ToolGroup label="File" panelTitle="File" icon={<FileIcon />} buttonRef={openButtonRef} title="New, open, save or export the project"
+          <ToolGroup label="File" panelTitle="File" icon={<FileIcon />} buttonRef={openButtonRef} active={railHighlight === "file"} onPress={() => setRailHighlight("file")} title="New, open, save or export the project"
             items={[
-              { id: "new", label: "New Project", icon: <NewIcon />, onSelect: () => { void flushAutosave().then(() => router.push("/dashboard?newProject=1")); } },
-              { id: "open", label: "Open Project", shortcut: "⌘O", icon: <OpenIcon />, title: "Recent projects, or open a .cb file from this device", onSelect: () => { if (!openPanel) toggleOpenPanel(); } },
-              { id: "save", label: "Save Project", shortcut: "⌘S", icon: <SaveIcon />, title: "Save to a .cb file on this device (Shift for Save As)", onSelect: () => void save() },
-              { id: "export", label: render?.status === "running" ? `Exporting ${render.progress}%` : render?.status === "queued" ? "Queued…" : "Export", icon: <ExportIcon />, disabled: render?.status === "queued" || render?.status === "running", title: "Export the project as an MP4 video", onSelect: () => void startRender() },
+              { id: "save", label: "Save", shortcut: "⌘ S", icon: <SaveIcon />, title: "Save to a .cb file on this device", onSelect: () => void save() },
+              { id: "import", label: "Import", shortcut: "⌘ I", icon: <ImportIcon />, title: "Import to the stage or the library",
+                submenu: [
+                  { id: "stage", label: "Import to Stage…", shortcut: "⌘R", title: "A picture (a layer you can select and transform) or a sound", onSelect: () => importInputRef.current?.click() },
+                  { id: "library", label: "Import to Library…", disabled: true, note: "Coming soon", onSelect: () => comingSoon("Import to Library") },
+                  { id: "external", label: "Open External Library…", shortcut: "⇧⌘O", disabled: true, note: "Coming soon", onSelect: () => comingSoon("Open External Library") },
+                  { id: "video", label: "Import Video…", disabled: true, note: "Coming soon", onSelect: () => comingSoon("Import Video") },
+                ] },
+              { id: "export", label: render?.status === "running" ? `Exporting ${render.progress}%` : render?.status === "queued" ? "Queued…" : "Export", shortcut: render?.status === "running" || render?.status === "queued" ? undefined : "⌘ E", icon: <ExportIcon />, disabled: render?.status === "queued" || render?.status === "running", title: "Export as MP4, GIF, JPEG or PNG", onSelect: exportVideo },
+              { id: "save-as", label: "Save As", shortcut: "⌘ ⇧ S", icon: <SaveAsIcon />, title: "Save to a new .cb file", onSelect: () => void save(true) },
+              { id: "open", label: "Open file", shortcut: "⌘ O", icon: <OpenFileIcon />, title: "Recent projects, or open a .cb file from this device", onSelect: () => { if (!openPanel) toggleOpenPanel(); } },
+              { id: "new", label: "New file", shortcut: transformShortcut === "⌘T" ? "⌘ N" : "⌥ ⌘ N", icon: <NewFileIcon />, title: "Start a new project", onSelect: newFile },
             ]} />
-          <ToolGroup label="Text" icon={<TextIcon />} active={activeTool === "text"} title="Text tool" onPrimary={() => { setActiveTool("text"); addText(); }} />
-          <ToolGroup label="Colour" panelTitle="Colour" icon={<ColourIcon />} title="Fill and stroke colours, and recolouring"
+          <ToolGroup label="Text" icon={<TextIcon />} active={railHighlight === "text"} onPress={() => setRailHighlight("text")} title="Text tool" onPrimary={() => { setActiveTool("text"); addText(); }} />
+          <ToolGroup label="Colour" panelTitle="Colour" icon={<ColourIcon />} active={railHighlight === "colour"} onPress={() => setRailHighlight("colour")} title="Fill and stroke colours, and recolouring"
             items={[
               { id: "fill", label: "Fill colour", icon: <FillIcon />, disabled: !boxState.fill, title: boxState.fill ? `Fill ${boxState.fill}: choose a colour` : "This layer has no fill colour", onSelect: () => { setActiveBox("fill"); setBoxPicker("fill"); } },
               { id: "stroke", label: "Stroke colour", icon: <StrokeIcon />, disabled: !boxState.stroke, title: boxState.stroke ? `Stroke ${boxState.stroke}: choose a colour` : "No stroke colour here", onSelect: () => { setActiveBox("stroke"); setBoxPicker("stroke"); } },
               { id: "swap", label: "Swap", shortcut: "⇧X", icon: <SwapIcon />, disabled: !(boxState.kind === "character" && boxState.fill && boxState.stroke), title: "Swap fill and stroke colours", onSelect: swapBoxColours },
               { id: "recolour", label: "Recolour", icon: <RecolourIcon />, title: "The selected character's palette, colour by colour", onSelect: () => openRecolor("both") },
             ]} />
-          <ToolGroup label="Align" panelTitle="Align" panelClassName="cb-align-flyout" icon={<AlignIcon />} title="Align and distribute the selected layers"
+          <ToolGroup label="Align" panelTitle="Align" panelClassName="cb-align-flyout" icon={<AlignIcon />} active={railHighlight === "align"} onPress={() => setRailHighlight("align")} title="Align and distribute the selected layers"
             items={[
               { id: "left", label: "Left", icon: <AlignLeftIcon />, keepOpen: true, onSelect: () => runAlign("left") },
               { id: "hcenter", label: "Centre", icon: <AlignHCenterIcon />, keepOpen: true, onSelect: () => runAlign("hcenter") },
@@ -2771,67 +3041,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               <input type="checkbox" checked={alignToStage} onChange={(event) => setAlignToStage(event.target.checked)} /> Align to stage
             </label>
           </ToolGroup>
-          <button
-            type="button"
-            className={activeTool === "import" ? "active" : ""}
-            aria-pressed={activeTool === "import"}
-            disabled={characterLibraryCharacters.length === 0}
-            onClick={() => {
-              setActiveTool("import");
-              const first = characterLibraryCharacters[0];
-              if (first) addReferenceBrowserCharacter(first.id, first.actions[0]?.id);
-            }}
-            aria-label="Import character"
-            title={characterLibraryCharacters.length ? "Add first Admin Library character" : "Admin must upload a character library first"}
-          ><svg viewBox="31.86 95.67 32 32" aria-hidden="true"><path d="M47.86,103.2v16.94M56.33,111.67h-16.94" fill="none" stroke="currentColor" strokeMiterlimit="10"/></svg></button>
-          <button
-            type="button"
-            ref={toneButtonRef}
-            className={activeTool === "tone" ? "active" : ""}
-            aria-label="Lighten / Darken tool"
-            aria-pressed={activeTool === "tone"}
-            title="Lighten / Darken (click a colour of the selected character: lighter · Alt/Option: darker · Shift: fine step)"
-            onClick={() => {
-              const rect = toneButtonRef.current?.getBoundingClientRect();
-              if (rect) setToneBarPosition({ left: Math.round(rect.right + 14), top: Math.round(rect.top) });
-              setActiveTool((tool) => (tool === "tone" ? "select" : "tone"));
-            }}
-          >
-            <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="8" fill="none" stroke="currentColor" strokeWidth="1.5"/><path d="M16 8a8 8 0 0 1 0 16z" fill="currentColor"/></svg>
-          </button>
-          <button type="button" className={activeTool === "eyedropper" ? "active" : ""} aria-label="Color picker tool" aria-pressed={activeTool === "eyedropper"} title="Sample a color from the screen and apply it to the selection or canvas" onClick={() => void sampleCanvasColor()}>
-            <svg viewBox="31.86 207.79 32 32" aria-hidden="true">
-              <rect x="47.14" y="219.27" width="5.27" height="4.41" transform="translate(171.18 29.67) rotate(45)" fill="currentColor"/>
-              <path d="M52.56,221.13l2.1-2.14c.67-.67.67-1.77,0-2.44h0c-.67-.67-1.77-.67-2.44,0l-2.1,2.14" fill="currentColor"/>
-              <path d="M47.27,222.08l-7.04,7.04c-.52.52-.52,1.37,0,1.9h0c.52.52,1.37.52,1.9,0l7.04-7.04" fill="none" stroke="currentColor" strokeWidth=".5" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </button>
-          <button type="button" className={activeTool === "bone" ? "active" : ""} aria-label="Bone tool" aria-pressed={activeTool === "bone"} title="Create Motion from position keyframes" onClick={() => { setActiveTool("bone"); createMotion(); }}>
-            <svg viewBox="31.86 265.2 32 32" aria-hidden="true"><path d="M49.74,283.99l-6.67-7.55s-1.11,0-2.57-.35c-.85-.21-1.8-1.13-1.79-2.12,0-.42.21-1.08.54-1.34.52-.41.89-.75,1.76-.86.33.61.41,1.35.21,2.01.11-.18.19-.37.25-.56.07-.22.11-.46.09-.69-.01-.16-.06-.31-.08-.46-.14-.94.56-2.05,1.53-2.2.97-.15,1.74.79,2,1.62.36,1.17-.19,2.6.25,3.01l6.67,7.55s1.11,0,2.57.35c.85.21,1.8,1.13,1.79,2.12,0,.42-.24.84-.57,1.09-.31.24-1.48,1.33-1.89,1.01-.1-.07-.14-.19-.18-.31-.15-.53-.1-1.09.03-1.62-.12.28-.27.63-.32.93-.08.42,0,.86-.04,1.28-.03.37-.16.75-.39,1.04s-.58.51-.95.55c-.57.06-1.12-.28-1.51-.7-.54-.57-.64-1.3-.61-2.06.02-.45.26-1.38-.13-1.74Z" fill="currentColor"/></svg>
-          </button>
-          {/* Illustrator Fill / Stroke boxes: click = active box (X), double-click = Colour Picker, ⇄ = swap (Shift+X). */}
-          <div className={`cb-fillstroke ${activeBox === "stroke" ? "stroke-front" : ""}`} ref={fillStrokeRef}>
-            <button type="button" className={`cb-fill-box ${boxState.fill ? "" : "none"} ${activeBox === "fill" ? "active" : ""}`} style={boxState.fill ? { background: boxState.fill } : undefined}
-              aria-label={`Fill: ${boxState.fill || "none"}`} aria-pressed={activeBox === "fill"}
-              title={boxState.fill ? `Fill ${boxState.fill}${boxState.kind === "background" ? " (scene background)" : ""} · double-click to choose a colour` : "This layer has no fill colour"}
-              onClick={() => setActiveBox("fill")} onDoubleClick={() => { setActiveBox("fill"); if (boxState.fill) setBoxPicker("fill"); }} />
-            <button type="button" className={`cb-stroke-box ${boxState.stroke ? "" : "none"} ${activeBox === "stroke" ? "active" : ""}`} style={boxState.stroke ? { borderColor: boxState.stroke } : undefined}
-              aria-label={`Stroke: ${boxState.stroke || "none"}`} aria-pressed={activeBox === "stroke"}
-              title={boxState.stroke ? `Stroke ${boxState.stroke} · double-click to choose a colour` : boxState.kind === "text" ? "Text has no stroke" : "No stroke colour here"}
-              onClick={() => setActiveBox("stroke")} onDoubleClick={() => { setActiveBox("stroke"); if (boxState.stroke) setBoxPicker("stroke"); }} />
-            <button type="button" className="cb-fillstroke-swap" title="Swap fill and stroke colours (Shift+X)" aria-label="Swap fill and stroke colours" disabled={!(boxState.kind === "character" && boxState.fill && boxState.stroke)} onClick={swapBoxColours}>
-              <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4h6.5L7 2.5M10 8H3.5L5 9.5" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            </button>
-          </div>
-          <button type="button" className={`cb-recolor-open ${recolorOpen ? "active" : ""}`} title="Recolour… (the selected character's palette, colour by colour)" aria-label="Recolour" onClick={() => openRecolor("both")}>
-            <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="12" r="4" fill="#e0624f"/><circle cx="20" cy="11" r="4" fill="#e8c34d"/><circle cx="16" cy="19" r="4" fill="#4f8fe0"/><path d="M8 24h16" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
-          </button>
-          <button type="button" className={activeTool === "zoom" ? "active" : ""} aria-label="Zoom tool" aria-pressed={activeTool === "zoom"}
-            title="Zoom tool (Z) — click to zoom in, Option/Alt + click to zoom out, drag to zoom to an area. Double-click: Actual Size (100%)"
-            onClick={() => setActiveTool("zoom")} onDoubleClick={() => { setActiveTool("zoom"); zoomToActualSize(); }}>
-            <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="14" cy="14" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.6"/><path d="M19 19l5.5 5.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M11 14h6M14 11v6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
-          </button>
-          <button type="button" className={`cb-find-replace-color ${findReplaceOpen ? "active" : ""}`} title="Find and Replace (Cmd/Ctrl+F): colour, text or font" aria-label="Find and Replace" onClick={() => setFindReplaceOpen(true)}>
+          <button type="button" className={`cb-find-replace-color ${railHighlight === "find" ? "active" : ""}`} title="Find and Replace (Shift+Cmd/Ctrl+F): colour, text or font" aria-label="Find and Replace" aria-pressed={railHighlight === "find"}
+            onPointerDown={(event) => { if (event.button === 0) setRailHighlight("find"); }} onClick={() => { setRailHighlight("find"); setFindReplaceOpen(true); }}>
             {/* "A → B": find something and replace it (the magnifier belongs to the Zoom tool). */}
             <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 20l3.5-9 3.5 9M6.3 17h4.4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M13.5 16h5M17 13.5l2.5 2.5-2.5 2.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/><path d="M21.5 11h3.2a2.2 2.2 0 0 1 0 4.4h-3.2zM21.5 15.4h3.7a2.3 2.3 0 0 1 0 4.6h-3.7z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/></svg>
           </button>
@@ -2886,7 +3097,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
           />
         )}
 
-        <section className="cb-workspace">
+        <section className="cb-workspace" ref={workspaceRef}>
+          <div className="cb-panel-border-y" role="separator" aria-orientation="horizontal" aria-label="Resize the timeline"
+            title="Drag to resize the timeline · double-click for the default size"
+            onPointerDown={(event) => beginBorderDrag(event, "y")} onDoubleClick={() => resetBorder("y")} />
           <div className="cb-project-tab-row">
             <div className="cb-project-tabs" role="tablist" aria-label="Open projects">
               {(openTabs.length ? openTabs : [{ id: project.id, title: project.title || "Untitled Project-01" }]).map((tab) => (
@@ -2932,8 +3146,15 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                   Open from device…<kbd>⌘O</kbd>
                 </button>
               </Popover>
-              {(render?.status === "queued" || render?.status === "running") && <span className="cb-export-status" role="status">{render.status === "queued" ? "Export queued…" : `Exporting ${render.progress}%`}</span>}
-              {render?.status === "complete" && render.output_url && <a className="cb-download-mp4" href={render.output_url} download={`characterbazaar-${project.title || "project"}.mp4`}>⇩ Download</a>}
+              {/* Export progress (mockup): the finished file goes straight to the chosen folder, so no Download link. */}
+              {(render?.status === "queued" || render?.status === "running") && (
+                <span className="cb-export-progress" role="progressbar" aria-label={`Creating ${exportExtension(renderFormat)}`}
+                  aria-valuemin={0} aria-valuemax={100} aria-valuenow={render.status === "queued" ? 0 : render.progress}>
+                  {render.status === "queued" ? "Waiting…" : `Creating ${exportExtension(renderFormat)}`}
+                  <i><b style={{ width: `${render.status === "queued" ? 0 : render.progress}%` }} /></i>
+                  <em>{render.status === "queued" ? "" : `${render.progress}%`}</em>
+                </span>
+              )}
               {render?.status === "failed" && <button className="cb-render-error" title={render.error || "Export failed"} onClick={() => showNotice(`Export failed: ${render.error || "Unknown error"}`, "error")}>Export Error</button>}
             </div>
             <div className="cb-canvas-zoom-toolbar" ref={zoomToolbarRef} title="Editor viewport zoom. Hold Space + drag to pan.">
@@ -3017,6 +3238,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onSelect={selectFromCanvas}
               onMove={moveObject}
               onMoveMany={moveObjects}
+              onDuplicateMoved={duplicateMovedObjects}
               onTransform={transformObject}
               activeCharacterPart={selected?.type === "character" ? activeCharacterPart : null}
               onMoveCharacterPart={moveCharacterPart}
@@ -3073,6 +3295,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             sourceDurations={sourceDurations}
           />
         </section>
+        <div className="cb-panel-border-x" role="separator" aria-orientation="vertical" aria-label="Resize the side panel"
+          title="Drag to resize the panel · double-click for the default size"
+          onPointerDown={(event) => beginBorderDrag(event, "x")} onDoubleClick={() => resetBorder("x")} />
 
         {selected?.type === "character" ? (
           <CharacterEditPanel

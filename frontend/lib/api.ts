@@ -69,7 +69,9 @@ export const api = {
   },
   updateScene: (sceneId: string, body: Partial<{ name: string; duration_seconds: number; editor_data: EditorData }>) =>
     request<Scene>(`${API}/scenes/${sceneId}`, { method: "PATCH", body: JSON.stringify(body) }),
-  startRender: (projectId: string) => request<RenderJob>(`${API}/projects/${projectId}/render`, { method: "POST" }),
+  /** format: mp4 / gif / jpeg / png; a JPEG / PNG is the frame at `time` (seconds) of `scene`. */
+  startRender: (projectId: string, options: { format?: string; resolution?: string; time?: number; scene?: string } = {}) =>
+    request<RenderJob>(`${API}/projects/${projectId}/render`, { method: "POST", body: JSON.stringify(options) }),
   getRender: (jobId: string) => request<RenderJob>(`${API}/renders/${jobId}`),
   uploadAsset: (projectId: string, kind: "background" | "audio", file: File) => {
     const form = new FormData();
