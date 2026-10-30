@@ -163,6 +163,9 @@ export type EditorObject = {
   /** Non-uniform stretch in the object's own axes, on top of the uniform `scale`. Default 1. */
   stretchX?: number;
   stretchY?: number;
+  /** Outline thickness factor on top of the character's size (Transform panel with "Scale Strokes
+   *  & Effects" off keeps the outlines as thick as before scaling). Default 1. */
+  strokeScale?: number;
   flipX?: boolean;
   text?: string;
   fillColor?: string;

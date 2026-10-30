@@ -5,6 +5,7 @@ import type { MouseEvent as ReactMouseEvent, MutableRefObject, PointerEvent as R
 import type { CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject } from "@/types";
 import { fontCss } from "@/lib/fonts";
 import RenderDiagnostics, { type RenderDiagnosticsInfo } from "@/components/RenderDiagnostics";
+import type { LayerGeometry } from "@/lib/layerTransform";
 import { resolveCharacterTransformAtTime, type CharacterTransform } from "@/lib/keyframes";
 import { resolvePartOverridesAtTime, resolvePartTransformAtTime, resolveSourceSeekMs, type PartTransform } from "@/lib/partKeyframes";
 
@@ -48,6 +49,8 @@ type Props = {
   blockDoubleClick?: boolean;
   /** Filled by the canvas: the stage point at the centre of what is visible (Paste in Center). */
   viewCenterRef?: MutableRefObject<(() => { x: number; y: number }) | null>;
+  /** Filled by the canvas: a layer's artwork box (Transform panel, Align). */
+  layerGeometryRef?: MutableRefObject<((objectId: string) => LayerGeometry | null) | null>;
   /** Eyedropper mode: the next press on the stage is handed to onColorPick instead of selecting. */
   colorPickActive?: boolean;
   /** Cursor while picking: eyedropper, or the Lighten / Darken tool's + / −. */
@@ -216,7 +219,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, toolMode = "transform", transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, previewColorReplacement = null, frameAccessRef, viewCenterRef, blockDoubleClick = false, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, toolMode = "transform", transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, previewColorReplacement = null, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -685,6 +688,24 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   const editorZoom = renderMode ? 1 : clampZoom(Number(zoom || 1));
   const effectiveScale = Math.max(0.001, fit.scale * editorZoom);
   if (viewCenterRef) viewCenterRef.current = () => ({ x: (hostSize.width / 2 - fit.left - pan.x) / effectiveScale, y: (hostSize.height / 2 - fit.top - pan.y) / effectiveScale });
+  // A layer's artwork box (the box the selection hugs) in its own unrotated stage px, relative to its
+  // position. Characters: their measured artwork; text and props: the element, scaled.
+  if (layerGeometryRef) layerGeometryRef.current = (objectId: string) => {
+    const object = objects.find((item) => item.id === objectId);
+    if (!object || object.type === "background" || object.type === "audio" || object.type === "empty") return null;
+    const stretch = stretchOf(object);
+    if (object.type === "character") {
+      const sourceWidth = Math.max(1, Number(object.sourceWidth || 1920));
+      const sourceHeight = Math.max(1, Number(object.sourceHeight || 1920));
+      const kx = Math.max(0.02, Number(object.scale || 1)) * stretch.x, ky = Math.max(0.02, Number(object.scale || 1)) * stretch.y;
+      const visual = getCharacterVisualBounds(object);
+      return { left: (visual.x - sourceWidth / 2) * kx, top: (visual.y - sourceHeight / 2) * ky, width: visual.width * kx, height: visual.height * ky };
+    }
+    const element = hostRef.current?.querySelector<HTMLElement>(`[data-editor-object-id="${CSS.escape(objectId)}"]`);
+    if (!element) return null;
+    const kx = Number(object.scale || 1) * stretch.x, ky = Number(object.scale || 1) * stretch.y;
+    return { left: (-element.offsetWidth / 2) * kx, top: (-element.offsetHeight / 2) * ky, width: element.offsetWidth * kx, height: element.offsetHeight * ky };
+  };
   const showTransparencyGrid = transparencyGrid && !renderMode;
   const gridScreenScale = Math.max(0.001, effectiveScale / Math.max(0.001, browserZoomFactor));
   const hasDetachedSourcePartEdits = useMemo(() => cameraCharacterObjects.some((object) => {
@@ -880,6 +901,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       colorOverrides: object.colorOverrides || {},
       // Recolour rules, plus the rule being previewed in the Recolour panel (not saved yet).
       colorReplacements: [...(object.colorReplacements || []), ...(previewColorReplacement && previewColorReplacement.objectId === object.id ? [previewColorReplacement.rule] : [])],
+      strokeScale: object.strokeScale ?? 1,
       selectedPart: object.id === selectedObjectId ? (activeCharacterPart || "") : "",
       // Entered part: the player dims everything outside it (never in render mode).
       // Entered part, or the part a selected piece sits in (its parent), keeps full strength.

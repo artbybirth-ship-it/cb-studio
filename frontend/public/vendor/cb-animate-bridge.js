@@ -807,6 +807,9 @@
   // the editor asks for 1.5 px on 1× (Full HD) screens and the video export for 1.5 px of the final
   // frame, which matches Animate's outline weight there (SET_VIEW minStroke).
   var cbMinStroke = 1;
+  // Outline thickness factor of the layer (CHARACTER_EDITS strokeScale): the Transform panel with
+  // "Scale Strokes & Effects" off scales a character but keeps its outlines as thick as they were.
+  var cbStrokeScale = 1;
   function installMinStroke() {
     var G = window.createjs && window.createjs.Graphics, S = G && G.Stroke && G.Stroke.prototype;
     if (!S || S.__cbMinStroke) return;
@@ -818,8 +821,9 @@
       // ignoreScale strokes are drawn with the transform reset, so their width is already in pixels.
       var scale = 1;
       if (!this.ignoreScale) { var m = ctx.getTransform(); scale = Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) || 1; }
-      if (lw * scale >= cbMinStroke) return exec.call(this, ctx);
-      ctx.lineWidth = cbMinStroke / scale;
+      var width = this.ignoreScale ? lw : lw * cbStrokeScale;
+      if (width === lw && lw * scale >= cbMinStroke) return exec.call(this, ctx);
+      ctx.lineWidth = Math.max(width, cbMinStroke / scale);
       try { return exec.call(this, ctx); } finally { ctx.lineWidth = lw; }
     };
   }
@@ -915,7 +919,7 @@
       if (d.type === 'SEEK') { var f = Math.max(0, Math.round(Number(d.seekMs || 0) / 1000 * FPS)), total = Math.max(1, root.totalFrames || 1); if (root.gotoAndStop) root.gotoAndStop(d.loop && total > 1 ? f % total : Math.min(total - 1, f)); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
-      else if (d.type === 'CHARACTER_EDITS') { cbLastOv = d.partOverrides || {}; applyEdits(d); scheduleBounds(); }
+      else if (d.type === 'CHARACTER_EDITS') { cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }
       else if (d.type === 'HIT_TEST_PART') { selectAt(Number(d.normalizedX || 0), Number(d.normalizedY || 0)); }
       else if (d.type === 'BEGIN_PART_DRAG') { startDrag(d); }
       else if (d.type === 'MOVE_PART_DRAG') { moveDrag(d, false); }

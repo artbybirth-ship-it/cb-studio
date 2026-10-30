@@ -8,8 +8,9 @@ type Props = {
   /** Element the popover is attached to; clicks inside it do not count as "outside". */
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
-  /** Preferred side; flips to the other side when there is more room there. */
-  placement?: "bottom" | "top";
+  /** Preferred side; bottom/top flip to the other side when there is more room there. "right"
+   *  opens beside the anchor, top-aligned (tool rail flyouts). */
+  placement?: "bottom" | "top" | "right";
   /** start/end align that edge with the anchor; stretch matches the anchor width. */
   align?: "start" | "end" | "stretch";
   /** Never narrower than the anchor. */
@@ -42,6 +43,14 @@ export default function Popover({
     const rect = anchor.getBoundingClientRect();
     const viewportWidth = document.documentElement.clientWidth;
     const viewportHeight = window.innerHeight;
+    if (placement === "right") {
+      const height = Math.min(popover.scrollHeight, viewportHeight - VIEWPORT_MARGIN * 2);
+      const top = Math.min(Math.max(VIEWPORT_MARGIN, rect.top), viewportHeight - height - VIEWPORT_MARGIN);
+      const left = Math.min(rect.right + offset, viewportWidth - popover.offsetWidth - VIEWPORT_MARGIN);
+      setSide("right");
+      setStyle({ top, left, ["--cb-popover-max-height" as string]: `${viewportHeight - VIEWPORT_MARGIN * 2}px` });
+      return;
+    }
     const spaceBelow = viewportHeight - rect.bottom - offset - VIEWPORT_MARGIN;
     const spaceAbove = rect.top - offset - VIEWPORT_MARGIN;
     const naturalHeight = popover.scrollHeight;

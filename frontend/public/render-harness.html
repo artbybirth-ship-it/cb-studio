@@ -258,6 +258,7 @@
       partOverrides:resolvePartOverrides(object, time),
       colorOverrides:object.colorOverrides || {},
       colorReplacements:object.colorReplacements || [],
+      strokeScale:object.strokeScale == null ? 1 : object.strokeScale,
       selectedPart:'',
       focusPart:'',
       viewport:{width:requestedWidth || innerWidth,height:requestedHeight || innerHeight},

@@ -23,12 +23,19 @@ import { shiftLightness } from "@/lib/color";
 import ColourPicker from "./ColourPicker";
 import ReflectDialog from "./ReflectDialog";
 import { partLabel } from "@/lib/partLabels";
-import { axisInsideCharacter, reflectOrientation, reflectPoint } from "@/lib/reflect";
+import { axisInsideCharacter, reflectOrientation, reflectPoint, wrapDegrees } from "@/lib/reflect";
 import AIAnimatePanel from "./AIAnimatePanel";
 import HeaderUserIcon from "./HeaderUserIcon";
 import Popover from "./Popover";
 import { renderProjectThumbnail } from "@/lib/projectThumbnail";
 import ScaleRotateDialog from "./ScaleRotateDialog";
+import ToolGroup from "./ToolGroup";
+import {
+  AlignBottomIcon, AlignHCenterIcon, AlignIcon, AlignLeftIcon, AlignRightIcon, AlignTopIcon, AlignVCenterIcon, ColourIcon, DistributeHIcon, DistributeVIcon,
+  ExportIcon, FileIcon, FillIcon, NewIcon, OpenIcon, RecolourIcon, ReflectIcon, SaveIcon, ScaleIcon, SelectIcon, StrokeIcon, SwapIcon, TextIcon, TransformIcon,
+} from "./toolIcons";
+import TransformPanel, { type TransformField, type TransformReading } from "./TransformPanel";
+import { alignMoves, localReference, positionFor, stageBounds, toStage, type AlignAction, type LayerGeometry, type Orientation } from "@/lib/layerTransform";
 import type { MediaLibraryItem } from "@/lib/mediaLibrary";
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
@@ -303,6 +310,18 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const [recolorPosition, setRecolorPosition] = useState({ left: 70, bottom: 40 });
   const frameAccessRef = useRef<((objectId: string) => HTMLIFrameElement | undefined) | null>(null);
   const viewCenterRef = useRef<(() => { x: number; y: number }) | null>(null);
+  const layerGeometryRef = useRef<((objectId: string) => LayerGeometry | null) | null>(null);
+  // Tool rail groups (Illustrator): the Edit group's current tool, the Transform and Align panels.
+  const [lastEditTool, setLastEditTool] = useState<"select" | "scale" | "reflect">("select");
+  const [transformOpen, setTransformOpen] = useState(false);
+  const [transformReference, setTransformReference] = useState({ rx: 0.5, ry: 0.5 });
+  const [transformLinked, setTransformLinked] = useState(true);
+  const [transformScaleStrokes, setTransformScaleStrokes] = useState(true);
+  const [alignToStage, setAlignToStage] = useState(false);
+  const transformToggleRef = useRef<() => void>(() => undefined);
+  // The desktop app may use ⌘T; Chrome always keeps it for "new tab", so the browser uses ⌥⌘T.
+  const [transformShortcut, setTransformShortcut] = useState("⌥⌘T");
+  useEffect(() => { if (/Electron/i.test(navigator.userAgent)) setTransformShortcut("⌘T"); }, []);
   const fillStrokeRef = useRef<HTMLDivElement>(null);
   const pickScopeRef = useRef("*");
   // Lighten / Darken tool: click = lighter, Alt/Option = darker, Shift = fine step.
@@ -1316,6 +1335,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         void fileActionsRef.current.open();
         return;
       }
+      // Transform panel: ⌥⌘T (Chrome keeps ⌘T for a new tab); the desktop app also takes ⌘T.
+      if (commandOrControl && event.code === "KeyT" && !event.shiftKey && (event.altKey || /Electron/i.test(navigator.userAgent))) {
+        event.preventDefault();
+        transformToggleRef.current();
+        return;
+      }
       if (!commandOrControl || isEditableTarget(event.target)) return;
 
       const key = event.key.toLowerCase();
@@ -1721,6 +1746,136 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (patch.pivotY != null) item.pivotY = Math.max(-2, Math.min(3, patch.pivotY));
     });
   }, [mutate, playhead]);
+
+  // ---- Transform panel and Align (Illustrator). A layer's numbers describe its artwork box (what
+  // the selection hugs): X / Y are its registration point on the stage, W / H its size; size,
+  // rotation and skew keep that point in place. A selected part shows its own move, size (% of the
+  // part), rotation and skew, and turns around its own registration point.
+  useEffect(() => { if (activeTool === "select" || activeTool === "scale" || activeTool === "reflect") setLastEditTool(activeTool); }, [activeTool]);
+  const layerState = (item: EditorObject) => {
+    const position = item.type === "character" ? resolveCharacterTransformAtTime(item, playhead) : { x: Number(item.x || 0), y: Number(item.y || 0) };
+    const orientation: Orientation = { rotation: Number(item.rotation || 0), skewX: Number(item.skewX || 0), skewY: Number(item.skewY || 0), flipX: Boolean(item.flipX) };
+    return { position: { x: position.x, y: position.y }, orientation, box: layerGeometryRef.current?.(item.id) || null };
+  };
+  const transformTarget = () => {
+    if (!draft || selectedObjectIds.length !== 1) return null;
+    const item = draft.objects.find((object) => object.id === selectedObjectIds[0]);
+    if (!item || item.type === "background" || item.type === "audio" || item.type === "empty") return null;
+    if (item.type === "character" && activeCharacterPart) {
+      const part = resolvePartTransformAtTime(item, activeCharacterPart, playhead);
+      return { kind: "part" as const, item, part, partKey: activeCharacterPart };
+    }
+    const state = layerState(item);
+    return state.box ? { kind: "layer" as const, item, ...state, box: state.box } : null;
+  };
+  const transformReadRef = useRef<() => TransformReading | null>(() => null);
+  transformReadRef.current = () => {
+    const target = transformTarget();
+    if (!target) return null;
+    if (target.kind === "part") {
+      const { part } = target;
+      const scale = Math.max(0.02, Number(part.scale ?? 1));
+      return {
+        mode: "part", targetLabel: partLabel(target.item, target.partKey), scaleStrokesAvailable: false,
+        values: { x: part.offsetX, y: part.offsetY, w: scale * Number(part.stretchX ?? 1) * 100, h: scale * Number(part.stretchY ?? 1) * 100, rotation: part.rotation, skew: Number(part.skewX || 0) },
+      };
+    }
+    const reference = toStage(target.position, target.orientation, localReference(target.box, transformReference.rx, transformReference.ry));
+    return {
+      mode: "layer", targetLabel: target.item.name || "Layer", scaleStrokesAvailable: target.item.type === "character",
+      values: { x: reference.x, y: reference.y, w: target.box.width, h: target.box.height, rotation: target.orientation.rotation, skew: target.orientation.skewX },
+    };
+  };
+  const readTransform = useCallback(() => transformReadRef.current(), []);
+  const transformChangeRef = useRef<(field: TransformField, value: number) => void>(() => undefined);
+  transformChangeRef.current = (field, value) => {
+    const target = transformTarget();
+    if (!target || !Number.isFinite(value)) return;
+    const limit = (v: number, low: number, high: number) => Math.min(high, Math.max(low, v));
+    if (target.kind === "part") {
+      const { part } = target;
+      const scale = Math.max(0.02, Number(part.scale ?? 1)), stretchX = Number(part.stretchX ?? 1), stretchY = Number(part.stretchY ?? 1);
+      let patch: PartPatch;
+      if (field === "x") patch = { offsetX: value };
+      else if (field === "y") patch = { offsetY: value };
+      else if (field === "w" || field === "h") {
+        const current = (field === "w" ? scale * stretchX : scale * stretchY) * 100;
+        if (!(value > 0) || !(current > 0)) return;
+        const factor = value / current;
+        patch = transformLinked ? { scale: limit(scale * factor, 0.02, 20) }
+          : field === "w" ? { stretchX: limit(stretchX * factor, 0.02, 50) } : { stretchY: limit(stretchY * factor, 0.02, 50) };
+      } else if (field === "rotation") patch = { rotation: wrapDegrees(value) };
+      else patch = { skewX: limit(value, -80, 80) };
+      transformCharacterPart(target.item.id, target.partKey, patch);
+      return;
+    }
+    const { item, position, orientation, box } = target;
+    const local = localReference(box, transformReference.rx, transformReference.ry);
+    const anchor = toStage(position, orientation, local);
+    const patch: { x?: number; y?: number; scale?: number; stretchX?: number; stretchY?: number; rotation?: number; skewX?: number; strokeScale?: number } = {};
+    if (field === "x") { patch.x = position.x + value - anchor.x; patch.y = position.y; }
+    else if (field === "y") { patch.x = position.x; patch.y = position.y + value - anchor.y; }
+    else if (field === "w" || field === "h") {
+      const current = field === "w" ? box.width : box.height;
+      if (!(value > 0) || !(current > 0)) return;
+      const factor = value / current;
+      let fx = 1, fy = 1;
+      if (transformLinked) {
+        const scale = Math.max(0.02, Number(item.scale || 1)), next = limit(scale * factor, 0.02, 20);
+        fx = fy = next / scale; patch.scale = next;
+      } else if (field === "w") {
+        const stretch = Number(item.stretchX ?? 1), next = limit(stretch * factor, 0.02, 50);
+        fx = next / stretch; patch.stretchX = next;
+      } else {
+        const stretch = Number(item.stretchY ?? 1), next = limit(stretch * factor, 0.02, 50);
+        fy = next / stretch; patch.stretchY = next;
+      }
+      Object.assign(patch, positionFor(anchor, orientation, { x: local.x * fx, y: local.y * fy }));
+      // Scale Strokes & Effects off: the outlines keep the thickness they had.
+      if (item.type === "character" && !transformScaleStrokes) patch.strokeScale = limit(Number(item.strokeScale ?? 1) / Math.sqrt(fx * fy), 0.02, 50);
+    } else {
+      const next = field === "rotation" ? { ...orientation, rotation: wrapDegrees(value) } : { ...orientation, skewX: limit(value, -80, 80) };
+      Object.assign(patch, positionFor(anchor, next, local));
+      if (field === "rotation") patch.rotation = next.rotation; else patch.skewX = next.skewX;
+    }
+    mutate((data) => {
+      const layer = data.objects.find((object) => object.id === item.id);
+      if (!layer) return;
+      if (patch.x != null && patch.y != null) {
+        if (layer.type === "character" && (layer.keyframes || []).length > 0) moveKeyframedPosition(layer, playhead, patch.x, patch.y);
+        else { layer.x = patch.x; layer.y = patch.y; }
+      }
+      if (patch.scale != null) layer.scale = patch.scale;
+      if (patch.stretchX != null) layer.stretchX = patch.stretchX;
+      if (patch.stretchY != null) layer.stretchY = patch.stretchY;
+      if (patch.rotation != null) layer.rotation = patch.rotation;
+      if (patch.skewX != null) layer.skewX = patch.skewX;
+      if (patch.strokeScale != null) layer.strokeScale = patch.strokeScale;
+    });
+  };
+  const changeTransform = useCallback((field: TransformField, value: number) => transformChangeRef.current(field, value), []);
+  transformToggleRef.current = () => setTransformOpen((open) => !open);
+
+  const runAlign = (action: AlignAction) => {
+    if (!draft) return;
+    if (activeCharacterPart) { showNotice("Align works on whole layers. Press Esc to leave the part first."); return; }
+    const ids = new Set(selectedObjectIds);
+    const entries = draft.objects
+      .filter((item) => ids.has(item.id) && item.type !== "background" && item.type !== "audio" && item.type !== "empty" && !item.locked)
+      .map((item) => { const state = layerState(item); return state.box ? { id: item.id, position: state.position, bounds: stageBounds(state.position, state.orientation, state.box) } : null; })
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+    if (!entries.length) { showNotice("Select the layers to align first."); return; }
+    if ((action === "hdistribute" || action === "vdistribute") && entries.length < 3) { showNotice("Distribute needs three or more layers."); return; }
+    // One layer, or "Align to stage": the stage; otherwise the selection's own bounds.
+    const reference = alignToStage || entries.length === 1
+      ? { left: 0, top: 0, right: project?.width || 1920, bottom: project?.height || 1080 }
+      : { left: Math.min(...entries.map((e) => e.bounds.left)), top: Math.min(...entries.map((e) => e.bounds.top)), right: Math.max(...entries.map((e) => e.bounds.right)), bottom: Math.max(...entries.map((e) => e.bounds.bottom)) };
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const moves = alignMoves(entries, action, reference)
+      .filter((move) => Math.abs(move.dx) > 1e-6 || Math.abs(move.dy) > 1e-6)
+      .map((move) => { const entry = byId.get(move.id)!; return { id: move.id, x: entry.position.x + move.dx, y: entry.position.y + move.dy }; });
+    if (moves.length) moveObjects(moves);
+  };
 
   const createMotion = useCallback((id?: string | null) => {
     const targetId = id || selectedObjectId;
@@ -2564,22 +2719,58 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       {reflectOpen && (
         <ReflectDialog target={reflectTarget} canCopy={!reflectTarget} onPreview={previewReflect} onApply={applyReflect} onCancel={cancelReflect} />
       )}
+      {transformOpen && (
+        <TransformPanel read={readTransform} onChange={changeTransform} onClose={() => setTransformOpen(false)} shortcut={transformShortcut}
+          reference={transformReference} onReference={(rx, ry) => setTransformReference({ rx, ry })}
+          linked={transformLinked} onLinked={setTransformLinked} scaleStrokes={transformScaleStrokes} onScaleStrokes={setTransformScaleStrokes} />
+      )}
       {scaleRotateOpen && <ScaleRotateDialog onApply={applyScaleRotate} onClose={() => setScaleRotateOpen(false)}
         target={selectedObjectIds.length === 1 && selected?.type === "character" && activeCharacterPart ? partLabel(selected, activeCharacterPart) : undefined} />}
 
       <div className="cb-editor-grid">
         <aside className="cb-tool-rail">
-          <button type="button" className={activeTool === "select" ? "active" : ""} aria-label="Selection tool" aria-pressed={activeTool === "select"} title="Selection tool (V) — click to select (Shift+click to add), drag to move. Handles: corner = scale (Shift keeps proportions, Option/Alt from the registration point), side = stretch, just outside a corner = rotate, edge = skew." onClick={() => setActiveTool("select")}>
-            <svg viewBox="31.86 37.09 32 32" aria-hidden="true"><path d="M55.58,56.94l-5.3-.88c-.65-.11-1.58-.07-1.88.51l-2.22,5.03c-.72,1.37-2.79.92-2.87-.63l-.88-15.6c-.08-1.34,1.49-2.12,2.52-1.25l11.88,10.15c1.18,1,.28,2.92-1.24,2.67Z" fill="none" stroke="currentColor" strokeMiterlimit="10"/></svg>
-          </button>
-          <button type="button" className={activeTool === "scale" ? "active" : ""} aria-label="Scale tool" aria-pressed={activeTool === "scale"} title="Scale tool (S) — drag anywhere: left/right changes the width, up/down the height, around the registration point. Shift keeps proportions." onClick={() => setActiveTool("scale")}>
-            <svg viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" strokeMiterlimit="10"><rect x="7.5" y="13.5" width="11" height="11"/><path d="M12.5 8.5h11v11" strokeDasharray="2 1.6"/><path d="M15.5 16.5l9-9M19.5 7.5h5v5"/></g></svg>
-          </button>
-          <button type="button" className={activeTool === "reflect" ? "active" : ""} aria-label="Reflect tool" aria-pressed={activeTool === "reflect"}
-            title="Reflect tool (O) — then Enter (or double-click this button) for the Reflect dialog: mirror the selection or the selected part"
-            onClick={() => setActiveTool("reflect")} onDoubleClick={() => { setActiveTool("reflect"); openReflect(); }}>
-            <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 6v20" stroke="currentColor" strokeWidth="1.1" strokeDasharray="2 1.8"/><path d="M14 10l-7 12h7z" fill="currentColor"/><path d="M18 10l7 12h-7z" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round"/></svg>
-          </button>
+          {/* Tool groups (Illustrator): a corner mark means more inside — hold, or click the mark. */}
+          <ToolGroup label="Edit" panelTitle="Edit"
+            icon={lastEditTool === "scale" ? <ScaleIcon /> : lastEditTool === "reflect" ? <ReflectIcon /> : <SelectIcon />}
+            active={activeTool === "select" || activeTool === "scale" || activeTool === "reflect"}
+            title={lastEditTool === "scale" ? "Scale tool (S)" : lastEditTool === "reflect" ? "Reflect tool (O), then Enter for the Reflect dialog" : "Selection tool (V): click to select (Shift+click adds), drag to move; handles scale, rotate, stretch and skew"}
+            onPrimary={() => setActiveTool(lastEditTool)}
+            items={[
+              { id: "select", label: "Select", shortcut: "V", icon: <SelectIcon />, active: activeTool === "select", onSelect: () => setActiveTool("select") },
+              { id: "scale", label: "Scale", shortcut: "S", icon: <ScaleIcon />, active: activeTool === "scale", onSelect: () => setActiveTool("scale") },
+              { id: "reflect", label: "Reflect", shortcut: "O", icon: <ReflectIcon />, active: activeTool === "reflect", onSelect: () => setActiveTool("reflect") },
+              { id: "transform", label: "Transform", shortcut: transformShortcut, icon: <TransformIcon />, active: transformOpen, onSelect: () => setTransformOpen(true) },
+            ]} />
+          <ToolGroup label="File" panelTitle="File" icon={<FileIcon />} buttonRef={openButtonRef} title="New, open, save or export the project"
+            items={[
+              { id: "new", label: "New Project", icon: <NewIcon />, onSelect: () => { void flushAutosave().then(() => router.push("/dashboard?newProject=1")); } },
+              { id: "open", label: "Open Project", shortcut: "⌘O", icon: <OpenIcon />, title: "Recent projects, or open a .cb file from this device", onSelect: () => { if (!openPanel) toggleOpenPanel(); } },
+              { id: "save", label: "Save Project", shortcut: "⌘S", icon: <SaveIcon />, title: "Save to a .cb file on this device (Shift for Save As)", onSelect: () => void save() },
+              { id: "export", label: render?.status === "running" ? `Exporting ${render.progress}%` : render?.status === "queued" ? "Queued…" : "Export", icon: <ExportIcon />, disabled: render?.status === "queued" || render?.status === "running", title: "Export the project as an MP4 video", onSelect: () => void startRender() },
+            ]} />
+          <ToolGroup label="Text" icon={<TextIcon />} active={activeTool === "text"} title="Text tool" onPrimary={() => { setActiveTool("text"); addText(); }} />
+          <ToolGroup label="Colour" panelTitle="Colour" icon={<ColourIcon />} title="Fill and stroke colours, and recolouring"
+            items={[
+              { id: "fill", label: "Fill colour", icon: <FillIcon />, disabled: !boxState.fill, title: boxState.fill ? `Fill ${boxState.fill}: choose a colour` : "This layer has no fill colour", onSelect: () => { setActiveBox("fill"); setBoxPicker("fill"); } },
+              { id: "stroke", label: "Stroke colour", icon: <StrokeIcon />, disabled: !boxState.stroke, title: boxState.stroke ? `Stroke ${boxState.stroke}: choose a colour` : "No stroke colour here", onSelect: () => { setActiveBox("stroke"); setBoxPicker("stroke"); } },
+              { id: "swap", label: "Swap", shortcut: "⇧X", icon: <SwapIcon />, disabled: !(boxState.kind === "character" && boxState.fill && boxState.stroke), title: "Swap fill and stroke colours", onSelect: swapBoxColours },
+              { id: "recolour", label: "Recolour", icon: <RecolourIcon />, title: "The selected character's palette, colour by colour", onSelect: () => openRecolor("both") },
+            ]} />
+          <ToolGroup label="Align" panelTitle="Align" panelClassName="cb-align-flyout" icon={<AlignIcon />} title="Align and distribute the selected layers"
+            items={[
+              { id: "left", label: "Left", icon: <AlignLeftIcon />, keepOpen: true, onSelect: () => runAlign("left") },
+              { id: "hcenter", label: "Centre", icon: <AlignHCenterIcon />, keepOpen: true, onSelect: () => runAlign("hcenter") },
+              { id: "right", label: "Right", icon: <AlignRightIcon />, keepOpen: true, onSelect: () => runAlign("right") },
+              { id: "top", label: "Top", icon: <AlignTopIcon />, keepOpen: true, onSelect: () => runAlign("top") },
+              { id: "vcenter", label: "Middle", icon: <AlignVCenterIcon />, keepOpen: true, onSelect: () => runAlign("vcenter") },
+              { id: "bottom", label: "Bottom", icon: <AlignBottomIcon />, keepOpen: true, onSelect: () => runAlign("bottom") },
+              { id: "hdistribute", label: "Distribute ↔", icon: <DistributeHIcon />, keepOpen: true, title: "Space the centres evenly from left to right (3 or more layers)", onSelect: () => runAlign("hdistribute") },
+              { id: "vdistribute", label: "Distribute ↕", icon: <DistributeVIcon />, keepOpen: true, title: "Space the centres evenly from top to bottom (3 or more layers)", onSelect: () => runAlign("vdistribute") },
+            ]}>
+            <label className="cb-align-to-stage" title="Off: two or more layers align to each other (one layer always aligns to the stage)">
+              <input type="checkbox" checked={alignToStage} onChange={(event) => setAlignToStage(event.target.checked)} /> Align to stage
+            </label>
+          </ToolGroup>
           <button
             type="button"
             className={activeTool === "import" ? "active" : ""}
@@ -2593,9 +2784,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             aria-label="Import character"
             title={characterLibraryCharacters.length ? "Add first Admin Library character" : "Admin must upload a character library first"}
           ><svg viewBox="31.86 95.67 32 32" aria-hidden="true"><path d="M47.86,103.2v16.94M56.33,111.67h-16.94" fill="none" stroke="currentColor" strokeMiterlimit="10"/></svg></button>
-          <button type="button" className={activeTool === "text" ? "active" : ""} aria-label="Text tool" aria-pressed={activeTool === "text"} title="Text tool" onClick={() => { setActiveTool("text"); addText(); }}>
-            <svg viewBox="31.86 152.09 32 32" aria-hidden="true"><path d="M47.86,160.92v14.34M55.49,160.92h-15.25M55.49,160.92v1.8M40.24,160.92v1.8M49.66,175.26h-3.6" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          </button>
           <button
             type="button"
             ref={toneButtonRef}
@@ -2726,10 +2914,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               ))}
               <button type="button" className="cb-scene-add" onClick={addScene} aria-label="Add scene" title="Add scene">＋</button>
             </div>
+            {/* New / Open / Save / Export live in the tool rail's File group; only the export status stays here. */}
             <div className="cb-editor-project-actions">
-              <button onClick={() => { void flushAutosave().then(() => router.push("/dashboard?newProject=1")); }}>New Project</button>
-              <button ref={openButtonRef} onClick={toggleOpenPanel} aria-haspopup="menu" aria-expanded={openPanel} title="Recent projects, or open a .cb file from this device (Cmd/Ctrl+O)">Open Project</button>
-              <Popover open={openPanel} anchorRef={openButtonRef} onClose={() => setOpenPanel(false)} align="start" offset={14} className="cb-open-panel" aria-label="Open project">
+              <Popover open={openPanel} anchorRef={openButtonRef} onClose={() => setOpenPanel(false)} placement="right" offset={10} className="cb-open-panel" aria-label="Open project">
                 <div className="cb-open-panel-head">Recent projects</div>
                 {recentProjects == null ? <p className="cb-open-panel-note">Loading…</p>
                   : recentProjects.length === 0 ? <p className="cb-open-panel-note">No recent projects.</p>
@@ -2745,8 +2932,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                   Open from device…<kbd>⌘O</kbd>
                 </button>
               </Popover>
-              <button className="render" onClick={startRender} disabled={render?.status === "queued" || render?.status === "running"}>{render?.status === "queued" ? "Queued…" : render?.status === "running" ? `Exporting ${render.progress}%` : "Export"}</button>
-              <button onClick={() => void save()} title="Save to a .cb file on this device (Cmd/Ctrl+S, Shift for Save As)">Save Project</button>
+              {(render?.status === "queued" || render?.status === "running") && <span className="cb-export-status" role="status">{render.status === "queued" ? "Export queued…" : `Exporting ${render.progress}%`}</span>}
               {render?.status === "complete" && render.output_url && <a className="cb-download-mp4" href={render.output_url} download={`characterbazaar-${project.title || "project"}.mp4`}>⇩ Download</a>}
               {render?.status === "failed" && <button className="cb-render-error" title={render.error || "Export failed"} onClick={() => showNotice(`Export failed: ${render.error || "Unknown error"}`, "error")}>Export Error</button>}
             </div>
@@ -2842,6 +3028,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               previewColorReplacement={previewColorReplacement}
               frameAccessRef={frameAccessRef}
               viewCenterRef={viewCenterRef}
+              layerGeometryRef={layerGeometryRef}
               blockDoubleClick={activeTool === "tone" || colorPickActive || boxPicking || Boolean(frPicking)}
               colorPickActive={colorPickActive || toneToolLive || Boolean(frPicking) || boxPicking}
               colorPickCursor={colorPickActive || frPicking || boxPicking ? "pick" : toneDarken ? "darken" : "lighten"}
