@@ -268,7 +268,7 @@
   function resolveSourceSeekMs(object, seconds){
     var localTime = Math.max(0, seconds - Math.max(0, Number(object.startTime || 0)));
     var clips = byTime((object.sourceAnimationClips || []).map(function(c){ return Object.assign({}, c, {time:c.start}); }));
-    if(!clips.length) return localTime * 1000;
+    if(!clips.length) return localTime * 1000 + Math.max(0, Number(object.sourceOffsetMs || 0));
     var active = clips.find(function(c){ return localTime >= c.start && localTime < c.start + c.duration; });
     return active ? Math.max(0, (localTime - active.start) * 1000) : 0;
   }

@@ -7,6 +7,11 @@
  *
  * Editor → player messages (source "characterbazaarstudio-editor"):
  *   SEEK, PAUSE, PLAY, CHARACTER_EDITS, HIT_TEST_PART, BEGIN/MOVE/END_PART_DRAG,
+ *   SYMBOL_VIEW { view: { levels: [{ props?, frame }], hidden: [prop] } | null } — "step inside"
+ *            (view only): levels[0] is the player's root at a frame, each later level an object
+ *            inside the previous one (the first of its candidate properties that is on stage),
+ *            shown at its own frame; hidden: the last level's objects of hidden layers. null ends it.
+ *   SYMBOL_HIT { normalizedX, normalizedY } — which object of the last symbol-view level is there.
  *   SET_VIEW { pixelScale, x, y, width, height, exact }  — device pixels per player CSS px and
  *            the visible part of the player (0..1). The vectors are redrawn at exactly that
  *            resolution, for the visible region only, so zooming never pixelates. exact: the
@@ -14,7 +19,8 @@
  *            aligned to whole device pixels. minStroke: thinnest outline in device pixels (1).
  *            seal: edge in device pixels that closes seams between touching fills (0 = off).
  * Player → editor messages (source "characterbazaarstudio-animate"):
- *   READY, CONTENT_BOUNDS, PART_SELECTED, PART_DRAG_PREVIEW, PART_DRAG_END, SEEK_DONE, ERROR
+ *   READY, CONTENT_BOUNDS, PART_SELECTED, PART_DRAG_PREVIEW, PART_DRAG_END, SEEK_DONE, ERROR,
+ *   SYMBOL_HIT { prop } — the property name of the object hit (null: nothing there)
  */
 (function () {
   var script = document.currentScript;
@@ -901,6 +907,48 @@
   })();
   setInterval(refreshView, 1000);
 
+  // ---- Symbol view ("step inside a character", Animate's edit in place; view only). Every level
+  // but the last stays on the frame it was entered at; graphic symbols are switched to their own
+  // timeline (mode independent) so they can show any frame. Everything changed is put back when
+  // the view ends, and the view is applied again after every SEEK.
+  var cbSymbolView = null, cbSymbolSaved = [];
+  function rememberSymbolProp(node, key) {
+    for (var i = 0; i < cbSymbolSaved.length; i++) if (cbSymbolSaved[i].node === node && cbSymbolSaved[i].key === key) return;
+    cbSymbolSaved.push({ node: node, key: key, value: node[key] });
+  }
+  function restoreSymbolView() {
+    for (var i = cbSymbolSaved.length - 1; i >= 0; i--) { try { cbSymbolSaved[i].node[cbSymbolSaved[i].key] = cbSymbolSaved[i].value; } catch (e) {} }
+    cbSymbolSaved = [];
+  }
+  function applySymbolView() {
+    var root = cbRoot(); if (!cbSymbolView || !root) return;
+    var levels = cbSymbolView.levels || [], node = root;
+    for (var i = 0; i < levels.length; i++) {
+      if (i > 0) {
+        var props = levels[i].props || [], next = null, k;
+        for (k = 0; k < props.length && !next; k++) { var c = node[props[k]]; if (c && !c._off && c.parent) next = c; }
+        for (k = 0; k < props.length && !next; k++) if (node[props[k]]) next = node[props[k]];
+        if (!next) break;
+        node = next;
+        if (node.mode != null && node.mode !== 'independent') { rememberSymbolProp(node, 'mode'); node.mode = 'independent'; }
+        if (node.autoReset) { rememberSymbolProp(node, 'autoReset'); node.autoReset = false; }
+      }
+      if (node.gotoAndStop) { var total = Math.max(1, node.totalFrames || 1); node.gotoAndStop(clamp(Math.round(Number(levels[i].frame) || 0), 0, total - 1)); }
+    }
+    cbSymbolView.node = node;
+    (cbSymbolView.hidden || []).forEach(function (prop) { var o = node[prop]; if (o && looksDisplayObject(o)) { rememberSymbolProp(o, 'visible'); o.visible = false; } });
+  }
+  function symbolHit(x, y) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node;
+    if (!st || !node || !st.localToGlobal) return null;
+    var g = st.localToGlobal(x * W, y * H), kids = node.children || [];
+    for (var i = kids.length - 1; i >= 0; i--) {
+      var kid = kids[i]; if (!kid || kid.visible === false || !kid.hitTest || !kid.globalToLocal) continue;
+      try { var l = kid.globalToLocal(g.x, g.y); if (kid.hitTest(l.x, l.y)) return childId(node, kid); } catch (e) {}
+    }
+    return null;
+  }
+
   window.addEventListener('message', function (event) {
     var d = event.data || {};
     if (d.source !== 'characterbazaarstudio-editor') return;
@@ -922,10 +970,12 @@
     try {
       // loop: wrap past the last frame (Animate "Loop"); otherwise hold the last frame ("Play Once").
       // SEEK_DONE tells the video export (render harness) the frame is drawn and can be captured.
-      if (d.type === 'SEEK') { var f = Math.max(0, Math.round(Number(d.seekMs || 0) / 1000 * FPS)), total = Math.max(1, root.totalFrames || 1); if (root.gotoAndStop) root.gotoAndStop(d.loop && total > 1 ? f % total : Math.min(total - 1, f)); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
+      if (d.type === 'SEEK') { var f = Math.max(0, Math.round(Number(d.seekMs || 0) / 1000 * FPS)), total = Math.max(1, root.totalFrames || 1); if (root.gotoAndStop) root.gotoAndStop(d.loop && total > 1 ? f % total : Math.min(total - 1, f)); if (cbSymbolView) applySymbolView(); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
       else if (d.type === 'CHARACTER_EDITS') { cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }
+      else if (d.type === 'SYMBOL_VIEW') { restoreSymbolView(); cbSymbolView = d.view || null; applySymbolView(); if (st && st.update) st.update(); scheduleBounds(); }
+      else if (d.type === 'SYMBOL_HIT') { cbPost('SYMBOL_HIT', { prop: symbolHit(Number(d.normalizedX || 0), Number(d.normalizedY || 0)) }); }
       else if (d.type === 'HIT_TEST_PART') { selectAt(Number(d.normalizedX || 0), Number(d.normalizedY || 0)); }
       else if (d.type === 'BEGIN_PART_DRAG') { startDrag(d); }
       else if (d.type === 'MOVE_PART_DRAG') { moveDrag(d, false); }

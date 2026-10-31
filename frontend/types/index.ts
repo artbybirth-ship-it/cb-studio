@@ -216,6 +216,9 @@ export type EditorObject = {
   animationClips?: AnimationClip[];
   /** When present, the source talking timeline only advances inside these windows. */
   sourceAnimationClips?: SourceAnimationClip[];
+  /** Where in its own animation the layer starts playing (ms): a piece split off by dragging
+   *  frames to another layer keeps showing the animation those frames showed. */
+  sourceOffsetMs?: number;
   /** Explicit motion range created only by the Create Motion command. */
   manualMotionRange?: ManualMotionRange | null;
   /** Source-aware colour edits. Keys are character-defined regions such as skin, shirt, hair, selectedPart. */

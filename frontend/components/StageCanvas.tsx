@@ -61,6 +61,14 @@ type Props = {
   frameAccessRef?: MutableRefObject<((objectId: string) => HTMLIFrameElement | undefined) | null>;
   /** Lighten/Darken tool or a colour eyedropper is on: double-clicks never select or enter parts. */
   blockDoubleClick?: boolean;
+  /** Step inside a character (view only): the character whose own timeline is shown, the symbol
+   *  path inside it (cb-animate-bridge SYMBOL_VIEW levels) and the objects of hidden layers. The
+   *  rest of the scene is dimmed and the stage only answers double-clicks. */
+  symbolView?: { objectId: string; levels: Array<{ props?: string[]; frame: number }>; hidden: string[] } | null;
+  /** Inside a character: a double-click on one of its objects (its property name), or elsewhere (null). */
+  onSymbolDoubleClick?: (prop: string | null) => void;
+  /** ⌥ Option + double-click a character, or right-click › Edit Symbol: step inside it. */
+  onEnterSymbol?: (objectId: string) => void;
   /** Filled by the canvas: the stage point at the centre of what is visible (Paste in Center). */
   viewCenterRef?: MutableRefObject<(() => { x: number; y: number }) | null>;
   /** Filled by the canvas: a layer's artwork box (Transform panel, Align). */
@@ -233,7 +241,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, previewColorReplacement = null, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, previewColorReplacement = null, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onEnterSymbol, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -1175,6 +1183,8 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       const object = findObjectForSource(event.source);
       if (!object) return;
       if (event.data?.type === "READY") {
+        // A player that (re)loads while its character is open inside gets the view again.
+        if (symbolViewRef.current?.objectId === object.id) postSymbolViewRef.current?.(object.id, symbolViewRef.current);
         setReadyCharacterIds((current) => {
           if (current.has(object.id)) return current;
           const next = new Set(current);
@@ -1226,6 +1236,10 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         });
         return;
       }
+      if (event.data?.type === "SYMBOL_HIT") {
+        if (symbolViewRef.current?.objectId === object.id) onSymbolDoubleClickRef.current?.(typeof event.data.prop === "string" ? event.data.prop : null);
+        return;
+      }
       if (event.data?.type === "CONTENT_BOUNDS") {
         // The pose's artwork bounds changed (new frame): keep the selection box tight to it.
         applyContentBounds(object, event.data.contentBounds);
@@ -1271,6 +1285,50 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     window.addEventListener("message", handlePlayerMessage);
     return () => window.removeEventListener("message", handlePlayerMessage);
   }, [applyContentBounds, characterObjects, onActiveCharacterPart, onCharacterPartsReady, onMoveCharacterPart, onSelect, pickCharacterPart, postCharacterEdits, rememberPartBounds, replacementReadyKey]);
+
+  // Step inside a character: its player shows the symbol path; leaving puts the scene frame back.
+  const symbolViewRef = useRef(symbolView);
+  symbolViewRef.current = symbolView;
+  const onSymbolDoubleClickRef = useRef(onSymbolDoubleClick);
+  onSymbolDoubleClickRef.current = onSymbolDoubleClick;
+  const symbolViewObjectRef = useRef<string | null>(null);
+  const postSymbolView = useCallback((objectId: string, view: typeof symbolView) => {
+    frameRefs.current.get(objectId)?.contentWindow?.postMessage({
+      source: "characterbazaarstudio-editor", type: "SYMBOL_VIEW",
+      view: view ? { levels: view.levels, hidden: view.hidden } : null,
+    }, "*");
+  }, []);
+  const postSymbolViewRef = useRef(postSymbolView);
+  useEffect(() => {
+    const previous = symbolViewObjectRef.current;
+    if (previous && previous !== symbolView?.objectId) {
+      postSymbolView(previous, null);
+      const object = objects.find((item) => item.id === previous);
+      if (object) frameRefs.current.get(previous)?.contentWindow?.postMessage({ source: "characterbazaarstudio-editor", type: "SEEK", seekMs: resolveSourceSeekMs(object, playhead), loop: object.loopMode === "loop" }, "*");
+    }
+    if (symbolView) postSymbolView(symbolView.objectId, symbolView);
+    symbolViewObjectRef.current = symbolView?.objectId ?? null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolView, postSymbolView]);
+  const doubleClickInsideSymbol = (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!symbolView) return;
+    const frame = frameRefs.current.get(symbolView.objectId);
+    const rect = frame?.getBoundingClientRect();
+    if (!frame || !rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) { onSymbolDoubleClick?.(null); return; }
+    frame.contentWindow?.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_HIT", normalizedX: (event.clientX - rect.left) / rect.width, normalizedY: (event.clientY - rect.top) / rect.height }, "*");
+  };
+  // Right-click a character › Edit Symbol (Animate).
+  const [symbolMenu, setSymbolMenu] = useState<{ x: number; y: number; objectId: string } | null>(null);
+  useEffect(() => {
+    if (!symbolMenu) return;
+    const close = () => setSymbolMenu(null);
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", close);
+    window.addEventListener("blur", close);
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("keydown", close); window.removeEventListener("blur", close); };
+  }, [symbolMenu]);
 
   useEffect(() => {
     // The editor owns the master clock. Keep the CreateJS source timeline paused and
@@ -2136,11 +2194,19 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           // to select a body part (handled by onDoubleClick below).
           beginDrag(event, object);
         }}
+        onContextMenu={(event) => {
+          if (!onEnterSymbol) return;
+          event.preventDefault();
+          event.stopPropagation();
+          setSymbolMenu({ x: event.clientX, y: event.clientY, objectId: object.id });
+        }}
         onDoubleClick={(event) => {
           // A double-click on a transparent spot does not enter the character.
           if (!isCharacterPixelOpaque(object, event.clientX, event.clientY)) return;
           event.preventDefault();
           event.stopPropagation();
+          // ⌥ Option + double-click steps inside its Animate timeline (plain double-click edits a body part).
+          if (event.altKey && onEnterSymbol) { onEnterSymbol(object.id); return; }
           if (partMode && doubleClickSubPart(object, event.clientX, event.clientY)) return;
           onSelect(object.id);
           requestCharacterPartAtPoint(object, event.clientX, event.clientY, true);
@@ -2624,7 +2690,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   return (
     <div
       ref={hostRef}
-      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""}`}
+      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""} ${symbolView && !renderMode ? "cb-symbol-viewing" : ""}`}
       onWheel={handleWheel}
       // Scale tool (S) takes the drag before objects or the marquee see it.
       onPointerDownCapture={(event) => {
@@ -2816,6 +2882,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
               <div
                 key={object.id}
                 data-editor-object-id={object.id}
+                data-symbol-focus={symbolView?.objectId === object.id ? "" : undefined}
                 className={`cb-stage-character ${lockClass} ${selected && !renderMode ? "selected" : ""} ${selected && activeCharacterPart && !renderMode ? "part-edit-mode" : ""}`}
                 style={{
                   ...baseStyle,
@@ -2927,6 +2994,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
               else frameRefs.current.delete(object.id);
             }}
             data-animate-player="1"
+            data-symbol-focus={symbolView?.objectId === object.id ? "" : undefined}
             title={`${object.name} ${object.actionName || "action"}`}
             src={`${object.assetUrl}?autoplay=0&muted=1&interactive=1&editorStage=1&cameraMode=1&viewportWidth=${width}&viewportHeight=${height}&characterBoxWidth=${object.sourceWidth || 420}&characterBoxHeight=${object.sourceHeight || 760}&qualityScale=${getPlayerQualityScale(width, height)}&bridge=v91`}
             className="cb-character-source-frame cb-character-camera-frame"
@@ -2976,7 +3044,14 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           </div>
         );
       })}
+      {/* Inside a character: the stage only answers double-clicks (a part steps in, elsewhere steps out). */}
+      {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={doubleClickInsideSymbol} onPointerDown={(event) => { if (!spacePanning) event.stopPropagation(); }} title="Double-click a part to step inside it; double-click elsewhere (or Esc) to step out" />}
       </div>
+      {symbolMenu && (
+        <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: symbolMenu.x, top: symbolMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+          <button type="button" role="menuitem" onClick={() => { const id = symbolMenu.objectId; setSymbolMenu(null); onEnterSymbol?.(id); }}>Edit Symbol<kbd>⌥ double-click</kbd></button>
+        </div>
+      )}
     </div>
   );
 }

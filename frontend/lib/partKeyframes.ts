@@ -77,7 +77,36 @@ export const resolvePartTransformAtTime = (object: EditorObject, partKey: Charac
   return base;
 };
 
-export const resolvePartOverridesAtTime = (object: EditorObject, timeSeconds: number): Record<CharacterPartKey, CharacterPartOverride> => {
+/**
+ * A part's keyframe values at `time` (relative to its base edit, as keyframes store them), as the
+ * part shows them then; null before its first keyframe (the base edit alone shows there).
+ */
+export const partKeyframeValuesAt = (keyframes: CharacterPartKeyframe[] = [], time: number): Omit<CharacterPartKeyframe, "id" | "time" | "generatedBy"> | null => {
+  const frames = sort(keyframes);
+  if (!frames.length || time < frames[0].time - EPSILON) return null;
+  const strip = ({ id: _id, time: _time, generatedBy: _by, ...values }: CharacterPartKeyframe) => values;
+  const last = frames[frames.length - 1];
+  if (time >= last.time - EPSILON) return strip(last);
+  const index = frames.findIndex((frame, i) => i < frames.length - 1 && time <= frames[i + 1].time + EPSILON);
+  const left = frames[index];
+  const right = frames[index + 1];
+  const t = ease((time - left.time) / Math.max(EPSILON, right.time - left.time), right.easing || left.easing);
+  const mix = (a: number, b: number) => a + (b - a) * t;
+  return {
+    offsetX: mix(left.offsetX, right.offsetX),
+    offsetY: mix(left.offsetY, right.offsetY),
+    rotation: mix(left.rotation, right.rotation),
+    scale: mix(frameScale(left), frameScale(right)),
+    flipX: left.flipX,
+    skewX: mix(Number(left.skewX || 0), Number(right.skewX || 0)),
+    skewY: mix(Number(left.skewY || 0), Number(right.skewY || 0)),
+    stretchX: mix(frameStretch(left, "stretchX"), frameStretch(right, "stretchX")),
+    stretchY: mix(frameStretch(left, "stretchY"), frameStretch(right, "stretchY")),
+    easing: right.easing || left.easing,
+  };
+};
+
+export const resolvePartOverridesAtTime =(object: EditorObject, timeSeconds: number): Record<CharacterPartKey, CharacterPartOverride> => {
   const keys = new Set<string>([
     ...Object.keys(object.partOverrides || {}),
     ...Object.keys(object.partKeyframes || {}),
@@ -123,7 +152,7 @@ export const resolveSourceSeekMs = (object: EditorObject, timeSeconds: number) =
   const layerStart = Math.max(0, Number(object.startTime || 0));
   const localTime = Math.max(0, timeSeconds - layerStart);
   const clips = [...(object.sourceAnimationClips || [])].sort((a, b) => a.start - b.start);
-  if (clips.length === 0) return localTime * 1000;
+  if (clips.length === 0) return localTime * 1000 + Math.max(0, Number(object.sourceOffsetMs || 0));
   const active = clips.find((clip) => localTime >= clip.start && localTime < clip.start + clip.duration);
   if (active) return Math.max(0, (localTime - active.start) * 1000);
   return 0;

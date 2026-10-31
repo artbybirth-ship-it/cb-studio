@@ -12,6 +12,8 @@ from urllib.parse import quote
 
 from django.conf import settings
 
+from .fla_timeline import FLA_TIMELINE_DIR, FLA_TIMELINE_VERSION, build_fla_timeline
+
 MAX_LIBRARY_BYTES = 500 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024
 MAX_LIBRARY_FILES = 10000
@@ -262,6 +264,103 @@ def _top_level_symbols(js_text: str) -> list[str]:
     return output
 
 
+def _tween_chain_frames(chain: str) -> int:
+    """Frames one CreateJS tween chain lasts: every .wait(n) plus every .to({...}, n)."""
+    total, index = 0, 0
+    step = re.compile(r"\.(wait|to)\(")
+    while True:
+        match = step.search(chain, index)
+        if not match:
+            return total
+        pos = match.end()
+        if match.group(1) == "to" and pos < len(chain) and chain[pos] == "{":
+            depth = 0
+            while pos < len(chain):
+                depth += chain[pos] == "{"
+                depth -= chain[pos] == "}"
+                pos += 1
+                if depth == 0:
+                    break
+            count = re.match(r"\s*,\s*(\d+)", chain[pos:])
+        else:
+            count = re.match(r"\s*(\d+)", chain[pos:])
+        total += int(count.group(1)) if count else 0
+        index = pos
+
+
+def symbol_frame_count(js_text: str, symbol: str) -> int | None:
+    """A library symbol's own timeline length in frames (its longest layer), or None if absent."""
+    start = js_text.find(f"(lib.{symbol} = function(")
+    if start < 0:
+        return None
+    end = js_text.find("}).prototype", start)  # "= p = new cjs.MovieClip()" or getMCSymbolPrototype(…)
+    if end < 0:
+        return None
+    body = js_text[start:end]
+    frames = 1
+    for match in re.finditer(r"this\.timeline\.addTween\(", body):
+        line_end = body.find("\n", match.end())
+        frames = max(frames, _tween_chain_frames(body[match.end(): line_end if line_end >= 0 else None]))
+    return frames
+
+
+ISOLATED_POSE_SUFFIX = " (isolated Animate pose)"
+# Bump when the stored length of isolated poses must be worked out again (character_library view).
+POSE_LENGTH_VERSION = 1
+
+
+def refresh_pose_lengths(package_root: Path, characters: list[dict[str, Any]]) -> bool:
+    """Older installs gave every pose of a multi-pose export the whole file's length; give each its own."""
+    js_texts = [
+        _read_text(path) for path in package_root.rglob("*.js")
+        if "cb-isolated-symbols" not in path.parts and not _is_noise_file(path, package_root)
+    ]
+    changed = False
+    for character in characters:
+        for action in character.get("actions") or [] if isinstance(character, dict) else []:
+            name = str(action.get("sourceSvgName") or "")
+            if not name.endswith(ISOLATED_POSE_SUFFIX):
+                continue
+            symbol = name[: -len(ISOLATED_POSE_SUFFIX)]
+            frames = next((count for count in (symbol_frame_count(text, symbol) for text in js_texts) if count), None)
+            if not frames:
+                continue
+            duration_ms = max(100, round(frames / max(1, int(action.get("fps") or 24)) * 1000))
+            if action.get("durationMs") != duration_ms:
+                action["durationMs"] = duration_ms
+                changed = True
+    return changed
+
+
+def attach_fla_timelines(package_root: Path, package_root_rel: Path, characters: list[dict[str, Any]]) -> bool:
+    """Reads every .fla shipped with the export (fla_timeline.py) and points each pose at its
+    symbol's timeline (action flaTimeline = index.json URL, flaSymbol = its published class)."""
+    changed = False
+    for fla in sorted(package_root.rglob("*.fla")):
+        if _is_noise_file(fla, package_root) or FLA_TIMELINE_DIR in fla.parts:
+            continue
+        js_path = fla.with_suffix(".js")
+        if not js_path.exists():
+            continue
+        try:
+            index = build_fla_timeline(fla, _read_text(js_path), package_root / FLA_TIMELINE_DIR / _slug(fla.stem, "document"))
+        except Exception:  # an unreadable .fla only means no timeline to step into
+            continue
+        index_url = _relative_url(package_root_rel, package_root, package_root / FLA_TIMELINE_DIR / _slug(fla.stem, "document") / "index.json")
+        page_url = _relative_url(package_root_rel, package_root, fla.with_suffix(".html"))
+        for character in characters:
+            for action in character.get("actions") or [] if isinstance(character, dict) else []:
+                name = str(action.get("sourceSvgName") or "")
+                symbol = name[: -len(ISOLATED_POSE_SUFFIX)] if name.endswith(ISOLATED_POSE_SUFFIX) else None
+                if symbol not in index["symbols"]:
+                    symbol = index["stage"] if str(action.get("assetUrl") or "").split("?")[0] == page_url else None
+                if symbol and symbol in index["symbols"]:
+                    action["flaTimeline"] = index_url
+                    action["flaSymbol"] = symbol
+                    changed = True
+    return changed
+
+
 def _symbol_label(symbol: str, document_name: str, index: int) -> str:
     text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", symbol)
     text = re.sub(r"[_-]+", " ", text).strip()
@@ -334,19 +433,21 @@ def _split_combined_animate_export(
         player = symbol_dir / "player.html"
         player.write_text(_symbol_player_html(source_js_url, composition_id, symbol, width, height, fps), encoding="utf-8")
         player_url = _relative_url(package_root_rel, package_root, player)
+        frames = symbol_frame_count(js_text, symbol)
         actions.append({
             "id": f"{character_id}-{key}",
             "characterId": character_id,
             "characterName": doc_name,
             "actionName": name,
             "thumbUrl": f"{player_url}?cbPreview=1",
-            "sourceSvgName": f"{symbol} (isolated Animate pose)",
+            "sourceSvgName": f"{symbol}{ISOLATED_POSE_SUFFIX}",
             "sourceFolder": source_folder,
             "assetUrl": player_url,
             "sourceWidth": width,
             "sourceHeight": height,
             "fps": fps,
-            "durationMs": duration_ms,
+            # Each pose lasts as long as its own symbol (not the longest animation in the file).
+            "durationMs": max(100, round(frames / max(1, fps) * 1000)) if frames else duration_ms,
         })
     return [{
         "id": character_id,
@@ -582,7 +683,7 @@ def package_fingerprint(package_root: Path) -> str:
         if not path.is_file() or _is_noise_file(path, package_root):
             continue
         rel = path.relative_to(package_root).as_posix()
-        if "cb-isolated-symbols" in rel.split("/") or path.name == "cb-preview.svg":
+        if {"cb-isolated-symbols", FLA_TIMELINE_DIR} & set(rel.split("/")) or path.name == "cb-preview.svg":
             continue
         files.append((rel, path))
     for rel, path in sorted(files, key=lambda item: item[0]):
@@ -667,6 +768,7 @@ def install_character_library_zip(uploaded, custom: bool = False) -> tuple[str, 
         fingerprint = package_fingerprint(package_root)
         package_name = _clean_label(Path(uploaded.name).stem)
         characters = _discover_catalog(package_id, package_root, package_root_rel, package_name)
+        attach_fla_timelines(package_root, package_root_rel, characters)
         if custom:
             for character in characters:
                 character["origin"] = "custom"

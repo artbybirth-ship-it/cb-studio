@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from .models import Asset, Project, RenderJob, Scene
 from .serializers import AssetSerializer, ProjectSerializer, RenderJobSerializer, SceneSerializer
 from .tasks import render_project
-from .character_library import CHARACTER_BRIDGE_VERSION, duplicate_character_package, install_character_library_zip, package_fingerprint, upgrade_package_bridges, with_character_category
+from .character_library import CHARACTER_BRIDGE_VERSION, FLA_TIMELINE_VERSION, POSE_LENGTH_VERSION, attach_fla_timelines, duplicate_character_package, install_character_library_zip, package_fingerprint, refresh_pose_lengths, upgrade_package_bridges, with_character_category
 from .media_library import LIBRARY_ASSET_KIND, LIBRARY_TYPES, delete_media_library_files, install_media_library_zip
 from .admin_auth import is_admin_authenticated
 
@@ -135,16 +135,25 @@ class AssetViewSet(viewsets.ModelViewSet):
                 # fingerprint custom uploads so uploading the same export again is recognised.
                 needs_bridge = int(metadata.get("bridgeVersion") or 0) < CHARACTER_BRIDGE_VERSION
                 needs_fingerprint = metadata.get("scope") == "custom" and not metadata.get("fingerprint")
-                if needs_bridge or needs_fingerprint:
+                needs_pose_lengths = int(metadata.get("poseLengthVersion") or 0) < POSE_LENGTH_VERSION
+                needs_fla_timeline = int(metadata.get("flaTimelineVersion") or 0) < FLA_TIMELINE_VERSION
+                if needs_bridge or needs_fingerprint or needs_pose_lengths or needs_fla_timeline:
                     try:
                         disk_root = Path(settings.MEDIA_ROOT) / "character_libraries" / uuid.UUID(str(metadata.get("packageId") or "")).hex
                         if needs_bridge:
                             upgrade_package_bridges(disk_root)
                         if needs_fingerprint and disk_root.is_dir():
                             metadata["fingerprint"] = package_fingerprint(disk_root)
+                        if needs_pose_lengths and disk_root.is_dir():
+                            refresh_pose_lengths(disk_root, metadata.get("characters") or [])
+                        # Characters shipped with their .fla can be stepped into (layers and keyframes).
+                        if needs_fla_timeline and disk_root.is_dir():
+                            attach_fla_timelines(disk_root, Path("character_libraries") / disk_root.name, metadata.get("characters") or [])
                     except (ValueError, TypeError, OSError):
                         pass
                     metadata["bridgeVersion"] = CHARACTER_BRIDGE_VERSION
+                    metadata["poseLengthVersion"] = POSE_LENGTH_VERSION
+                    metadata["flaTimelineVersion"] = FLA_TIMELINE_VERSION
                     asset.metadata = metadata
                     asset.save(update_fields=["metadata"])
                 catalog = metadata.get("characters") or []
@@ -296,6 +305,8 @@ class AssetViewSet(viewsets.ModelViewSet):
         metadata = {
             "characterLibraryPackage": True,
             "bridgeVersion": CHARACTER_BRIDGE_VERSION,
+            "poseLengthVersion": POSE_LENGTH_VERSION,
+            "flaTimelineVersion": FLA_TIMELINE_VERSION,
             "fingerprint": fingerprint,
             "packageId": package_id,
             "originalName": Path(uploaded.name).name,

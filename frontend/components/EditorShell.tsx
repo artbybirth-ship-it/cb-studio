@@ -7,7 +7,8 @@ import { SCRUB_END, SCRUB_START } from "@/lib/scrub";
 import { useEscClose } from "@/lib/escClose";
 import { compileAnimationPlan } from "@/lib/animationCompiler";
 import { resolveCharacterTransformAtTime, sortKeyframes, upsertCharacterKeyframe } from "@/lib/keyframes";
-import { partEditMatrix, resolvePartTransformAtTime, upsertPartKeyframe } from "@/lib/partKeyframes";
+import { extractFrames, newLayerId, shiftObjectTimes } from "@/lib/layerSplit";
+import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsertPartKeyframe } from "@/lib/partKeyframes";
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, Project, RenderJob, Scene } from "@/types";
@@ -15,7 +16,8 @@ import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
 import { readOpenProjects, recentProjectsOf, removeOpenProject, upsertOpenProject, type OpenProjectTab } from "@/lib/openProjects";
 import { buildProjectFile, formatEditedAgo, openProjectFileAsNew, saveProjectFile } from "@/lib/projectFile";
-import Timeline, { selectionLayerIds, type FrameAction, type FrameSelection } from "./Timeline";
+import SymbolTimeline, { type FlaSymbol } from "./SymbolTimeline";
+import Timeline, { selectionLayerIds, type FrameAction, type FrameSelection, type LayerDropTarget } from "./Timeline";
 import CharacterEditPanel from "./CharacterEditPanel";
 import RecolorPanel from "./RecolorPanel";
 import FindReplaceDialog from "./FindReplaceDialog";
@@ -2330,18 +2332,194 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     });
   }, [mutate, playhead]);
 
-  const reorderLayer = useCallback((draggedId: string, targetId: string) => {
-    if (draggedId === targetId) return;
+  // Layers dragged by their name: the timeline lists them top to bottom, the scene stores them bottom up.
+  const reorderLayers = useCallback((idsTopToBottom: string[]) => {
     mutate((data) => {
-      const fromIndex = data.objects.findIndex((item) => item.id === draggedId);
-      const targetIndex = data.objects.findIndex((item) => item.id === targetId);
-      if (fromIndex < 0 || targetIndex < 0 || fromIndex === targetIndex) return;
-      const [moving] = data.objects.splice(fromIndex, 1);
-      const targetAfterRemoval = data.objects.findIndex((item) => item.id === targetId);
-      const insertIndex = fromIndex < targetIndex ? targetAfterRemoval + 1 : targetAfterRemoval;
-      data.objects.splice(Math.max(0, insertIndex), 0, moving);
+      const byId = new Map(data.objects.map((item) => [item.id, item]));
+      const ordered = [...idsTopToBottom].reverse().map((id) => byId.get(id)).filter((item): item is EditorObject => Boolean(item));
+      if (ordered.length !== data.objects.length) return;
+      data.objects = ordered;
     });
   }, [mutate]);
+
+  // Frames dragged up or down onto another layer (Animate). A layer holds one object, so the
+  // frames go onto an empty layer (which they replace) or into a new layer between two layers.
+  // Part of a layer splits it: the dragged frames become their own piece, and what stays behind
+  // keeps its place as up to two pieces (before and after the gap). A whole layer leaves an
+  // empty layer behind, as in Animate. Sound always moves whole.
+  const moveFramesToLayer = useCallback((sourceId: string, from: number, to: number, shift: number, target: LayerDropTarget) => {
+    const fps = TIMELINE_FPS;
+    const source = draft?.objects.find((item) => item.id === sourceId);
+    if (!draft || !source || source.type === "empty") return;
+    if (target.kind === "layer") {
+      const destination = draft.objects.find((item) => item.id === target.id);
+      if (!destination || destination.id === sourceId) return;
+      if (destination.type !== "empty" || destination.locked) {
+        showNotice(destination.locked ? "That layer is locked." : "That layer already holds something — drop the frames on an empty layer, or between two layers for a new one.");
+        return;
+      }
+    }
+    const lastSceneFrame = Math.max(0, Math.ceil(duration * fps - 1e-6) - 1);
+    const start = Math.max(0, Number(source.startTime || 0));
+    const startFrame = Math.round(start * fps);
+    const endFrame = source.actionDurationMs ? Math.max(startFrame, Math.round((start + source.actionDurationMs / 1000) * fps) - 1) : Math.max(startFrame, lastSceneFrame);
+    const a = Math.max(from, startFrame);
+    const b = Math.min(to, endFrame);
+    if (a > b) { showNotice("Those frames are empty."); return; }
+    const whole = source.type === "audio" || (a === startFrame && b === endFrame);
+    const first = whole ? startFrame : a;
+    const moveBy = Math.max(-first, shift);
+    const movedId = whole ? sourceId : newLayerId();
+    mutate((data) => {
+      const index = data.objects.findIndex((item) => item.id === sourceId);
+      if (index < 0) return;
+      const item = data.objects[index];
+      let moved: EditorObject;
+      if (whole) {
+        moved = item;
+        shiftObjectTimes(moved, moveBy / fps);
+        data.objects.splice(index, 1, { id: newLayerId(), type: "empty", name: "Empty layer", x: item.x, y: item.y, startTime: 0 });
+      } else {
+        moved = extractFrames(item, a, b, moveBy, fps, movedId);
+        const before = a > startFrame ? extractFrames(item, startFrame, a - 1, 0, fps, item.id) : null;
+        const after = b < endFrame ? extractFrames(item, b + 1, endFrame, 0, fps, before ? newLayerId() : item.id) : null;
+        // What stays keeps the layer's place: the earlier piece on top, the later one just below.
+        data.objects.splice(index, 1, ...[after, before].filter((piece): piece is EditorObject => Boolean(piece)));
+      }
+      if (target.kind === "layer") {
+        const destination = data.objects.findIndex((object) => object.id === target.id);
+        if (destination >= 0) data.objects.splice(destination, 1, moved);
+        else data.objects.splice(index, 0, moved);
+      } else if (target.belowId == null) data.objects.unshift(moved);
+      else {
+        const below = data.objects.findIndex((object) => object.id === target.belowId);
+        data.objects.splice(below >= 0 ? below + 1 : index, 0, moved);
+      }
+    });
+    const movedFrom = first + moveBy;
+    const movedTo = (whole ? endFrame : b) + moveBy;
+    setDuration((current) => Math.max(current, (movedTo + 1) / fps));
+    selectFrames({ layerId: movedId, from: movedFrom, to: movedTo });
+  }, [draft, duration, mutate, selectFrames, showNotice]);
+
+  // ---- Step inside a character (Animate's edit in place; view only). A character uploaded with
+  // its .fla has its symbols' own timelines (cb-fla-timeline, lib/server/flaTimeline.ts): ⌥ Option
+  // + double-click, or right-click › Edit Symbol, shows the pose's layers and keyframes in place of
+  // the scene's timeline, with the rest of the scene dimmed. Double-clicking a keyframe's symbol (or
+  // a part on the stage) steps further in; Esc, the breadcrumb or a double-click elsewhere step out.
+  // Every level but the last stays on the frame it was entered at (cb-animate-bridge SYMBOL_VIEW).
+  type SymbolLevel = { js: string; data: FlaSymbol; frame: number; props?: string[] };
+  const [symbolView, setSymbolView] = useState<{ objectId: string; base: string; levels: SymbolLevel[]; hidden: Set<number>; playing: boolean } | null>(null);
+  const symbolCacheRef = useRef(new Map<string, Promise<FlaSymbol>>());
+  const loadSymbol = useCallback((base: string, js: string) => {
+    const key = `${base}${js}`;
+    let pending = symbolCacheRef.current.get(key);
+    if (!pending) {
+      pending = fetch(`${base}${encodeURIComponent(js)}.json`).then((response) => (response.ok ? response.json() as Promise<FlaSymbol> : Promise.reject(new Error(`HTTP ${response.status}`))));
+      pending.catch(() => symbolCacheRef.current.delete(key));
+      symbolCacheRef.current.set(key, pending);
+    }
+    return pending;
+  }, []);
+  const enterSymbol = useCallback(async (objectId: string) => {
+    const object = draft?.objects.find((item) => item.id === objectId);
+    if (!object || object.type !== "character") return;
+    const action = characterLibraryActions.find((item) => item.assetUrl === object.assetUrl);
+    if (!action?.flaTimeline || !action.flaSymbol) {
+      showNotice("Stepping inside needs the character's Animate file — upload the character with its .fla next to the .html and .js.");
+      return;
+    }
+    const base = action.flaTimeline.replace(/index\.json$/, "");
+    try {
+      const data = await loadSymbol(base, action.flaSymbol);
+      // It opens on the frame the character shows now.
+      const shown = Math.round((resolveSourceSeekMs(object, playhead) / 1000) * data.fps);
+      const frame = object.loopMode === "loop" ? shown % Math.max(1, data.frames) : Math.min(data.frames - 1, shown);
+      setPlaying(false);
+      setFrameSelection(null);
+      setActiveCharacterPart(null);
+      selectObject(null);
+      setSymbolView({ objectId, base, levels: [{ js: action.flaSymbol, data, frame: Math.max(0, frame) }], hidden: new Set(), playing: false });
+    } catch {
+      showNotice("Couldn't load this character's Animate timeline.", "error");
+    }
+  }, [characterLibraryActions, draft, loadSymbol, playhead, selectObject, setPlaying, showNotice]);
+  const stepIntoSymbol = useCallback(async (layerIndex: number, frame: number, js: string) => {
+    const view = symbolView;
+    const current = view?.levels[view.levels.length - 1];
+    const layer = current?.data.layers[layerIndex];
+    if (!view || !current || !layer) return;
+    const props = Object.entries(layer.classes || {}).filter(([, name]) => name === js).map(([prop]) => prop);
+    if (!props.length) { showNotice("This symbol can't be opened from here."); return; }
+    try {
+      const data = await loadSymbol(view.base, js);
+      setSymbolView((state) => state && state.objectId === view.objectId ? {
+        ...state, playing: false, hidden: new Set(),
+        levels: [...state.levels.slice(0, -1), { ...current, frame }, { js, data, frame: 0, props }],
+      } : state);
+    } catch {
+      showNotice("Couldn't load that symbol's timeline.", "error");
+    }
+  }, [loadSymbol, showNotice, symbolView]);
+  const stepOutOfSymbol = useCallback(() => {
+    setSymbolView((state) => (!state || state.levels.length <= 1 ? null : { ...state, playing: false, hidden: new Set(), levels: state.levels.slice(0, -1) }));
+  }, []);
+  useEscClose(Boolean(symbolView), stepOutOfSymbol);
+  // A part double-clicked on the stage: step into its symbol; a drawn shape has none.
+  const symbolDoubleClick = useCallback((prop: string | null) => {
+    const current = symbolView?.levels[symbolView.levels.length - 1];
+    if (!current) return;
+    if (!prop) { stepOutOfSymbol(); return; }
+    const layerIndex = current.data.layers.findIndex((layer) => layer.props?.includes(prop));
+    const js = layerIndex >= 0 ? current.data.layers[layerIndex].classes?.[prop] : undefined;
+    if (js) void stepIntoSymbol(layerIndex, current.frame, js);
+    else showNotice("That's drawn artwork, not a symbol — there is nothing inside it to open.");
+  }, [showNotice, stepIntoSymbol, stepOutOfSymbol, symbolView]);
+  // Leaving the scene, or removing the character, ends it.
+  useEffect(() => {
+    if (symbolView && !draft?.objects.some((item) => item.id === symbolView.objectId)) setSymbolView(null);
+  }, [draft?.objects, symbolView]);
+  useEffect(() => { setSymbolView(null); }, [scene?.id]);
+  // Play runs just the open symbol, looping, at its own frame rate.
+  const symbolPlaying = Boolean(symbolView?.playing);
+  useEffect(() => {
+    if (!symbolPlaying) return;
+    const start = performance.now();
+    const level = symbolView!.levels[symbolView!.levels.length - 1];
+    const from = level.frame;
+    let raf = 0;
+    const tick = (now: number) => {
+      const frame = (from + Math.floor(((now - start) / 1000) * level.data.fps)) % Math.max(1, level.data.frames);
+      setSymbolView((state) => {
+        if (!state?.playing) return state;
+        const last = state.levels[state.levels.length - 1];
+        return last.frame === frame ? state : { ...state, levels: [...state.levels.slice(0, -1), { ...last, frame }] };
+      });
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolPlaying, symbolView?.levels.length]);
+  const seekSymbol = useCallback((frame: number) => {
+    setSymbolView((state) => {
+      if (!state) return state;
+      const last = state.levels[state.levels.length - 1];
+      const next = Math.max(0, Math.min(last.data.frames - 1, frame));
+      return { ...state, playing: false, levels: [...state.levels.slice(0, -1), { ...last, frame: next }] };
+    });
+  }, []);
+  // What the player gets: each level's frame (and how to reach it), and the hidden layers' objects
+  // (a closed eye on a folder hides everything in it).
+  const stageSymbolView = useMemo(() => {
+    if (!symbolView) return null;
+    const last = symbolView.levels[symbolView.levels.length - 1].data;
+    const hiddenProps = last.layers.flatMap((layer, index) => {
+      for (let at: number | undefined = index, guard = 0; at != null && guard < 30; at = last.layers[at]?.parent, guard += 1) if (symbolView.hidden.has(at)) return layer.props || [];
+      return [];
+    });
+    return { objectId: symbolView.objectId, levels: symbolView.levels.map((level) => ({ props: level.props, frame: level.frame })), hidden: hiddenProps };
+  }, [symbolView]);
 
   const deleteLayer = useCallback((id: string) => {
     mutate((data) => {
@@ -3434,6 +3612,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               viewCenterRef={viewCenterRef}
               layerGeometryRef={layerGeometryRef}
               blockDoubleClick={activeTool === "tone" || colorPickActive || boxPicking || Boolean(frPicking)}
+              symbolView={stageSymbolView}
+              onSymbolDoubleClick={symbolDoubleClick}
+              onEnterSymbol={(id) => void enterSymbol(id)}
               colorPickActive={colorPickActive || toneToolLive || Boolean(frPicking) || boxPicking}
               colorPickCursor={colorPickActive || frPicking || boxPicking ? "pick" : toneDarken ? "darken" : "lighten"}
               onColorPick={handleStageColorPress}
@@ -3445,6 +3626,33 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             />
           </div>
 
+          {symbolView ? (() => {
+            const object = draft.objects.find((item) => item.id === symbolView.objectId);
+            const current = symbolView.levels[symbolView.levels.length - 1];
+            const crumbs = [scene.name || "Scene", object?.name || "Character", object?.actionName || current.data.name,
+              ...symbolView.levels.slice(1).map((level) => level.data.name.split("/").pop() || level.data.name)];
+            return (
+              <SymbolTimeline
+                key={symbolView.levels.length}
+                crumbs={crumbs}
+                symbol={current.data}
+                frame={current.frame}
+                playing={symbolView.playing}
+                hidden={symbolView.hidden}
+                onSeek={seekSymbol}
+                onPlay={() => setSymbolView((state) => (state ? { ...state, playing: !state.playing } : state))}
+                onToggleLayer={(index) => setSymbolView((state) => {
+                  if (!state) return state;
+                  const hidden = new Set(state.hidden);
+                  if (hidden.has(index)) hidden.delete(index); else hidden.add(index);
+                  return { ...state, hidden };
+                })}
+                // Scene and the character's name step all the way out; a symbol steps back to it.
+                onCrumb={(index) => setSymbolView((state) => (!state || index < 2 ? null : { ...state, playing: false, hidden: new Set(), levels: state.levels.slice(0, index - 1) }))}
+                onStepInto={(layerIndex, frame, js) => void stepIntoSymbol(layerIndex, frame, js)}
+              />
+            );
+          })() : (
           <Timeline
             scenes={project.scenes}
             activeId={scene.id}
@@ -3461,7 +3669,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onAddKeyframe={(id, time) => addOrUpdateCharacterKeyframe(id, time)}
             onImportAudio={() => voiceUploadRef.current?.click()}
             onCreateMotion={(id) => createMotion(id)}
-            onReorderLayer={reorderLayer}
+            onReorderLayers={reorderLayers}
+            onMoveFramesToLayer={moveFramesToLayer}
             onDeleteLayer={deleteLayer}
             onUpdateLayerTiming={updateLayerTiming}
             onToggleLayerLoop={toggleLayerLoop}
@@ -3476,6 +3685,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onToggleLayerLocked={(id) => toggleLayerFlag(id, "locked")}
             sourceDurations={sourceDurations}
           />
+          )}
         </section>
         <div className="cb-panel-border-x" role="separator" aria-orientation="vertical" aria-label="Resize the side panel"
           title="Drag to resize the panel · double-click for the default size"

@@ -17,6 +17,10 @@ export type LocalCharacterPackage = {
   scope?: "custom";
   /** Shared player bridge version the package's HTML files use (absent = old inline bridge). */
   bridgeVersion?: number;
+  /** FLA_TIMELINE_VERSION the package's .fla timelines were read with (absent = not read). */
+  flaTimelineVersion?: number;
+  /** POSE_LENGTH_VERSION the stored pose lengths were worked out with (absent = file-wide length). */
+  poseLengthVersion?: number;
   /** characterPackageFingerprint() of the extracted export; used to skip duplicate uploads. */
   fingerprint?: string;
   /** Custom packages: recolour rules every use of the character starts with. */

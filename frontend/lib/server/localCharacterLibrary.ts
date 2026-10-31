@@ -4,6 +4,7 @@ import path from "path";
 import type { Html5CharacterLibraryAction, Html5CharacterLibraryCharacter } from "@/lib/html5CharacterCatalog";
 import { listCharacterPackages, localDataRoot, localMediaRoot, registerCharacterPackage, removeCharacterPackage, type LocalCharacterPackage } from "@/lib/server/localStore";
 import { extractZipSafely, MAX_LIBRARY_BYTES, safeRelative } from "@/lib/server/zipExtract";
+import { buildFlaTimeline, FLA_TIMELINE_DIR, FLA_TIMELINE_VERSION } from "@/lib/server/flaTimeline";
 
 function slug(value: string, fallback = "item"): string {
   const clean = value.trim().replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
@@ -142,6 +143,113 @@ function topLevelSymbols(jsText: string): string[] {
   return output;
 }
 
+/** Frames one CreateJS tween chain lasts: every .wait(n) plus every .to({...}, n). */
+function tweenChainFrames(chain: string): number {
+  let total = 0;
+  let index = 0;
+  const step = /\.(wait|to)\(/g;
+  for (;;) {
+    step.lastIndex = index;
+    const match = step.exec(chain);
+    if (!match) return total;
+    let pos = match.index + match[0].length;
+    let count: RegExpMatchArray | null;
+    if (match[1] === "to" && chain[pos] === "{") {
+      let depth = 0;
+      while (pos < chain.length) {
+        if (chain[pos] === "{") depth += 1;
+        else if (chain[pos] === "}") depth -= 1;
+        pos += 1;
+        if (depth === 0) break;
+      }
+      count = chain.slice(pos).match(/^\s*,\s*(\d+)/);
+    } else count = chain.slice(pos).match(/^\s*(\d+)/);
+    total += count ? Number(count[1]) : 0;
+    index = pos;
+  }
+}
+
+/** A library symbol's own timeline length in frames (its longest layer), or null if absent. */
+export function symbolFrameCount(jsText: string, symbol: string): number | null {
+  const start = jsText.indexOf(`(lib.${symbol} = function(`);
+  if (start < 0) return null;
+  const end = jsText.indexOf("}).prototype", start); // "= p = new cjs.MovieClip()" or getMCSymbolPrototype(…)
+  if (end < 0) return null;
+  const body = jsText.slice(start, end);
+  let frames = 1;
+  for (const match of body.matchAll(/this\.timeline\.addTween\(/g)) {
+    const from = (match.index || 0) + match[0].length;
+    const lineEnd = body.indexOf("\n", from);
+    frames = Math.max(frames, tweenChainFrames(body.slice(from, lineEnd >= 0 ? lineEnd : undefined)));
+  }
+  return frames;
+}
+
+const ISOLATED_POSE_SUFFIX = " (isolated Animate pose)";
+/** Bump when the stored length of isolated poses must be worked out again (GET character-library). */
+export const POSE_LENGTH_VERSION = 1;
+
+/** Older installs gave every pose of a multi-pose export the whole file's length; give each its own. */
+export async function refreshPoseLengths(packageId: string, characters: Html5CharacterLibraryCharacter[]): Promise<boolean> {
+  const packageRoot = path.join(localMediaRoot(), "character_libraries", packageId);
+  let files: string[] = [];
+  try { files = await walk(packageRoot); } catch { return false; }
+  const jsTexts: string[] = [];
+  for (const file of files) {
+    if (path.extname(file).toLowerCase() !== ".js" || file.split(path.sep).includes("cb-isolated-symbols")) continue;
+    try { jsTexts.push(await fs.readFile(file, "utf8")); } catch { /* unreadable: skip */ }
+  }
+  let changed = false;
+  for (const character of characters) {
+    for (const action of character.actions || []) {
+      if (!action.sourceSvgName?.endsWith(ISOLATED_POSE_SUFFIX)) continue;
+      const symbol = action.sourceSvgName.slice(0, -ISOLATED_POSE_SUFFIX.length);
+      const frames = jsTexts.map((text) => symbolFrameCount(text, symbol)).find(Boolean);
+      if (!frames) continue;
+      const durationMs = Math.max(100, Math.round((frames / Math.max(1, action.fps || 24)) * 1000));
+      if (action.durationMs !== durationMs) { action.durationMs = durationMs; changed = true; }
+    }
+  }
+  return changed;
+}
+
+/**
+ * Reads every .fla shipped with the export (flaTimeline.ts) and points each pose at its symbol's
+ * timeline (action flaTimeline = index.json URL, flaSymbol = its published class).
+ */
+export async function attachFlaTimelines(packageId: string, characters: Html5CharacterLibraryCharacter[]): Promise<boolean> {
+  const packageRoot = path.join(localMediaRoot(), "character_libraries", packageId);
+  let files: string[] = [];
+  try { files = await walk(packageRoot); } catch { return false; }
+  let changed = false;
+  for (const fla of files.filter((file) => path.extname(file).toLowerCase() === ".fla" && !file.split(path.sep).includes(FLA_TIMELINE_DIR))) {
+    const jsPath = fla.slice(0, -4) + ".js";
+    let jsText = "";
+    try { jsText = await fs.readFile(jsPath, "utf8"); } catch { continue; }
+    const outDir = path.join(packageRoot, FLA_TIMELINE_DIR, slug(path.basename(fla, ".fla"), "document"));
+    let index;
+    try { index = await buildFlaTimeline(fla, jsText, outDir); } catch { continue; } // an unreadable .fla only means no timeline to step into
+    const indexRel = relativeInside(packageRoot, path.join(outDir, "index.json"));
+    const pageRel = relativeInside(packageRoot, fla.slice(0, -4) + ".html");
+    if (!indexRel) continue;
+    const indexUrl = mediaUrl(packageId, indexRel);
+    const pageUrl = pageRel ? mediaUrl(packageId, pageRel) : null;
+    for (const character of characters) {
+      for (const action of character.actions || []) {
+        const name = action.sourceSvgName || "";
+        let symbol: string | null = name.endsWith(ISOLATED_POSE_SUFFIX) ? name.slice(0, -ISOLATED_POSE_SUFFIX.length) : null;
+        if (!symbol || !(symbol in index.symbols)) symbol = pageUrl && action.assetUrl.split("?")[0] === pageUrl ? index.stage : null;
+        if (symbol && symbol in index.symbols) {
+          action.flaTimeline = indexUrl;
+          action.flaSymbol = symbol;
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
 function symbolLabel(symbol: string, documentName: string, index: number): string {
   const text = symbol
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -264,19 +372,21 @@ async function splitCombinedAnimateExport(
     const playerRel = relativeInside(packageRoot, playerPath);
     if (!playerRel) continue;
     const playerUrl = mediaUrl(packageId, playerRel);
+    // Each pose lasts as long as its own symbol (not the longest animation in the file).
+    const frames = symbolFrameCount(jsText, symbol);
     actions.push({
       id: `${characterId}-${key}`,
       characterId,
       characterName: docName,
       actionName: name,
       thumbUrl: `${playerUrl}?cbPreview=1`,
-      sourceSvgName: `${symbol} (isolated Animate pose)`,
+      sourceSvgName: `${symbol}${ISOLATED_POSE_SUFFIX}`,
       sourceFolder,
       assetUrl: playerUrl,
       sourceWidth: width,
       sourceHeight: height,
       fps,
-      durationMs,
+      durationMs: frames ? Math.max(100, Math.round((frames / Math.max(1, fps)) * 1000)) : durationMs,
     });
   }
   return actions.length ? [{
@@ -630,7 +740,7 @@ export async function characterPackageFingerprint(packageRoot: string): Promise<
   const hash = createHash("sha256");
   const files = (await walk(packageRoot))
     .map((file) => ({ file, rel: path.relative(packageRoot, file).split(path.sep).join("/") }))
-    .filter(({ rel }) => !rel.split("/").includes("cb-isolated-symbols") && path.posix.basename(rel) !== "cb-preview.svg")
+    .filter(({ rel }) => !rel.split("/").some((part) => part === "cb-isolated-symbols" || part === FLA_TIMELINE_DIR) && path.posix.basename(rel) !== "cb-preview.svg")
     .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   for (const { file, rel } of files) {
     hash.update(rel); hash.update("\0");
@@ -719,6 +829,7 @@ export async function installLocalCharacterLibrary(buffer: Uint8Array, originalN
 
     const name = cleanLabel(path.basename(originalName, path.extname(originalName))).slice(0, 200);
     const characters = await discoverCatalog(packageId, packageRoot, name);
+    await attachFlaTimelines(packageId, characters);
     if (options.custom) {
       for (const character of characters) {
         character.origin = "custom";
@@ -734,6 +845,8 @@ export async function installLocalCharacterLibrary(buffer: Uint8Array, originalN
       characterCount: characters.length,
       actionCount: characters.reduce((sum, character) => sum + character.actions.length, 0),
       bridgeVersion: CHARACTER_BRIDGE_VERSION,
+      poseLengthVersion: POSE_LENGTH_VERSION,
+      flaTimelineVersion: FLA_TIMELINE_VERSION,
       fingerprint,
       ...(options.custom ? { scope: "custom" as const } : {}),
       characters,
