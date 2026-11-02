@@ -15,7 +15,7 @@ import { exportSourceOfPlayer, symbolPlayerUrl } from "@/lib/partVariants";
 import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsertPartKeyframe } from "@/lib/partKeyframes";
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
-import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene } from "@/types";
+import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
 import { readOpenProjects, recentProjectsOf, removeOpenProject, upsertOpenProject, type OpenProjectTab } from "@/lib/openProjects";
@@ -3311,6 +3311,42 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const retry = window.setTimeout(post, 600);
     return () => { window.removeEventListener("message", onMessage); window.clearTimeout(retry); };
   }, [keysObjectId, keysLevelJs, keysLayers]);
+  // Values edited on one keyframe inside the character (X, Y, scale, rotation, opacity): saved on this placed character.
+  const setSymbolValue = useCallback((layerIndex: number, frame: number, patch: Partial<Record<SymbolValueKey, number>> | null) => {
+    if (!symbolView) return;
+    const level = symbolView.levels[symbolView.levels.length - 1];
+    const props = level.data.layers[layerIndex]?.props || [];
+    mutate((data) => {
+      const item = data.objects.find((object) => object.id === symbolView.objectId);
+      if (!item) return;
+      const symbols = { ...(item.symbolValues || {}) }, entries = { ...(symbols[level.js] || {}) }, key = `${layerIndex}:${frame}`;
+      if (patch) entries[key] = { props, frame, v: { ...(entries[key]?.v || {}), ...patch } }; else delete entries[key];
+      if (Object.keys(entries).length) symbols[level.js] = entries; else delete symbols[level.js];
+      item.symbolValues = symbols;
+    });
+  }, [mutate, symbolView]);
+  // The picked keyframe's values as the file has them: the player reads them off its tween.
+  const [keyValues, setKeyValues] = useState<{ layer: number; frame: number; values: Record<string, number> | null } | null>(null);
+  const keyValuesAsk = useRef<{ layer: number; frame: number } | null>(null);
+  const askKeyValues = useCallback((layerIndex: number, frame: number | null) => {
+    if (frame == null || !symbolView) { keyValuesAsk.current = null; setKeyValues(null); return; }
+    const level = symbolView.levels[symbolView.levels.length - 1];
+    keyValuesAsk.current = { layer: layerIndex, frame };
+    frameAccessRef.current?.(symbolView.objectId)?.contentWindow?.postMessage({
+      source: "characterbazaarstudio-editor", type: "SYMBOL_VALUES_QUERY", js: level.js, layer: layerIndex, frame,
+      props: level.data.layers[layerIndex]?.props || [], token: `${level.js}:${layerIndex}:${frame}`,
+    }, "*");
+  }, [symbolView]);
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data, ask = keyValuesAsk.current;
+      if (d?.source !== "characterbazaarstudio-animate" || d.type !== "SYMBOL_KEY_VALUES" || !ask || d.layer !== ask.layer || d.frame !== ask.frame) return;
+      setKeyValues({ layer: ask.layer, frame: ask.frame, values: d.values || null });
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+  useEffect(() => { if (!symbolView) { keyValuesAsk.current = null; setKeyValues(null); } }, [symbolView]);
   // A drag on the Ease box shows on the stage as it moves and is one undo step.
   const previewSymbolEase = useCallback((layerIndex: number, keyframe: { i: number; d: number }, value: number | null) => {
     if (value == null) { window.setTimeout(() => { scrubHistoryRef.current = "idle"; }, 0); return; }
@@ -4774,6 +4810,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 eases={object?.symbolEases?.[current.js]}
                 keys={object?.symbolKeys?.[current.js]}
                 editable={keysEditable?.js === current.js ? keysEditable.editable : undefined}
+                values={object?.symbolValues?.[current.js]}
+                keyValues={keyValues}
+                onSelectKey={askKeyValues}
+                onSetValue={setSymbolValue}
                 onSetKeys={setSymbolKeys}
                 onPreviewKeys={previewSymbolKeys}
                 onSeek={seekSymbol}

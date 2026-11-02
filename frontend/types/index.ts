@@ -16,6 +16,10 @@ export type SymbolEaseEdit = { props: string[]; frame: number; frames: number; v
 /** A layer's keyframes inside a character after editing: [frame in the file, frame now] for each one (an added keyframe has no frame in the file: it takes the one it was added at). */
 export type SymbolKeyEdit = { props: string[]; anchors: Array<[number, number]> };
 
+/** The values edited on one keyframe inside a character (x, y, scale, skew in degrees, alpha 0–1), by layer and file frame. */
+export type SymbolValueKey = "x" | "y" | "scaleX" | "scaleY" | "skewX" | "skewY" | "alpha";
+export type SymbolValueEdit = { props: string[]; frame: number; v: Partial<Record<SymbolValueKey, number>> };
+
 export type ColorReplacement = {
   id: string;
   from: string;
@@ -272,6 +276,8 @@ export type EditorObject = {
   symbolEases?: Record<string, Record<string, SymbolEaseEdit>>;
   /** Keyframes moved or added inside this character, by symbol class, then layer index. */
   symbolKeys?: Record<string, Record<string, SymbolKeyEdit>>;
+  /** Values edited on keyframes inside this character, by symbol class, then "<layer>:<file frame>". */
+  symbolValues?: Record<string, Record<string, SymbolValueEdit>>;
   /** Runtime-detected source body parts for Archive/CreateJS actions. */
   sourceParts?: CharacterPartDescriptor[];
   /** User-supplied image replacements for selected body parts. */

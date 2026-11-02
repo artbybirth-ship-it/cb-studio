@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { EaseControl } from "@/components/Timeline";
-import type { SymbolEaseEdit, SymbolKeyEdit } from "@/types";
+import type { SymbolEaseEdit, SymbolKeyEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
+import { scrubProps } from "@/lib/scrub";
 import { addAnchor, fileAnchors, isUnchanged, moveAnchor, removeAnchor, shownFrames, type Anchor } from "@/lib/symbolKeys";
 
 /**
@@ -67,7 +68,27 @@ const TransportIcon = ({ kind }: { kind: "first" | "prev" | "play" | "pause" | "
   </g></svg>
 );
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden, eases, keys, editable, onSeek, onPlay, onToggleLayer, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+/** One number of a keyframe: drag it left / right like every number box, or click to type. */
+function ValueField({ label, unit, value, decimals, min, max, onChange }: { label: string; unit?: string; value: number; decimals: number; min?: number; max?: number; onChange: (value: number) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const shown = `${Math.round(value * 10 ** decimals) / 10 ** decimals}${unit ? ` ${unit}` : ""}`;
+  const commit = () => {
+    const next = parseFloat(String(text ?? "").replace(",", ".").replace(/[^\d.+-]/g, ""));
+    setText(null);
+    if (Number.isFinite(next) && Math.abs(next - value) > 1e-6) onChange(Math.max(min ?? -Infinity, Math.min(max ?? Infinity, next)));
+  };
+  return (
+    <label className="cb-symbol-value"><span>{label}</span>
+      <input type="text" inputMode="decimal" aria-label={label} value={text ?? shown}
+        {...scrubProps({ value, onChange, min, max, decimals, step: decimals ? 0.5 : 1 })}
+        onFocus={(event) => { setText(String(Math.round(value * 10 ** decimals) / 10 ** decimals)); event.target.select(); }}
+        onChange={(event) => setText(event.target.value)} onBlur={commit}
+        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { setText(null); event.currentTarget.blur(); } }} />
+    </label>
+  );
+}
+
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden, eases, keys, editable, values, keyValues, onSelectKey, onSetValue, onSeek, onPlay, onToggleLayer, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -81,6 +102,14 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   keys?: Record<string, SymbolKeyEdit>;
   /** Layers whose keyframes the player can move (asked of it); the rest are view only. */
   editable?: Record<number, boolean>;
+  /** Values edited on this symbol's keyframes, by "<layer index>:<file frame>". */
+  values?: Record<string, SymbolValueEdit>;
+  /** The picked keyframe's values as the file has them (null: the player could not read them). */
+  keyValues?: { layer: number; frame: number; values: Record<string, number> | null } | null;
+  /** A keyframe was picked (file frame), or none. */
+  onSelectKey: (layerIndex: number, frame: number | null) => void;
+  /** Change values of a keyframe; null puts them back. */
+  onSetValue: (layerIndex: number, frame: number, patch: Partial<Record<SymbolValueKey, number>> | null) => void;
   onSeek: (frame: number) => void;
   onPlay: () => void;
   onToggleLayer: (index: number) => void;
@@ -96,6 +125,8 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   onPreviewKeys: (layerIndex: number, anchors: Anchor[] | null) => void;
 }) {
   const [closed, setClosed] = useState<Set<number>>(new Set());
+  const [keySel, setKeySel] = useState<{ layer: number; frame: number } | null>(null);
+  const selectKey = (sel: { layer: number; frame: number } | null) => { setKeySel(sel); onSelectKey(sel?.layer ?? 0, sel ? sel.frame : null); };
   const [picked, setPicked] = useState<{ layer: number; i: number } | null>(null);
   const anchorsOf = (index: number): Anchor[] => keys?.[index]?.anchors || fileAnchors(symbol.layers[index]);
   const pickedLayer = picked ? symbol.layers[picked.layer] : undefined;
@@ -155,6 +186,8 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
     event.stopPropagation();
     setPicked({ layer: layerIndex, i: anchorsOf(layerIndex)[anchor][1] });
     const startX = event.clientX, start = anchorsOf(layerIndex);
+    selectKey({ layer: layerIndex, frame: start[anchor][0] });
+    if (anchor === 0) return;
     let latest = start;
     const move = (moveEvent: PointerEvent) => {
       const next = moveAnchor(start, anchor, start[anchor][1] + Math.round((moveEvent.clientX - startX) / CELL));
@@ -175,6 +208,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
 
   return (
     <section className="cb-symbol-timeline" style={{ ["--cb-sym-cell" as string]: `${CELL}px`, ["--cb-sym-row" as string]: `${ROW}px`, ["--cb-sym-panel" as string]: `${LAYER_PANEL}px` }}>
+      <div className="cb-symbol-top">
       <div className="cb-symbol-toolbar">
         <nav className="cb-symbol-crumbs" aria-label="Where you are">
           {crumbs.map((crumb, index) => (
@@ -216,6 +250,33 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
           <button type="button" onClick={() => onSeek(last)} aria-label="Last frame" title="Last frame"><TransportIcon kind="last" /></button>
           <span className="cb-symbol-counter">{frame + 1} / {symbol.frames}</span>
         </div>
+      </div>
+      {keySel && symbol.layers[keySel.layer] && (() => {
+        const layer = symbol.layers[keySel.layer];
+        const edit = values?.[`${keySel.layer}:${keySel.frame}`];
+        const file = keyValues && keyValues.layer === keySel.layer && keyValues.frame === keySel.frame ? keyValues.values : null;
+        const now = file ? { ...file, ...(edit?.v || {}) } as Record<string, number> : null;
+        const set = (patch: Partial<Record<SymbolValueKey, number>>) => onSetValue(keySel.layer, keySel.frame, patch);
+        const round = (value: number, digits: number) => Math.round(value * 10 ** digits) / 10 ** digits;
+        const turn = now != null && Math.abs((now.skewX ?? 0) - (now.skewY ?? 0)) < 0.01;
+        return (
+          <div className="cb-symbol-values">
+            <span className="cb-symbol-values-where" title={layer.name}>{layer.name} · keyframe {keySel.frame + 1}</span>
+            {!now ? <span className="cb-symbol-ease-custom">Values of this keyframe cannot be read</span> : <>
+              <ValueField label="X" value={now.x} decimals={1} onChange={(v) => set({ x: v })} />
+              <ValueField label="Y" value={now.y} decimals={1} onChange={(v) => set({ y: v })} />
+              {turn
+                ? <ValueField label="Rotation" unit="°" value={now.skewX ?? 0} decimals={1} onChange={(v) => set({ skewX: v, skewY: v })} />
+                : <><ValueField label="Skew X" unit="°" value={now.skewX ?? 0} decimals={1} onChange={(v) => set({ skewX: v })} /><ValueField label="Skew Y" unit="°" value={now.skewY ?? 0} decimals={1} onChange={(v) => set({ skewY: v })} /></>}
+              <ValueField label="Scale X" unit="%" value={round((now.scaleX ?? 1) * 100, 2)} decimals={1} onChange={(v) => set({ scaleX: round(v / 100, 4) })} />
+              <ValueField label="Scale Y" unit="%" value={round((now.scaleY ?? 1) * 100, 2)} decimals={1} onChange={(v) => set({ scaleY: round(v / 100, 4) })} />
+              <ValueField label="Opacity" unit="%" value={round((now.alpha ?? 1) * 100, 1)} decimals={0} min={0} max={100} onChange={(v) => set({ alpha: round(v / 100, 3) })} />
+            </>}
+            {edit && <button type="button" className="cb-symbol-ease-reset" onClick={() => onSetValue(keySel.layer, keySel.frame, null)} title="Put this keyframe's values back to the .fla's">Reset values</button>}
+            <button type="button" className="cb-symbol-ease-reset" onClick={() => selectKey(null)} aria-label="Close keyframe values" title="Close">×</button>
+          </div>
+        );
+      })()}
       </div>
       <div className="cb-symbol-grid" ref={scrollRef}>
         <div className="cb-symbol-head">
@@ -259,8 +320,8 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
                   const info = `Frame ${item.i + 1}${item.d > 1 ? `–${item.i + item.d}` : ""}${item.tween ? ` · ${item.tween} tween${edit ? `, ${edit.value ? valueText(edit.value) : "no easing"} (edited)` : item.ease != null ? `, ${easeText(item.ease)}` : ""}` : ""}${item.blank ? " · blank keyframe" : holds(item) ? ` · ${holds(item)}` : ""}${item.symbols?.some((symbolItem) => symbolItem.js) ? " · double-click to step inside" : ""}`;
                   return (
                     <span key={item.i} className={`cb-symbol-span ${kind} ${edit ? "is-edited" : ""} ${item.added || item.i !== item.source.i ? "is-moved" : ""} ${picked?.layer === index && picked.i === item.i ? "is-picked" : ""}`} style={{ left: item.i * CELL, width: item.d * CELL }} title={info}>
-                      <i className={`cb-symbol-key ${item.blank ? "blank" : ""} ${item.added ? "added" : ""} ${movable ? "movable" : ""}`} aria-hidden="true"
-                        onPointerDown={movable ? (event) => beginKeyDrag(event, index, item.anchor) : undefined} />
+                      <i className={`cb-symbol-key ${item.blank ? "blank" : ""} ${item.added ? "added" : ""} ${movable ? "movable" : ""} ${editable?.[index] && !item.added ? "pickable" : ""} ${values?.[`${index}:${item.source.i}`] ? "valued" : ""} ${keySel?.layer === index && keySel.frame === item.source.i && !item.added ? "chosen" : ""}`} aria-hidden="true"
+                        onPointerDown={editable?.[index] && !item.added ? (event) => beginKeyDrag(event, index, item.anchor) : undefined} />
                       {item.tween && item.d > 2 && <em className="cb-symbol-arrow" aria-hidden="true" />}
                       {!item.tween && item.d > 1 && <u className="cb-symbol-hold" aria-hidden="true" />}
                       {item.label && <small className="cb-symbol-label">⚑ {item.label}</small>}
