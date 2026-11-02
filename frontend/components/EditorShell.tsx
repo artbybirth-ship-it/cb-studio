@@ -15,6 +15,7 @@ import { exportSourceOfPlayer, symbolPlayerUrl } from "@/lib/partVariants";
 import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsertPartKeyframe } from "@/lib/partKeyframes";
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
+import { addAnchor, fileAnchors, fileOf, shownFrames } from "@/lib/symbolKeys";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
@@ -3290,7 +3291,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     setSymbolKeys(layerIndex, anchors);
   }, [setSymbolKeys]);
   // Which layers of the open symbol the player can move keyframes on (it knows how the pose was built).
-  const [keysEditable, setKeysEditable] = useState<{ js: string; editable: Record<number, boolean> } | null>(null);
+  const [keysEditable, setKeysEditable] = useState<{ js: string; editable: Record<number, boolean>; moves: Record<number, boolean> } | null>(null);
   const keysLevelJs = symbolView ? symbolView.levels[symbolView.levels.length - 1].js : null;
   const keysLayers = symbolView ? symbolView.levels[symbolView.levels.length - 1].data.layers : null;
   const keysObjectId = symbolView?.objectId;
@@ -3304,7 +3305,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const onMessage = (event: MessageEvent) => {
       const d = event.data;
       if (d?.source !== "characterbazaarstudio-animate" || d.type !== "SYMBOL_KEYS_EDITABLE" || d.js !== keysLevelJs) return;
-      setKeysEditable({ js: keysLevelJs, editable: Object.fromEntries(Object.entries(d.editable || {}).map(([key, value]) => [Number(key), Boolean(value)])) });
+      setKeysEditable({ js: keysLevelJs, editable: Object.fromEntries(Object.entries(d.editable || {}).map(([key, value]) => [Number(key), Boolean(value)])), moves: Object.fromEntries(Object.entries(d.moves || {}).map(([key, value]) => [Number(key), Boolean(value)])) });
     };
     window.addEventListener("message", onMessage);
     post();
@@ -3325,6 +3326,68 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       item.symbolValues = symbols;
     });
   }, [mutate, symbolView]);
+  // Drag a part on the stage inside the character: its X and Y at the playhead change. On a keyframe that keyframe moves; between
+  // keyframes of a tween one is added there first (holding the motion), as in Animate. One drag is one undo step.
+  const beginSymbolDrag = useCallback((normalizedX: number, normalizedY: number) => new Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void } | null>((resolve) => {
+    const view = symbolView, frame = view && frameAccessRef.current?.(view.objectId);
+    if (!view || !frame?.contentWindow) { resolve(null); return; }
+    const level = view.levels[view.levels.length - 1], token = `drag${Date.now()}${Math.random()}`;
+    const object = draft?.objects.find((item) => item.id === view.objectId);
+    let finished = false;
+    const finish = (value: { move: (dx: number, dy: number, shift: boolean) => void; end: () => void } | null) => {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener("message", onMessage);
+      window.clearTimeout(timer);
+      resolve(value);
+    };
+    const prepare = (info: { prop: string; ax: number; ay: number; bx: number; by: number; x: number; y: number; W: number; H: number } | null) => {
+      if (!info) return null;
+      const layers = level.data.layers, at = level.frame;
+      const anchorsOf = (index: number): Array<[number, number]> => object?.symbolKeys?.[level.js]?.[String(index)]?.anchors || fileAnchors(layers[index]);
+      let layer = -1, item: ReturnType<typeof shownFrames>[number] | undefined;
+      for (let index = 0; index < layers.length && layer < 0; index += 1) {
+        if (layers[index].type === "folder" || !(layers[index].props || []).includes(info.prop)) continue;
+        const found = shownFrames(layers[index], anchorsOf(index)).find((entry) => at >= entry.i && at < entry.i + entry.d && !entry.blank);
+        if (found) { layer = index; item = found; }
+      }
+      if (layer < 0 || !item) return null;
+      if (!(keysEditable?.js === level.js && keysEditable.editable[layer] && keysEditable.moves[layer])) {
+        showNotice("This part is drawn artwork, or built from frames, so it has no position keyframes to drag here.");
+        return null;
+      }
+      const anchors = anchorsOf(layer);
+      const inTween = item.i !== at && (item.tween === "classic" || item.tween === "motion");
+      const grown = inTween ? addAnchor(anchors, at) : null;
+      const target = inTween && grown ? fileOf(anchors, at) : anchors[item.anchor][0];
+      const startX = info.x, startY = info.y;
+      let started = false;
+      return {
+        move: (dx: number, dy: number, shift: boolean) => {
+          let stageX = dx * info.W, stageY = dy * info.H;
+          if (shift) { if (Math.abs(stageX) >= Math.abs(stageY)) stageY = 0; else stageX = 0; }
+          const det = info.ax * info.by - info.bx * info.ay;
+          if (!det) return;
+          if (!started) {
+            started = true;
+            scrubHistoryRef.current = "armed";
+            if (grown) setSymbolKeys(layer, grown);
+          }
+          const round = (value: number) => Math.round(value * 100) / 100;
+          setSymbolValue(layer, target, { x: round(startX + (stageX * info.by - info.bx * stageY) / det), y: round(startY + (info.ax * stageY - stageX * info.ay) / det) });
+        },
+        end: () => { window.setTimeout(() => { scrubHistoryRef.current = "idle"; }, 0); },
+      };
+    };
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (d?.source !== "characterbazaarstudio-animate" || d.type !== "SYMBOL_DRAG_INFO" || d.token !== token) return;
+      finish(prepare(d.info || null));
+    };
+    const timer = window.setTimeout(() => finish(null), 1500);
+    window.addEventListener("message", onMessage);
+    frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_DRAG_BEGIN", normalizedX, normalizedY, token }, "*");
+  }), [draft?.objects, keysEditable, setSymbolKeys, setSymbolValue, showNotice, symbolView]);
   // The picked keyframe's values as the file has them: the player reads them off its tween.
   const [keyValues, setKeyValues] = useState<{ layer: number; frame: number; values: Record<string, number> | null } | null>(null);
   const keyValuesAsk = useRef<{ layer: number; frame: number } | null>(null);
@@ -4781,6 +4844,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onIsolationStepOut={stepOutPartIsolation}
               onTransformCharacterParts={transformCharacterParts}
               onSymbolDoubleClick={symbolDoubleClick}
+              onSymbolDragStart={beginSymbolDrag}
               onEnterSymbol={(id) => void enterSymbol(id)}
               onDistributeParts={(mode) => void distributeRef.current(mode)}
               colorPickActive={stageColourTool || Boolean(frPicking) || boxPicking}

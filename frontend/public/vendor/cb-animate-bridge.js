@@ -1237,7 +1237,7 @@
   // ---- Moved and added keyframes (CHARACTER_EDITS.symbolKeys: { <class>: { <layer>: { props, anchors } } },
   // anchors = every keyframe of the layer as [frame in the file, frame now], an added keyframe being one
   // the file has none at). The tween steps of the layer's objects follow the anchors piecewise-linearly;
-  // inside a step with an added keyframe the ease is warped the same way, so the motion stays continuous.
+  // an added keyframe cuts its tween step in two there (splitSteps), so it can hold a value of its own.
   var cbRetimedSteps = [], cbValueSteps = [];
   var VALUE_KEYS = ['x', 'y', 'scaleX', 'scaleY', 'skewX', 'skewY', 'alpha'];
   // The steps that hold a keyframe's values (by the file's frames): the one that sets them there and the tween that ends there.
@@ -1245,7 +1245,7 @@
     var out = stepsOf(clip, props).filter(function (step) {
       var t = step.__ot != null ? step.__ot : step.t, d = step.__od != null ? step.__od : step.d;
       // A hold (wait) shares its values with the keyframe before it: only a tween's own end belongs to this one.
-      return step.props && ((d === 0 && t === frame) || (d > 0 && t + d === frame && step.props !== step.prev.props));
+      return step.props && !step.props.state && ((d === 0 && Math.abs(t - frame) < 1e-6) || (d > 0 && Math.abs(t + d - frame) < 1e-6 && step.props !== step.prev.props));
     });
     // The first frame's values are the tween's starting state (its head), which the first hold shares.
     if (frame === 0) {
@@ -1253,6 +1253,19 @@
       clip.timeline.tweens.forEach(function (tween) { if (targets.indexOf(tween.target) >= 0 && tween._stepHead && tween._stepHead.props) out.push(tween._stepHead); });
     }
     return out;
+  }
+  // A press on the stage inside a symbol: which object is there, how its own x / y axes lie on the stage, and where it is.
+  function postDragInfo(d) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, prop = null, info = null;
+    if (st && node) {
+      prop = symbolHit(Number(d.normalizedX || 0), Number(d.normalizedY || 0));
+      var o = prop && prop.charAt(0) !== '#' ? node[prop] : null;
+      if (o && o.localToLocal) {
+        var p0 = node.localToLocal(0, 0, st), px = node.localToLocal(1, 0, st), py = node.localToLocal(0, 1, st);
+        info = { prop: prop, ax: px.x - p0.x, ay: px.y - p0.y, bx: py.x - p0.x, by: py.y - p0.y, x: o.x, y: o.y, W: W, H: H };
+      }
+    }
+    cbPost('SYMBOL_DRAG_INFO', { token: d.token, info: info });
   }
   function postKeyValues(d) {
     var clip = clipsOfClass(d.js)[0], values = null;
@@ -1269,13 +1282,52 @@
     }
     cbPost('SYMBOL_KEY_VALUES', { js: d.js, layer: d.layer, frame: d.frame, token: d.token, values: values });
   }
-  function stepsOf(clip, props) {
-    var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean), out = [];
-    clip.timeline.tweens.forEach(function (tween) {
-      if (targets.indexOf(tween.target) < 0) return;
-      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) out.push(step);
+  // The tweens of a layer's objects: ones that move them, and the frame-by-frame "state" tweens that show them.
+  function tweensFor(clip, props) {
+    var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean);
+    return clip.timeline.tweens.filter(function (tween) {
+      if (targets.indexOf(tween.target) >= 0) return true;
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var list = step.props && step.props.state;
+        if (list && list.some && list.some(function (item) { return item && targets.indexOf(item.t) >= 0; })) return true;
+      }
+      return false;
     });
+  }
+  function stepsOf(clip, props) {
+    var out = [];
+    tweensFor(clip, props).forEach(function (tween) { for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) out.push(step); });
     return out;
+  }
+  // Does a tween move this layer's object (so its x, y, scale, rotation and opacity are keyframe values)?
+  function movesObject(clip, props) {
+    var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean);
+    return clip.timeline.tweens.some(function (tween) { return targets.indexOf(tween.target) >= 0; });
+  }
+  // An added keyframe inside a tween: the step is cut in two there, holding the motion exactly (the ease is cut with it).
+  var cbSplitSteps = [];
+  function splitSteps(clip, edit) {
+    var orig = (edit.anchors || []).map(function (a) { return a[0]; });
+    tweensFor(clip, edit.props).forEach(function (tween) {
+      orig.forEach(function (m) {
+        for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+          var t = step.t, d = step.d;
+          if (!(d > 0 && m > t + 1e-6 && m < t + d - 1e-6) || !step.props || step.props === step.prev.props || step.props.state) continue;
+          var a = (m - t) / d, e = step.ease, p0 = step.prev.props, p1 = step.props, ea = e ? e(a, 0, 1, 1) : a, mid = {}, k;
+          for (k in p1) mid[k] = p1[k];
+          for (k in p0) mid[k] = (typeof p0[k] === 'number' && typeof p1[k] === 'number' && p0[k] !== p1[k]) ? p0[k] + (p1[k] - p0[k]) * ea : p0[k];
+          var flat = Math.abs(ea) < 1e-9 || Math.abs(1 - ea) < 1e-9;
+          var e1 = e && !flat ? function (x) { return e(x * a, 0, 1, 1) / ea; } : null;
+          var e2 = e && !flat ? function (x) { return (e(a + x * (1 - a), 0, 1, 1) - ea) / (1 - ea); } : null;
+          var second = new step.constructor(step, m, t + d - m, p1, e2, step.passive);
+          second.next = step.next; if (step.next) step.next.prev = second;
+          cbSplitSteps.push({ step: step, second: second, tween: tween, d: d, props: p1, ease: e });
+          step.next = second; step.d = m - t; step.props = mid; step.ease = e1;
+          if (tween._stepTail === step) tween._stepTail = second;
+          break;
+        }
+      });
+    });
   }
   function retimeSteps(clip, edit, touched) {
     var anchors = edit.anchors || [], orig = anchors.map(function (a) { return a[0]; }), now = anchors.map(function (a) { return a[1]; });
@@ -1287,16 +1339,10 @@
     }
     stepsOf(clip, edit.props).forEach(function (step) {
       var t = step.t, d = step.d, start = through(t, orig, now), end = through(t + d, orig, now);
-      var inner = orig.some(function (o) { return o > t + 1e-6 && o < t + d - 1e-6; });
-      var was = step.ease;
-      cbRetimedSteps.push({ step: step, clip: clip, t: t, d: d, ease: was });
+      cbRetimedSteps.push({ step: step, clip: clip, t: t, d: d, ease: step.ease });
       step.__ot = t; step.__od = d;
       step.t = start; step.d = end - start;
       touched.add(clip);
-      if (inner && d > 0) step.ease = function (x) {
-        var r = (through(start + x * (end - start), now, orig) - t) / d;
-        return was ? was(Math.max(0, Math.min(1, r)), 0, 1, 1) : r;
-      };
     });
   }
   // Which layers' keyframes can be edited here: each of their keyframes is the start or end of a tween step.
@@ -1306,11 +1352,11 @@
     return frames.every(function (f) { return steps.some(function (st) { return st.t === f || st.t + st.d === f; }); });
   }
   function postKeyEditable(d) {
-    var found = {};
+    var found = {}, moves = {};
     clipsOfClass(d.js).slice(0, 1).forEach(function (clip) {
-      (d.layers || []).forEach(function (l) { found[l.index] = keyEditable(clip, l.props, l.frames || []); });
+      (d.layers || []).forEach(function (l) { found[l.index] = keyEditable(clip, l.props, l.frames || []); moves[l.index] = movesObject(clip, l.props); });
     });
-    cbPost('SYMBOL_KEYS_EDITABLE', { js: d.js, token: d.token, editable: found });
+    cbPost('SYMBOL_KEYS_EDITABLE', { js: d.js, token: d.token, editable: found, moves: moves });
   }
   function applySymbolEdits(eases, keys, values) {
     var key = JSON.stringify([eases || {}, keys || {}, values || {}]), root = cbRoot();
@@ -1320,6 +1366,12 @@
     cbRetimedSteps.reverse().forEach(function (r) { r.step.t = r.t; r.step.d = r.d; r.step.ease = r.ease; delete r.step.__ot; delete r.step.__od; clips.add(r.clip); });
     cbValueSteps.reverse().forEach(function (v) { v.step.props[v.k] = v.old; clips.add(v.clip); });
     cbValueSteps = [];
+    cbSplitSteps.reverse().forEach(function (sp) {
+      var step = sp.step; step.d = sp.d; step.props = sp.props; step.ease = sp.ease;
+      step.next = sp.second.next; if (sp.second.next) sp.second.next.prev = step;
+      if (sp.tween._stepTail === sp.second) sp.tween._stepTail = step;
+    });
+    cbSplitSteps = [];
     cbRetimedSteps = [];
     cbEasedSteps.forEach(function (eased) { eased.step.ease = eased.ease; clips.add(eased.clip); });
     cbEasedSteps = [];
@@ -1339,6 +1391,10 @@
           });
         });
       });
+    });
+    Object.keys(keys || {}).forEach(function (name) {
+      var layers = keys[name] || {};
+      clipsOfClass(name).forEach(function (clip) { Object.keys(layers).forEach(function (index) { splitSteps(clip, layers[index]); clips.add(clip); }); });
     });
     Object.keys(values || {}).forEach(function (name) {
       var entries = values[name] || {};
@@ -1422,6 +1478,7 @@
       if (d.type === 'SEEK') { if (root.gotoAndStop) root.gotoAndStop(seekPosition(root, d.seekMs, d.loop, Math.max(1, root.totalFrames || 1))); if (cbSymbolView) applySymbolView(); if (cbOnlyParts.length) applyOnly(); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
       else if (d.type === 'SYMBOL_KEYS_QUERY') { postKeyEditable(d); }
       else if (d.type === 'SYMBOL_VALUES_QUERY') { postKeyValues(d); }
+      else if (d.type === 'SYMBOL_DRAG_BEGIN') { postDragInfo(d); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
       else if (d.type === 'CHARACTER_EDITS') { applySymbolEdits(d.symbolEases, d.symbolKeys, d.symbolValues); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }

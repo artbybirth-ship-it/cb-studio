@@ -76,6 +76,8 @@ type Props = {
    *  path inside it (cb-animate-bridge SYMBOL_VIEW levels) and the objects of hidden layers. The
    *  rest of the scene is dimmed and the stage only answers double-clicks. */
   symbolView?: { objectId: string; levels: Array<{ props?: string[]; frame: number }>; hidden: string[] } | null;
+  /** Inside a character: a press on a part starts dragging it; the handle moves it by the pointer's travel (fractions of the player) and ends. */
+  onSymbolDragStart?: (normalizedX: number, normalizedY: number) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void } | null>;
   /** Inside a character: a double-click on one of its objects (its property name), or elsewhere (null). */
   onSymbolDoubleClick?: (prop: string | null) => void;
   /** ⌥ Option + double-click a character, or right-click › Edit Symbol: step inside it. */
@@ -268,7 +270,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -3365,7 +3367,35 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         );
       })}
       {/* Inside a character: the stage only answers double-clicks (a part steps in, elsewhere steps out). */}
-      {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={doubleClickInsideSymbol} onPointerDown={(event) => { if (!spacePanning) event.stopPropagation(); }} title="Double-click a part to step inside it; double-click elsewhere (or Esc) to step out" />}
+      {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={doubleClickInsideSymbol} onPointerDown={(event) => {
+          if (spacePanning) return;
+          event.stopPropagation();
+          // Press a part and drag: it moves (its keyframe's X and Y). A click or double-click without travel changes nothing.
+          const frame = frameRefs.current.get(symbolView.objectId), rect = frame?.getBoundingClientRect();
+          if (event.button !== 0 || !onSymbolDragStart || !rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return;
+          const startX = event.clientX, startY = event.clientY;
+          let handle: Awaited<ReturnType<NonNullable<typeof onSymbolDragStart>>> = null, ended = false, moved = false, latest = { x: startX, y: startY, shift: false };
+          const apply = () => { if (handle && moved) handle.move((latest.x - startX) / rect.width, (latest.y - startY) / rect.height, latest.shift); };
+          void onSymbolDragStart((startX - rect.left) / rect.width, (startY - rect.top) / rect.height).then((created) => {
+            handle = created;
+            apply();
+            if (ended) created?.end();
+          });
+          const move = (moveEvent: PointerEvent) => {
+            latest = { x: moveEvent.clientX, y: moveEvent.clientY, shift: moveEvent.shiftKey };
+            if (!moved && Math.hypot(latest.x - startX, latest.y - startY) < 3) return;
+            moved = true;
+            apply();
+          };
+          const up = () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", up);
+            ended = true;
+            handle?.end();
+          };
+          window.addEventListener("pointermove", move);
+          window.addEventListener("pointerup", up);
+        }} title="Drag a part to move it; double-click a part to step inside it; double-click elsewhere (or Esc) to step out" />}
       </div>
       {symbolMenu && (
         <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: symbolMenu.x, top: symbolMenu.y }} onPointerDown={(event) => event.stopPropagation()}>

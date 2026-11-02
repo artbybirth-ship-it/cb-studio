@@ -262,7 +262,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
         return (
           <div className="cb-symbol-values">
             <span className="cb-symbol-values-where" title={layer.name}>{layer.name} · keyframe {keySel.frame + 1}</span>
-            {!now ? <span className="cb-symbol-ease-custom">Values of this keyframe cannot be read</span> : <>
+            {!now ? <span className="cb-symbol-ease-custom">Drawn artwork: no position values to edit here</span> : <>
               <ValueField label="X" value={now.x} decimals={1} onChange={(v) => set({ x: v })} />
               <ValueField label="Y" value={now.y} decimals={1} onChange={(v) => set({ y: v })} />
               {turn
