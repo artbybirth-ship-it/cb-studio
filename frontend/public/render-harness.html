@@ -135,18 +135,59 @@
     return seconds + 0.0001 >= start && (length == null || seconds <= start + length + 0.0001);
   }
   function updateVisibility(seconds){
-    timedLayers.forEach(function(entry){ entry.el.style.visibility = inTimeSpan(entry.object, seconds) ? 'visible' : 'hidden'; });
+    timedLayers.forEach(function(entry){
+      entry.el.style.visibility = inTimeSpan(entry.object, seconds) ? 'visible' : 'hidden';
+      // Text and pictures in a ⌘G group with motion move with it every frame (characters: placeCharacter).
+      if(entry.object.type !== 'character' && entry.object.group && entry.object.groupMotion) placeFlat(entry, seconds);
+    });
+  }
+  function placeFlat(entry, seconds){
+    var object = entry.object;
+    var t = groupPlace(object, {x:Number(object.x||0),y:Number(object.y||0),scale:Number(object.scale||1),rotation:Number(object.rotation||0)}, seconds);
+    entry.el.style.left = t.x + 'px';
+    entry.el.style.top = t.y + 'px';
+    entry.el.style.transform = layerTransform(object, t.rotation, t.scale);
+  }
+
+  // ---- ⌘G group motion: the group's move, turn and size about its registration point, on top of
+  // each member's own transform. Keep in sync with lib/groupMotion.ts.
+  function groupPose(motion, seconds){
+    var frames = byTime(motion && motion.keyframes), rest = {x:0,y:0,rotation:0,scale:1};
+    var pose = function(f){ return {x:Number(f.x||0),y:Number(f.y||0),rotation:Number(f.rotation||0),scale:Math.max(0.02,Number(f.scale==null?1:f.scale))}; };
+    if(!frames.length) return rest;
+    var t = Math.max(0, Number(seconds||0)), first = frames[0], last = frames[frames.length-1];
+    if(t <= Number(first.time||0) + KEY_EPSILON) return pose(first);
+    if(t >= Number(last.time||0) - KEY_EPSILON) return pose(last);
+    for(var i=0;i<frames.length-1;i++){
+      var l = frames[i], r = frames[i+1], lt = Number(l.time||0), rt = Number(r.time||0);
+      if(t < lt - KEY_EPSILON || t > rt + KEY_EPSILON) continue;
+      if(l.tween === false) return pose(l);
+      var linear = Math.max(0, Math.min(1, (t - lt) / Math.max(KEY_EPSILON, rt - lt)));
+      var k = l.tween ? easeProgress(linear, l.tween.easeIn, l.tween.easeOut) : linear;
+      var a = pose(l), b = pose(r);
+      return {x:a.x+(b.x-a.x)*k, y:a.y+(b.y-a.y)*k, rotation:a.rotation+(b.rotation-a.rotation)*k, scale:a.scale+(b.scale-a.scale)*k};
+    }
+    return rest;
+  }
+  function groupPlace(object, own, seconds){
+    if(!object.group || !object.groupMotion) return own;
+    var motion = object.groupMotion, p = groupPose(motion, seconds);
+    if(!p.x && !p.y && !p.rotation && p.scale === 1) return own;
+    var px = Number(motion.pivotX||0), py = Number(motion.pivotY||0), r = p.rotation * Math.PI / 180;
+    var vx = own.x - px, vy = own.y - py;
+    return {x:px + p.x + p.scale * (vx * Math.cos(r) - vy * Math.sin(r)), y:py + p.y + p.scale * (vx * Math.sin(r) + vy * Math.cos(r)), rotation:own.rotation + p.rotation, scale:own.scale * p.scale};
   }
 
   // Same transform as the editor canvas (StageCanvas layerTransformCss): rotation, skew, scale with
   // stretch, and the mirror flip (Reflect).
-  function layerTransform(object){
+  function layerTransform(object, rotation, size){
     var clamp = function(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); };
-    var scale = Number(object.scale || 1);
+    var scale = size == null ? Number(object.scale || 1) : size;
+    var turn = rotation == null ? Number(object.rotation || 0) : rotation;
     var sx = clamp(Number(object.stretchX == null ? 1 : object.stretchX) || 1, 0.02, 50);
     var sy = clamp(Number(object.stretchY == null ? 1 : object.stretchY) || 1, 0.02, 50);
     var kx = clamp(Number(object.skewX || 0), -80, 80), ky = clamp(Number(object.skewY || 0), -80, 80);
-    return 'translate(-50%,-50%) rotate(' + Number(object.rotation || 0) + 'deg) skew(' + kx + 'deg,' + ky + 'deg) scale(' + (scale * sx) + ',' + (scale * sy) + ')' + (object.flipX ? ' scaleX(-1)' : '');
+    return 'translate(-50%,-50%) rotate(' + turn + 'deg) skew(' + kx + 'deg,' + ky + 'deg) scale(' + (scale * sx) + ',' + (scale * sy) + ')' + (object.flipX ? ' scaleX(-1)' : '');
   }
 
   // Picture layers (Import to Stage, library FX): the real image at its own pixel size, with the
@@ -274,7 +315,7 @@
   }
 
   function placeCharacter(entry, seconds){
-    var object = entry.object, transform = resolveCharacterTransform(object, seconds);
+    var object = entry.object, transform = groupPlace(object, resolveCharacterTransform(object, seconds), seconds);
     var clamp = function(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); };
     var sx = clamp(Number(object.stretchX == null ? 1 : object.stretchX) || 1, 0.02, 50);
     var sy = clamp(Number(object.stretchY == null ? 1 : object.stretchY) || 1, 0.02, 50);
@@ -304,6 +345,7 @@
       strokeScale:object.strokeScale == null ? 1 : object.strokeScale,
       selectedPart:'',
       focusPart:'',
+      onlyParts:object.onlyParts || [],
       viewport:{width:requestedWidth || innerWidth,height:requestedHeight || innerHeight},
       characterTransform:{
         x:transform.x,

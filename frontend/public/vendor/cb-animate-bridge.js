@@ -12,6 +12,8 @@
  *            inside the previous one (the first of its candidate properties that is on stage),
  *            shown at its own frame; hidden: the last level's objects of hidden layers. null ends it.
  *   SYMBOL_HIT { normalizedX, normalizedY } — which object of the last symbol-view level is there.
+ *   CHARACTER_EDITS.onlyParts: [partKey] — a part layer (Distribute to Layers, pasted parts): only
+ *            these parts are drawn; everything else in the character is hidden.
  *   SET_VIEW { pixelScale, x, y, width, height, exact }  — device pixels per player CSS px and
  *            the visible part of the player (0..1). The vectors are redrawn at exactly that
  *            resolution, for the visible region only, so zooming never pixelates. exact: the
@@ -203,8 +205,23 @@
     return { x: x0, y: y0, width: Math.max(.001, x1 - x0), height: Math.max(.001, y1 - y0) };
   }
   function partTightBounds(p) { return unionBounds(nodesOf(p).map(tightBoundsFor)); }
+  // Several selected parts at once (Shift+click, drag-select, a ⌘G group): "leftHand|head/lips".
+  // Never stored in cbParts, so it never shows up as a part of its own; its box is the members'
+  // boxes where they are drawn now (their own edits included).
+  function multiPart(key) {
+    var members = key.split('|').filter(Boolean), nodes = [], boxes = [];
+    members.forEach(function (m) {
+      var mp = resolvePart(m), list = nodesOf(mp); if (!list.length) return;
+      list.forEach(function (n) { if (nodes.indexOf(n) < 0) nodes.push(n); });
+      var b = partTightBounds(mp), o = cbLastOv[m] || {};
+      if (b) boxes.push({ x: b.x + Number(o.offsetX || 0) / W, y: b.y + Number(o.offsetY || 0) / H, width: b.width, height: b.height });
+    });
+    if (!nodes.length) return null;
+    return { key: key, label: members.length + ' parts', node: nodes[0], nodes: nodes, members: members, multi: true, bounds: unionBounds(boxes) };
+  }
   function resolvePart(key) {
     key = String(key || ''); if (!key) return null;
+    if (key.indexOf('|') >= 0) return multiPart(key);
     var p = cbParts[key]; if (p && p.node) return p;
     var cut = key.lastIndexOf('/'); if (cut < 0) return p || null;
     var parent = resolvePart(key.slice(0, cut)); if (!parent || !parent.node || parent.nodes) return null;
@@ -251,7 +268,7 @@
   // Editor: a part's current (unedited, tight) box and label, nested keys included.
   window.cbPartBoundsOf = function (key) {
     var p = resolvePart(key); if (!p || !p.node) return null;
-    p.bounds = partTightBounds(p) || p.bounds;
+    if (!p.multi) p.bounds = partTightBounds(p) || p.bounds;
     return { key: p.key, label: p.label, bounds: p.bounds };
   };
   // Saved edits, the selection and nested parts edited before (so removing an edit resets them).
@@ -329,7 +346,7 @@
     o = o || {};
     if (n.getMatrix !== editedMatrix) n.getMatrix = editedMatrix;
     if (!grouped && !p.nested) applySwap(n, String(o.swapSymbol || ''));
-    if (n.__cbBaseVisible === undefined) n.__cbBaseVisible = n.visible !== false;
+    if (n.__cbBaseVisible === undefined) n.__cbBaseVisible = n.__cbOnlyHid ? true : n.visible !== false;
     var sc = Math.max(.02, Number(o.scale == null ? 1 : o.scale || 1)), ox = Number(o.offsetX || 0), oy = Number(o.offsetY || 0), rot = Number(o.rotation || 0), flip = !!o.flipX, kx = Number(o.skewX || 0), ky = Number(o.skewY || 0);
     var stx = stretchOf(o.stretchX), sty = stretchOf(o.stretchY);
     if (!ox && !oy && !rot && sc === 1 && !flip && !kx && !ky && stx === 1 && sty === 1) n.__cbOv = null;
@@ -341,20 +358,74 @@
     n.visible = o.visible === false ? false : n.__cbBaseVisible;
     if (o.animate === false && typeof n.stop === 'function') n.stop();
   }
-  // Entered part (CHARACTER_EDITS.focusPart): wash out the artwork outside the part's box so
-  // only that part reads at full strength. source-atop keeps the wash on the character's own pixels.
+  // ---- Part layers (CHARACTER_EDITS.onlyParts): only the listed parts are drawn. Along the path
+  // from the root to each kept part, every other child is hidden (the character still draws and
+  // animates normally); applied again after every SEEK, since frames bring other objects in.
+  var cbOnlyParts = [], cbOnlyHidden = [];
+  function onlyNodes() {
+    var out = [];
+    cbOnlyParts.forEach(function (key) { nodesOf(resolvePart(key)).forEach(function (n) { if (out.indexOf(n) < 0) out.push(n); }); });
+    return out;
+  }
+  function applyOnly() {
+    cbOnlyHidden.forEach(function (n) { if (n.__cbOnlyHid) { n.__cbOnlyHid = false; n.visible = n.__cbBaseVisible === undefined ? true : n.__cbBaseVisible; } });
+    cbOnlyHidden = [];
+    var root = cbRoot(); if (!root || !cbOnlyParts.length) return;
+    var keep = onlyNodes(); if (!keep.length) return;
+    var onPath = [];
+    keep.forEach(function (n) { for (var q = n.parent; q && q !== root.parent; q = q.parent) if (onPath.indexOf(q) < 0) onPath.push(q); });
+    onPath.forEach(function (container) {
+      (container.children || []).forEach(function (child) {
+        if (keep.indexOf(child) >= 0 || onPath.indexOf(child) >= 0 || child.visible === false) return;
+        child.__cbOnlyHid = true; child.visible = false; cbOnlyHidden.push(child);
+      });
+    });
+  }
+  // Drawn now: the node and everything above it visible (a part layer hides the rest).
+  function shownNow(n) { for (var q = n; q; q = q.parent) if (q.visible === false) return false; return true; }
+
+  // Entered part (CHARACTER_EDITS.focusPart; several parts joined by "|"): wash out the whole
+  // character, then draw the part's own artwork again on top, so exactly its outline reads at full
+  // strength (a box would leave a neck or collar inside it bright). source-atop keeps the wash on the
+  // character's own pixels. A part known only as a guessed zone keeps the old box.
+  var cbFocusCopy = null;
+  function focusNodes() {
+    var out = [];
+    String(cbFocusPart || '').split('|').forEach(function (key) { var p = key && (cbParts[key] || resolvePart(key)); nodesOf(p).forEach(function (n) { if (out.indexOf(n) < 0) out.push(n); }); });
+    return out;
+  }
   function applyFocus() {
     var st = cbStage(); if (!st || !window.createjs) return;
     if (!cbDimLayer) { cbDimLayer = new createjs.Shape(); cbDimLayer.compositeOperation = 'source-atop'; cbDimLayer.alpha = .6; }
-    if (cbDimLayer.parent !== st || st.getChildIndex(cbDimLayer) !== st.numChildren - 1) st.addChild(cbDimLayer);
+    if (!cbFocusCopy) {
+      cbFocusCopy = new createjs.DisplayObject();
+      cbFocusCopy.draw = function (ctx) {
+        var stage = cbStage(); if (!stage) return true;
+        var toStage = stage.getMatrix(new createjs.Matrix2D()).invert();
+        focusNodes().forEach(function (n) {
+          if (!n.parent || n.visible === false || n._off) return;
+          try {
+            var m = n.getConcatenatedMatrix(new createjs.Matrix2D()).prependMatrix(toStage), a = 1;
+            for (var q = n; q && q !== stage; q = q.parent) a *= q.alpha == null ? 1 : q.alpha;
+            ctx.save(); ctx.globalAlpha *= a; ctx.transform(m.a, m.b, m.c, m.d, m.tx, m.ty); n.draw(ctx, false); ctx.restore();
+          } catch (e) { try { ctx.restore(); } catch (e2) {} }
+        });
+        return true;
+      };
+    }
+    if (cbDimLayer.parent !== st || st.getChildIndex(cbDimLayer) !== st.numChildren - 2 || cbFocusCopy.parent !== st || st.getChildIndex(cbFocusCopy) !== st.numChildren - 1) { st.addChild(cbDimLayer); st.addChild(cbFocusCopy); }
     var g = cbDimLayer.graphics; g.clear();
-    var p = cbFocusPart && cbParts[cbFocusPart];
+    cbFocusCopy.visible = false;
+    if (!cbFocusPart) return;
+    var nodes = focusNodes();
+    if (nodes.length) { g.f('#ffffff').dr(0, 0, W, H); cbFocusCopy.visible = true; return; }
+    var p = cbParts[cbFocusPart];
     if (!p) return;
-    var b = unionBounds(nodesOf(p).map(boundsFor)) || p.bounds || zoneFor(cbFocusPart);
+    var b = p.bounds || zoneFor(cbFocusPart);
     var x = b.x * W, y = b.y * H, r = (b.x + b.width) * W, bt = (b.y + b.height) * H;
     g.f('#ffffff').dr(0, 0, W, y).dr(0, bt, W, H - bt).dr(0, y, x, bt - y).dr(r, y, W - r, bt - y);
   }
-  function applyEdits(d) { discover(); cbSelectedPart = String(d.selectedPart || ''); var ov = d.partOverrides || {}; var ruleScopes = (d.colorReplacements || []).map(function (r) { return String(r && r.scope || ''); }); resolveNested(Object.keys(ov).concat([cbSelectedPart, String(d.focusPart || '')], ruleScopes)); refreshBounds(ov); Object.keys(cbParts).forEach(function (k) { applyOne(k, ov[k] || {}); }); Object.keys(cbNestedKeys).forEach(function (k) { if (!ov[k] && k !== cbSelectedPart && k !== String(d.focusPart || '') && ruleScopes.indexOf(k) < 0) delete cbNestedKeys[k]; }); refreshBounds(ov); applyFallbackMasks(ov, d.colorOverrides || {}); cbColorRules = d.colorReplacements || []; applyRecolor(cbColorRules); cbFocusPart = String(d.focusPart || ''); applyFocus(); var st = cbStage(); if (st && st.update) st.update(); }
+  function applyEdits(d) { discover(); cbSelectedPart = String(d.selectedPart || ''); cbOnlyParts = (d.onlyParts || []).map(String).filter(Boolean); var ov = d.partOverrides || {}; var ruleScopes = (d.colorReplacements || []).map(function (r) { return String(r && r.scope || ''); }); resolveNested(Object.keys(ov).concat([cbSelectedPart, String(d.focusPart || '')], ruleScopes, cbOnlyParts)); refreshBounds(ov); Object.keys(cbParts).forEach(function (k) { applyOne(k, ov[k] || {}); }); Object.keys(cbNestedKeys).forEach(function (k) { if (!ov[k] && k !== cbSelectedPart && k !== String(d.focusPart || '') && ruleScopes.indexOf(k) < 0) delete cbNestedKeys[k]; }); refreshBounds(ov); applyFallbackMasks(ov, d.colorOverrides || {}); cbColorRules = d.colorReplacements || []; applyRecolor(cbColorRules); cbFocusPart = String(d.focusPart || ''); applyOnly(); applyFocus(); var st = cbStage(); if (st && st.update) st.update(); }
   // ---- Tight part bounds: the part alone is drawn off-screen (unedited, in stage units) and its
   // opaque pixels measured, so the box hugs the artwork instead of the symbol's nominal bounds.
   // Only the selected part and edited parts are measured; results are cached per frame/variant.
@@ -496,9 +567,167 @@
   window.cbAnyPartAt = function (x, y, tol) { if (!cbNamedMode) return null; var h = pixelHitNear(Number(x), Number(y), Number(tol) || 0); return h ? h.key : ''; };
   function hit(x, y) { refreshBounds(); if (cbNamedMode) return pixelHitNear(x, y, 2 / Math.max(W, H)); var px = pixelHit(x, y); if (px) return px; var hits = []; Object.keys(cbParts).forEach(function (k) { var b = cbParts[k].bounds || zoneFor(k); if (x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height) hits.push({ key: k, b: b, area: b.width * b.height }); }); hits.sort(function (a, b) { return a.area - b.area; }); return hits[0] || null; }
   function selectAt(x, y) { var h = hit(x, y); if (!h) return; var p = cbParts[h.key]; var b = p && p.node ? tightBoundsFor(p.node) : h.b; if (p && b) p.bounds = b; cbPost('PART_SELECTED', { partKey: h.key, partBounds: b || h.b }); }
-  function startDrag(d) { var key = String(d.partKey || ''), p = cbParts[key], last = cbLastOv[key] || {}; if (!p) return; cbDrag = { key: key, startX: Number(d.normalizedX || 0), startY: Number(d.normalizedY || 0), baseX: Number(last.offsetX || 0), baseY: Number(last.offsetY || 0) }; }
+  function startDrag(d) { var key = String(d.partKey || ''); if (key.indexOf('|') >= 0) { var mp = multiPart(key); if (mp) cbDrag = { key: key, multi: mp, startX: Number(d.normalizedX || 0), startY: Number(d.normalizedY || 0), baseX: 0, baseY: 0 }; return; } var p = cbParts[key], last = cbLastOv[key] || {}; if (!p) return; cbDrag = { key: key, startX: Number(d.normalizedX || 0), startY: Number(d.normalizedY || 0), baseX: Number(last.offsetX || 0), baseY: Number(last.offsetY || 0) }; }
   // Drag preview keeps the part's rotation/scale/flip; the reported bounds stay unedited (the editor adds the offset).
-  function moveDrag(d, end) { if (!cbDrag) return; var p = cbParts[cbDrag.key]; if (!p) return; var ox = cbDrag.baseX + (Number(d.normalizedX || 0) - cbDrag.startX) * W, oy = cbDrag.baseY + (Number(d.normalizedY || 0) - cbDrag.startY) * H; var merged = Object.assign({}, cbLastOv[cbDrag.key] || {}, { offsetX: ox, offsetY: oy }); cbLastOv[cbDrag.key] = merged; applyOne(cbDrag.key, merged); var b = p.bounds || (p.node ? baseBoundsFor(p.node) : zoneFor(cbDrag.key)); if (cbFocusPart) applyFocus(); cbPost(end ? 'PART_DRAG_END' : 'PART_DRAG_PREVIEW', { partKey: cbDrag.key, offsetX: ox, offsetY: oy, partBounds: b }); var st = cbStage(); if (st && st.update) st.update(); if (end) cbDrag = null; }
+  function moveDrag(d, end) { if (!cbDrag) return; if (cbDrag.multi) { moveMultiDrag(d, end); return; } var p = cbParts[cbDrag.key]; if (!p) return; var ox = cbDrag.baseX + (Number(d.normalizedX || 0) - cbDrag.startX) * W, oy = cbDrag.baseY + (Number(d.normalizedY || 0) - cbDrag.startY) * H; var merged = Object.assign({}, cbLastOv[cbDrag.key] || {}, { offsetX: ox, offsetY: oy }); cbLastOv[cbDrag.key] = merged; applyOne(cbDrag.key, merged); var b = p.bounds || (p.node ? baseBoundsFor(p.node) : zoneFor(cbDrag.key)); if (cbFocusPart) applyFocus(); cbPost(end ? 'PART_DRAG_END' : 'PART_DRAG_PREVIEW', { partKey: cbDrag.key, offsetX: ox, offsetY: oy, partBounds: b }); var st = cbStage(); if (st && st.update) st.update(); if (end) cbDrag = null; }
+
+  // Several parts dragged together: each keeps its own edit and moves by the same amount; the editor
+  // gets the shared offset (PART_DRAG_END) and adds it to each part.
+  function moveMultiDrag(d, end) {
+    var dx = (Number(d.normalizedX || 0) - cbDrag.startX) * W, dy = (Number(d.normalizedY || 0) - cbDrag.startY) * H, mp = cbDrag.multi;
+    mp.members.forEach(function (m) { var last = cbLastOv[m] || {}; applyOne(m, Object.assign({}, last, { offsetX: Number(last.offsetX || 0) + dx, offsetY: Number(last.offsetY || 0) + dy })); });
+    if (cbFocusPart) applyFocus();
+    cbPost(end ? 'PART_DRAG_END' : 'PART_DRAG_PREVIEW', { partKey: cbDrag.key, offsetX: dx, offsetY: dy, partBounds: mp.bounds });
+    var st = cbStage(); if (st && st.update) st.update();
+    if (end) cbDrag = null;
+  }
+  // Editor (same-origin): the part under (x, y) (0..1 of the player), for Shift+click.
+  window.cbPartAt = function (x, y) {
+    var h = hit(Number(x), Number(y)); if (!h) return null;
+    var p = cbParts[h.key], b = p && p.node ? tightBoundsFor(p.node) : h.b;
+    if (p && p.node && !shownNow(p.node)) return null;
+    return { key: h.key, label: p ? p.label : h.key, bounds: b };
+  };
+  // Editor: parts in drawing order, back to front (Distribute to Layers keeps the look). Without
+  // keys: every top-level part with real artwork that is drawn now. Each comes with its label.
+  window.cbPartsByStack = function (keys) {
+    var root = cbRoot(), order = new Map(), i = 0;
+    (function walk(n, depth) { if (!n || depth > 60) return; order.set(n, i++); (n.children || []).forEach(function (c) { walk(c, depth + 1); }); })(root, 0);
+    var list = keys && keys.length ? keys.map(String) : (cbOrder.length ? cbOrder : Object.keys(cbParts)).filter(function (k) { var p = cbParts[k]; return k.indexOf('/') < 0 && p && p.node && shownNow(p.node); });
+    return list.map(function (k) {
+      var p = resolvePart(k), nodes = nodesOf(p), at = Math.min.apply(null, nodes.map(function (n) { return order.has(n) ? order.get(n) : 1e9; }).concat([1e9]));
+      return { key: k, label: p ? p.label : k, at: at };
+    }).filter(function (item) { return item.at < 1e9; }).sort(function (a, b) { return a.at - b.at; }).map(function (item) { return { key: item.key, label: item.label }; });
+  };
+  // ---- Distribute as Still: a part as vector SVG, exactly as drawn now (its edits and recolours
+  // included). Animate exports draw with CreateJS Graphics instructions; each shape becomes SVG
+  // paths in the player's own units (transform = where it is drawn), masks become clip paths,
+  // gradients and transparency are kept, bitmaps are embedded. Filters, blend modes and text are
+  // not converted (they are counted in `skipped`).
+  function svgNumber(v) { return String(Math.round(Number(v) * 100) / 100); }
+  function svgColor(style, fallback) { return typeof style === 'string' ? style.replace(/"/g, '') : fallback; }
+  function partSvg(keys) {
+    var stage = cbStage(); if (!stage || !window.createjs) return null;
+    var G = createjs.Graphics, toStage = stage.getMatrix(new createjs.Matrix2D()).invert();
+    var defs = [], body = [], ids = 0, skipped = {}, box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    var caps = ['butt', 'round', 'square'], joins = ['miter', 'round', 'bevel'];
+    function skip(what) { skipped[what] = (skipped[what] || 0) + 1; }
+    function abs(n) { return n.getConcatenatedMatrix(new createjs.Matrix2D()).prependMatrix(toStage); }
+    function matrixAttr(m) { return 'matrix(' + [m.a, m.b, m.c, m.d, m.tx, m.ty].map(function (v) { return Math.round(v * 10000) / 10000; }).join(' ') + ')'; }
+    function grow(m, x, y, pad) { var px = m.a * x + m.c * y + m.tx, py = m.b * x + m.d * y + m.ty; pad = pad || 0; box.x0 = Math.min(box.x0, px - pad); box.y0 = Math.min(box.y0, py - pad); box.x1 = Math.max(box.x1, px + pad); box.y1 = Math.max(box.y1, py + pad); }
+    function paint(style, matrix) {
+      if (typeof style === 'string') return style;
+      var props = style && style.props; if (!props) { skip('pattern fill'); return 'none'; }
+      if (props.type === 'bitmap') { skip('bitmap fill'); return 'none'; }
+      var id = 'g' + (ids++), stops = (props.colors || []).map(function (c, i) { return '<stop offset="' + svgNumber(props.ratios[i]) + '" stop-color="' + svgColor(c, '#000') + '"/>'; }).join('');
+      var gt = matrix ? ' gradientTransform="' + matrixAttr(matrix) + '"' : '';
+      defs.push(props.type === 'radial'
+        ? '<radialGradient id="' + id + '" gradientUnits="userSpaceOnUse" cx="' + svgNumber(props.x1) + '" cy="' + svgNumber(props.y1) + '" r="' + svgNumber(props.r1) + '" fx="' + svgNumber(props.x0) + '" fy="' + svgNumber(props.y0) + '"' + gt + '>' + stops + '</radialGradient>'
+        : '<linearGradient id="' + id + '" gradientUnits="userSpaceOnUse" x1="' + svgNumber(props.x0) + '" y1="' + svgNumber(props.y0) + '" x2="' + svgNumber(props.x1) + '" y2="' + svgNumber(props.y1) + '"' + gt + '>' + stops + '</linearGradient>');
+      return 'url(#' + id + ')';
+    }
+    function shapeSvg(shape, m, alpha) {
+      var list = shape.graphics && shape.graphics.getInstructions ? shape.graphics.getInstructions() : [];
+      var d = '', out = [], stroke = { width: 1, caps: 'butt', joins: 'miter', miter: 10, fixed: false }, has = false;
+      var tf = ' transform="' + matrixAttr(m) + '"' + (alpha < 1 ? ' opacity="' + svgNumber(alpha) + '"' : '');
+      function pt(x, y) { grow(m, x, y, 0); return svgNumber(x) + ' ' + svgNumber(y); }
+      function arc(x, y, r, a0, a1, ccw) {
+        var sx = x + r * Math.cos(a0), sy = y + r * Math.sin(a0), sweep = a1 - a0;
+        if (!ccw && sweep < 0) sweep += Math.PI * 2; if (ccw && sweep > 0) sweep -= Math.PI * 2;
+        d += (has ? 'L' : 'M') + pt(sx, sy); has = true;
+        if (Math.abs(sweep) >= Math.PI * 2 - 1e-6) { var mx = x - r * Math.cos(a0), my = y - r * Math.sin(a0); d += 'A' + svgNumber(r) + ' ' + svgNumber(r) + ' 0 1 ' + (ccw ? 0 : 1) + ' ' + pt(mx, my) + 'A' + svgNumber(r) + ' ' + svgNumber(r) + ' 0 1 ' + (ccw ? 0 : 1) + ' ' + pt(sx, sy); grow(m, x - r, y - r); grow(m, x + r, y + r); return; }
+        var ex = x + r * Math.cos(a0 + sweep), ey = y + r * Math.sin(a0 + sweep);
+        d += 'A' + svgNumber(r) + ' ' + svgNumber(r) + ' 0 ' + (Math.abs(sweep) > Math.PI ? 1 : 0) + ' ' + (sweep > 0 ? 1 : 0) + ' ' + pt(ex, ey);
+      }
+      for (var i = 0; i < list.length; i++) {
+        var c = list[i];
+        if (c instanceof G.BeginPath) { d = ''; has = false; }
+        else if (c instanceof G.MoveTo) { d += 'M' + pt(c.x, c.y); has = true; }
+        else if (c instanceof G.LineTo) { d += (has ? 'L' : 'M') + pt(c.x, c.y); has = true; }
+        else if (c instanceof G.QuadraticCurveTo) { d += 'Q' + pt(c.cpx, c.cpy) + ' ' + pt(c.x, c.y); has = true; }
+        else if (c instanceof G.BezierCurveTo) { d += 'C' + pt(c.cp1x, c.cp1y) + ' ' + pt(c.cp2x, c.cp2y) + ' ' + pt(c.x, c.y); has = true; }
+        else if (c instanceof G.ClosePath) { d += 'Z'; }
+        else if (c instanceof G.Rect) { d += 'M' + pt(c.x, c.y) + 'H' + svgNumber(c.x + c.w) + 'V' + svgNumber(c.y + c.h) + 'H' + svgNumber(c.x) + 'Z'; grow(m, c.x + c.w, c.y + c.h); has = true; }
+        else if (G.Circle && c instanceof G.Circle) { has = false; arc(c.x, c.y, c.radius, 0, Math.PI * 2, false); d += 'Z'; }
+        else if (G.Ellipse && c instanceof G.Ellipse) { var rx = c.w / 2, ry = c.h / 2, cx = c.x + rx, cy = c.y + ry; d += 'M' + pt(c.x, cy) + 'A' + svgNumber(rx) + ' ' + svgNumber(ry) + ' 0 1 0 ' + pt(c.x + c.w, cy) + 'A' + svgNumber(rx) + ' ' + svgNumber(ry) + ' 0 1 0 ' + pt(c.x, cy) + 'Z'; grow(m, c.x, c.y); grow(m, c.x + c.w, c.y + c.h); has = true; }
+        else if (c instanceof G.Arc) { arc(c.x, c.y, c.radius, c.startAngle, c.endAngle, c.anticlockwise); }
+        else if (c instanceof G.StrokeStyle) { stroke = { width: Number(c.width) || 1, caps: typeof c.caps === 'number' ? caps[c.caps] : (c.caps || 'butt'), joins: typeof c.joints === 'number' ? joins[c.joints] : (c.joints || 'miter'), miter: Number(c.miterLimit) || 10, fixed: !!c.ignoreScale }; }
+        else if (c instanceof G.Fill) { if (c.style && d) out.push('<path' + tf + ' d="' + d + '" fill="' + paint(c.style, c.matrix) + '"/>'); }
+        else if (c instanceof G.Stroke) {
+          if (c.style && d) {
+            out.push('<path' + tf + ' d="' + d + '" fill="none" stroke="' + paint(c.style, null) + '" stroke-width="' + svgNumber(stroke.width * (stroke.fixed ? 1 : Math.max(.02, Number(cbStrokeScale) || 1))) + '" stroke-linecap="' + stroke.caps + '" stroke-linejoin="' + stroke.joins + '" stroke-miterlimit="' + svgNumber(stroke.miter) + '"' + (stroke.fixed ? ' vector-effect="non-scaling-stroke"' : '') + '/>');
+            var half = stroke.width * Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) / 2; box.x0 -= 0; if (half > 0) { box.x0 -= half; box.y0 -= half; box.x1 += half; box.y1 += half; }
+          }
+        }
+        else if (!(c instanceof G.StrokeDash)) skip('shape command');
+      }
+      return out.join('');
+    }
+    function bitmapSvg(node, m, alpha) {
+      var img = node.image; if (!img || !img.width) return '';
+      var w = node.sourceRect ? node.sourceRect.width : img.width, h = node.sourceRect ? node.sourceRect.height : img.height, url = '';
+      try { var cv = document.createElement('canvas'); cv.width = w; cv.height = h; var r = node.sourceRect || { x: 0, y: 0 }; cv.getContext('2d').drawImage(img, r.x, r.y, w, h, 0, 0, w, h); url = cv.toDataURL('image/png'); } catch (e) { skip('bitmap'); return ''; }
+      grow(m, 0, 0); grow(m, w, h);
+      return '<image transform="' + matrixAttr(m) + '" width="' + w + '" height="' + h + '" href="' + url + '"' + (alpha < 1 ? ' opacity="' + svgNumber(alpha) + '"' : '') + '/>';
+    }
+    function nodeSvg(n, alpha) {
+      if (!n || n.visible === false || n._off || !(n.alpha > 0)) return '';
+      alpha *= n.alpha == null ? 1 : n.alpha;
+      if (n.filters && n.filters.length) skip('filter');
+      if (n.compositeOperation) skip('blend mode');
+      var inner = '';
+      if (n.graphics) inner = shapeSvg(n, abs(n), alpha);
+      else if (n.image) inner = bitmapSvg(n, abs(n), alpha);
+      else if (n.text != null && !n.children) skip('text');
+      else (n.children || []).forEach(function (c) { inner += nodeSvg(c, alpha); });
+      if (inner && n.mask && n.mask.graphics && n.parent) {
+        var id = 'c' + (ids++), mm = n.parent.getConcatenatedMatrix(new createjs.Matrix2D()).prependMatrix(toStage).appendMatrix(n.mask.getMatrix(new createjs.Matrix2D()));
+        var saved = box; box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+        var clip = shapeSvg(n.mask, mm, 1).replace(/ fill="[^"]*"/g, '').replace(/<path[^>]* fill="none"[^>]*\/>/g, '');
+        box = saved;
+        defs.push('<clipPath id="' + id + '" clipPathUnits="userSpaceOnUse">' + clip + '</clipPath>');
+        inner = '<g clip-path="url(#' + id + ')">' + inner + '</g>';
+      }
+      return inner;
+    }
+    var nodes = [];
+    keys.forEach(function (k) { nodesOf(resolvePart(k)).forEach(function (n) { if (nodes.indexOf(n) < 0) nodes.push(n); }); });
+    var order = new Map(), i = 0;
+    (function walk(n, depth) { if (!n || depth > 60) return; order.set(n, i++); (n.children || []).forEach(function (c) { walk(c, depth + 1); }); })(cbRoot(), 0);
+    nodes = nodes.filter(function (n) { for (var q = n.parent; q; q = q.parent) if (nodes.indexOf(q) >= 0) return false; return true; })
+      .sort(function (a, b) { return (order.get(a) || 0) - (order.get(b) || 0); });
+    nodes.forEach(function (n) {
+      var parentAlpha = 1; for (var q = n.parent; q && q !== stage; q = q.parent) parentAlpha *= q.alpha == null ? 1 : q.alpha;
+      body.push(nodeSvg(n, parentAlpha));
+    });
+    if (!isFinite(box.x0) || box.x1 <= box.x0 || box.y1 <= box.y0) return null;
+    var pad = 2, x = Math.floor(box.x0 - pad), y = Math.floor(box.y0 - pad), w = Math.ceil(box.x1 + pad) - x, h = Math.ceil(box.y1 + pad) - y;
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" viewBox="' + [x, y, w, h].join(' ') + '">' + (defs.length ? '<defs>' + defs.join('') + '</defs>' : '') + body.join('') + '</svg>';
+    return { svg: svg, x: x, y: y, width: w, height: h, playerWidth: W, playerHeight: H, skipped: skipped };
+  }
+  // Editor: the library symbol a part is drawn from ("Symbol2copy9"), for pasting it onto a part
+  // of another character (a "source-symbol" part replacement).
+  window.cbPartSymbolName = function (key) {
+    var p = resolvePart(String(key || '')), n = p && p.node; if (!n || p.nodes) return '';
+    try { return protoNames().get(Object.getPrototypeOf(n)) || ''; } catch (e) { return ''; }
+  };
+  window.cbPartsToSvg = function (keys) { try { return partSvg((keys || []).map(String)); } catch (e) { return { error: String(e) }; } };
+
+  // Editor: the parts a drag box (0..1 of the player) touches — whole parts at the top level, or the
+  // pieces (else the drawn shapes) inside containerKey.
+  window.cbPartsInRect = function (containerKey, x0, y0, x1, y1) {
+    var out = [], touches = function (b) { return !!b && b.x <= x1 && b.x + b.width >= x0 && b.y <= y1 && b.y + b.height >= y0; };
+    refreshBounds();
+    if (!containerKey) {
+      (cbOrder.length ? cbOrder : Object.keys(cbParts)).forEach(function (k) { var p = cbParts[k]; if (p && p.node && k.indexOf('/') < 0 && shownNow(p.node) && touches(partTightBounds(p) || p.bounds)) out.push(k); });
+      return out;
+    }
+    var parent = resolvePart(containerKey); if (!parent || !parent.node || parent.nodes) return out;
+    var pieces = childPieces(parent.node), prefix = parent.key + '/';
+    if (pieces.length) pieces.forEach(function (c) { if (shownNow(c.node) && touches(tightBoundsFor(c.node))) out.push(prefix + c.id); });
+    else shapesUnder(parent.node, '', []).forEach(function (sh) { if (shownNow(sh.node) && touches(tightBoundsFor(sh.node))) out.push(prefix + sh.id); });
+    return out;
+  };
 
   // ---- Recolour (CHARACTER_EDITS.colorReplacements): Illustrator-style recolour and Animate-style
   // find & replace on the vector artwork itself. Rules: { from, to, target: fill|stroke|both,
@@ -635,6 +864,47 @@
     }); });
     return Object.keys(found).map(function (k) { return found[k]; }).sort(function (a, b) { return (b.fills + b.strokes) - (a.fills + a.strokes); }).slice(0, 80);
   };
+  // Light/Dark (Include Stroke / Include Shadow): what goes with a colour, as original colours.
+  // strokes = the outline colours (darker, same hue or grey) of the shapes filled with it, else of the
+  // part that holds it;
+  // shadows = darker colours of its shading family used as fills (sameFamily: same hue, darker).
+  window.cbColorRelatives = function (hexIn, scopeKey) {
+    var none = { strokes: [], shadows: [] }, root = cbRoot(), base = parseColor(hexIn);
+    if (!root || !window.createjs || !base) return none;
+    var baseHex = hexOf(base), baseHsl = toHsl(base), scoped = scopeKey ? nodesOf(resolvePart(scopeKey)) : [];
+    var strokes = {}, shadows = {}, partsWithBase = {}, strokesByPart = {};
+    // An outline of this colour: darker, and its hue (or grey/black) — not a neighbour's outline drawn
+    // in the same shape (a green lungi's outline next to skin).
+    var outlineOf = function (h) {
+      if (h === baseHex) return false;
+      var c = toHsl(parseColor(h)); if (c.l >= baseHsl.l) return false;
+      if (c.s < .08 || baseHsl.s < .12) return true;
+      var dh = Math.abs(c.h - baseHsl.h); return Math.min(dh, 360 - dh) <= 30;
+    };
+    var colorsOf = function (ins) { var o = originalStyle(ins); if (o == null) return []; return (typeof o === 'string' ? [o] : o.props.colors).map(parseColor).filter(function (c) { return c && c.a >= .05; }).map(hexOf); };
+    (scoped.length ? scoped : [root]).forEach(function (start) { eachShape(start, function (shape, partKey) {
+      var list = graphicsList(shape.graphics), fills = [], lines = [];
+      for (var i = 0; i < list.length; i++) {
+        var ins = list[i];
+        if (ins instanceof createjs.Graphics.Fill) fills = fills.concat(colorsOf(ins));
+        else if (ins instanceof createjs.Graphics.Stroke) lines = lines.concat(colorsOf(ins));
+      }
+      var hasBase = fills.indexOf(baseHex) >= 0;
+      if (hasBase) { partsWithBase[partKey] = 1; lines.forEach(function (h) { if (outlineOf(h)) strokes[h] = 1; }); }
+      var own = strokesByPart[partKey] || (strokesByPart[partKey] = {});
+      lines.forEach(function (h) { own[h] = 1; });
+      fills.forEach(function (h) {
+        if (h === baseHex || shadows[h]) return;
+        var hsl = toHsl(parseColor(h));
+        if (hsl.l < baseHsl.l - .01 && sameFamily(hsl, baseHsl)) shadows[h] = 1;
+      });
+    }); });
+    // Outlines drawn as their own shapes: those of the named parts that hold the colour.
+    if (!Object.keys(strokes).length) Object.keys(partsWithBase).forEach(function (k) {
+      if (k) Object.keys(strokesByPart[k] || {}).forEach(function (h) { if (outlineOf(h)) strokes[h] = 1; });
+    });
+    return { strokes: Object.keys(strokes), shadows: Object.keys(shadows) };
+  };
   // Eyedropper / Lighten-Darken: the original colour of the top-most visible shape under (x, y)
   // (0..1 of the player), like clicking a fill in Animate. Among that shape's fills, the one whose
   // current colour is closest to the drawn pixel. Falls back to the nearest palette colour.
@@ -750,7 +1020,7 @@
     cbScanCanvas.width = w; cbScanCanvas.height = h;
     var ctx = cbScanCanvas.getContext('2d', { willReadFrequently: true });
     var saved = { sx: st.scaleX, sy: st.scaleY, x: st.x, y: st.y };
-    var helpers = [cbFallbackLayer, cbTintLayer, cbDimLayer].filter(Boolean).map(function (l) { var was = l.visible; l.visible = false; return [l, was]; });
+    var helpers = [cbFallbackLayer, cbTintLayer, cbDimLayer, cbFocusCopy].filter(Boolean).map(function (l) { var was = l.visible; l.visible = false; return [l, was]; });
     var data = null;
     try {
       st.scaleX = w / W; st.scaleY = h / H; st.x = 0; st.y = 0;
@@ -780,7 +1050,7 @@
     var snap = document.createElement('canvas'); snap.width = w; snap.height = h;
     var ctx = snap.getContext('2d');
     var saved = { sx: st.scaleX, sy: st.scaleY, x: st.x, y: st.y, frame: root.currentFrame };
-    var helpers = [cbFallbackLayer, cbTintLayer, cbDimLayer].filter(Boolean).map(function (l) { var was = l.visible; l.visible = false; return [l, was]; });
+    var helpers = [cbFallbackLayer, cbTintLayer, cbDimLayer, cbFocusCopy].filter(Boolean).map(function (l) { var was = l.visible; l.visible = false; return [l, was]; });
     try {
       if (seekMs != null && root.gotoAndStop) {
         var total = Math.max(1, root.totalFrames || 1), f = Math.max(0, Math.round(Number(seekMs) / 1000 * FPS));
@@ -970,7 +1240,7 @@
     try {
       // loop: wrap past the last frame (Animate "Loop"); otherwise hold the last frame ("Play Once").
       // SEEK_DONE tells the video export (render harness) the frame is drawn and can be captured.
-      if (d.type === 'SEEK') { var f = Math.max(0, Math.round(Number(d.seekMs || 0) / 1000 * FPS)), total = Math.max(1, root.totalFrames || 1); if (root.gotoAndStop) root.gotoAndStop(d.loop && total > 1 ? f % total : Math.min(total - 1, f)); if (cbSymbolView) applySymbolView(); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
+      if (d.type === 'SEEK') { var f = Math.max(0, Math.round(Number(d.seekMs || 0) / 1000 * FPS)), total = Math.max(1, root.totalFrames || 1); if (root.gotoAndStop) root.gotoAndStop(d.loop && total > 1 ? f % total : Math.min(total - 1, f)); if (cbSymbolView) applySymbolView(); if (cbOnlyParts.length) applyOnly(); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
       else if (d.type === 'CHARACTER_EDITS') { cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }

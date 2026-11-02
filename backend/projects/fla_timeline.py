@@ -178,9 +178,16 @@ def _plain(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_$]", "", name.split("/")[-1])
 
 
-def _may_be(js_name: str, xfl_name: str) -> bool:
+def _name_may_be(js_name: str, xfl_name: str) -> bool:
     plain = _plain(xfl_name)
     return js_name == plain or bool(re.fullmatch(re.escape(plain) + r"_\d+", js_name))
+
+
+def _fla_name_hints(js_text: str) -> dict[str, str]:
+    """Classes written by CB Studio's .fla import name their library symbol ("fla: <name>"), so a
+    pose renamed on import ("Wave") still links to "Symbol 1"."""
+    pattern = r"\(lib\.([A-Za-z0-9_$]+) = function\(mode,startPosition,loop[^\n]*\n(?:[^\n]*\n){0,10}?\t/\* fla: (.*) \*/\n"
+    return {match.group(1): match.group(2) for match in re.finditer(pattern, js_text)}
 
 
 def _align(xfl_layers: list[dict[str, Any]], js_layers: list[dict[str, Any]]) -> list[tuple[int, int]]:
@@ -217,6 +224,11 @@ def build_fla_timeline(fla_path: Path, js_text: str, out_dir: Path) -> dict[str,
     stage = {"name": scene[0][0].get("name", "Scene 1") if scene else "Scene 1", **_timeline(scene[0][1] if scene else "")}
 
     classes = _js_classes(js_text)
+    hints = _fla_name_hints(js_text)
+
+    def _may_be(js_name: str, xfl_name: str) -> bool:
+        return hints[js_name] == xfl_name if js_name in hints else _name_may_be(js_name, xfl_name)
+
     stage_match = re.search(r"// stage content:\s*\n\(lib\.([A-Za-z0-9_$]+) = function", js_text)
     stage_js = stage_match.group(1) if stage_match else None
 

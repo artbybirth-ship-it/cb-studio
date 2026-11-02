@@ -6,8 +6,10 @@ import type { CharacterPartDescriptor, CharacterPartKey, ColorReplacement, Edito
 import { textCss } from "@/lib/textStyle";
 import RenderDiagnostics, { type RenderDiagnosticsInfo } from "@/components/RenderDiagnostics";
 import type { LayerGeometry } from "@/lib/layerTransform";
-import { resolveCharacterTransformAtTime, type CharacterTransform } from "@/lib/keyframes";
+import { type CharacterTransform } from "@/lib/keyframes";
+import { groupPivotAtTime, resolveObjectTransformAtTime } from "@/lib/groupMotion";
 import { resolvePartOverridesAtTime, resolvePartTransformAtTime, resolveSourceSeekMs, type PartTransform } from "@/lib/partKeyframes";
+import { isMultiPartKey, memberPatches, parentPartKey, partMembers } from "@/lib/partSelection";
 
 type Props = {
   data: EditorData;
@@ -45,6 +47,16 @@ type Props = {
   onSelect: (id: string | null) => void;
   onMove: (id: string, x: number, y: number) => void;
   onTransform?: (id: string, patch: TransformPatch) => void;
+  /** The group box of a multi-selection: every object scaled / turned about one point, as one edit. */
+  onTransformMany?: (entries: Array<{ id: string; patch: TransformPatch }>) => void;
+  /** ⌘G groups of objects: a press on a member takes the whole group, unless it is this (entered) one. */
+  enteredObjectGroup?: string | null;
+  /** Double-click on a member of a group goes inside the group, with that object picked. */
+  onEnterObjectGroup?: (group: string, id: string) => void;
+  /** Inside a group: a double-click on empty canvas steps out of it. */
+  onObjectGroupStepOut?: () => void;
+  /** A selected ⌘G group's registration point dragged (or double-clicked back to the centre), in stage px where it is drawn now. */
+  onSetGroupPivot?: (group: string, x: number, y: number) => void;
   activeCharacterPart?: CharacterPartKey | null;
   onMoveCharacterPart?: (id: string, partKey: CharacterPartKey, offsetX: number, offsetY: number) => void;
   onTransformCharacterPart?: (id: string, partKey: CharacterPartKey, patch: Partial<{ offsetX: number; offsetY: number; rotation: number; scale: number; stretchX: number; stretchY: number; flipX: boolean; skewX: number; skewY: number }>) => void;
@@ -55,8 +67,6 @@ type Props = {
   onCharacterPartDoubleClick?: (partKey: CharacterPartKey, alreadySelected: boolean) => void;
   /** The selected part has been entered: the rest of the character is dimmed. */
   characterPartEntered?: boolean;
-  /** Recolour rule shown live while the Recolour panel is editing (not saved). */
-  previewColorReplacement?: { objectId: string; rule: ColorReplacement } | null;
   /** Lets the editor reach a character's player frame (palette, eyedropper). */
   frameAccessRef?: MutableRefObject<((objectId: string) => HTMLIFrameElement | undefined) | null>;
   /** Lighten/Darken tool or a colour eyedropper is on: double-clicks never select or enter parts. */
@@ -69,6 +79,20 @@ type Props = {
   onSymbolDoubleClick?: (prop: string | null) => void;
   /** ⌥ Option + double-click a character, or right-click › Edit Symbol: step inside it. */
   onEnterSymbol?: (objectId: string) => void;
+  /** Right-click › Distribute to Layers (animated part layers) / Distribute as Still (vector pictures). */
+  onDistributeParts?: (mode: "animated" | "still") => void;
+  /** Inside the selected character with no part selected (Illustrator's isolation mode). */
+  characterIsolated?: boolean;
+  /** Shift+click a part inside a character: add it to the selection or take it out. */
+  onTogglePartSelection?: (partKey: CharacterPartKey) => void;
+  /** Drag-select inside a character: the parts the box touched. */
+  onPartsInBox?: (partKeys: CharacterPartKey[], additive: boolean) => void;
+  /** Inside a character: a click on empty canvas (deselect, stay inside) … */
+  onIsolationEmptyClick?: () => void;
+  /** … and a double-click there (out one level). */
+  onIsolationStepOut?: () => void;
+  /** Several parts edited at once (one undo step). */
+  onTransformCharacterParts?: (id: string, patches: Record<CharacterPartKey, Partial<{ offsetX: number; offsetY: number; rotation: number; scale: number }>>) => void;
   /** Filled by the canvas: the stage point at the centre of what is visible (Paste in Center). */
   viewCenterRef?: MutableRefObject<(() => { x: number; y: number }) | null>;
   /** Filled by the canvas: a layer's artwork box (Transform panel, Align). */
@@ -129,6 +153,8 @@ const normalizeDegrees = (value: number) => {
   if (next <= -180) next += 360;
   return next;
 };
+/** A box on the stage, in stage px. */
+type WorldBox = { left: number; top: number; width: number; height: number };
 const pointerAngle = (clientX: number, clientY: number, centerX: number, centerY: number) => Math.atan2(clientY - centerY, clientX - centerX) * 180 / Math.PI;
 
 // ---- Free Transform geometry (Animate): objects are positioned by their centre, rotated
@@ -241,7 +267,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, previewColorReplacement = null, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onEnterSymbol, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -287,6 +313,17 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   }, [zoom]);
 
   const objects = data.objects || [];
+  // The character the rest of the scene fades around: stepped into (symbol view), or inside it
+  // editing parts (Illustrator's isolation mode).
+  const isolateFocusId = symbolView?.objectId
+    ?? (selectedObjectId && (activeCharacterPart || characterIsolated) && objects.find((item) => item.id === selectedObjectId)?.type === "character" ? selectedObjectId : null);
+  // Inside a ⌘G group the scene fades around the group's objects (inside one of its characters, around that one).
+  const isolating = Boolean(isolateFocusId || enteredObjectGroup);
+  const inFocus = (object: EditorObject) => (isolateFocusId ? isolateFocusId === object.id : Boolean(enteredObjectGroup) && object.group === enteredObjectGroup);
+  /** The objects a press on this one picks: its whole ⌘G group (not the entered one), unlocked. */
+  const groupIdsOf = (object: EditorObject) => (object.group && object.group !== enteredObjectGroup
+    ? objects.filter((item) => item.group === object.group && !item.locked).map((item) => item.id)
+    : [object.id]);
   const selectedIds = useMemo(
     () => selectedObjectIds ?? (selectedObjectId ? [selectedObjectId] : []),
     [selectedObjectId, selectedObjectIds],
@@ -331,9 +368,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   const expandSourcePartBounds = useCallback((object: EditorObject, bounds: NormalizedBounds): NormalizedBounds => {
     const sourceWidth = Math.max(1, Number(object.sourceWidth || 1920));
     const sourceHeight = Math.max(1, Number(object.sourceHeight || 1920));
-    const resolvedTransform = object.type === "character"
-      ? resolveCharacterTransformAtTime(object, playhead)
-      : { x: object.x, y: object.y, scale: object.scale || 1, rotation: object.rotation || 0 };
+    const resolvedTransform = resolveObjectTransformAtTime(object, playhead);
     const displayWidth = Math.max(1, sourceWidth * Math.max(0.05, Number(resolvedTransform.scale || 1)));
     const displayHeight = Math.max(1, sourceHeight * Math.max(0.05, Number(resolvedTransform.scale || 1)));
     const padX = Math.min(0.05, 12 / displayWidth);
@@ -505,7 +540,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   };
   /** A press inside part editing that picks a piece; false = not handled here. */
   const pressSubPart = (object: EditorObject, clientX: number, clientY: number, shiftKey: boolean) => {
-    if (!activeCharacterPart) return false;
+    if (!activeCharacterPart || isMultiPartKey(activeCharacterPart)) return false;
     const parent = parentPartOf(activeCharacterPart);
     // Shift+click: add / remove a drawn shape next to the selected shape(s) of the same part.
     if (shiftKey && parent) { const found = subPartAt(object, parent, clientX, clientY, true); if (found) { chooseSubPart(object, found, false); return true; } }
@@ -518,9 +553,37 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     if (parent) { const found = subPartAt(object, parent, clientX, clientY); if (found) chooseSubPart(object, found, false); return true; }
     return false;
   };
+  /** The level you are in inside a character: the entered part, the part the selection sits in, or "". */
+  const currentPartContainer = () => {
+    if (!activeCharacterPart) return "";
+    if (characterPartEntered) return activeCharacterPart;
+    const parents = Array.from(new Set(partMembers(activeCharacterPart).map(parentPartKey)));
+    return parents.length === 1 ? parents[0] : "";
+  };
+  /** Shift+click inside a character: the piece at this level under the pointer, or else the whole
+   *  part there (selections can mix levels), added to the selection or taken out. */
+  const togglePartAt = (object: EditorObject, clientX: number, clientY: number) => {
+    const frame = frameRefs.current.get(object.id);
+    const rect = frame?.getBoundingClientRect();
+    if (!onTogglePartSelection || !frame || !rect || rect.width <= 0 || rect.height <= 0) return false;
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
+    type Found = { key?: string; bounds?: { x: number; y: number; width: number; height: number } } | null;
+    const player = frame.contentWindow as (Window & { cbSubPartAt?: (parent: string, x: number, y: number, current: string, add: boolean) => Found; cbPartAt?: (x: number, y: number) => Found }) | null;
+    let found: Found = null;
+    try {
+      const container = currentPartContainer();
+      if (container) found = player?.cbSubPartAt?.(container, x, y, "", false) || null;
+      if (!found?.key) found = player?.cbPartAt?.(x, y) || null;
+    } catch { found = null; }
+    if (!found?.key) return false;
+    if (found.bounds) rememberPartBounds(object.id, found.bounds, "source", found.key);
+    onTogglePartSelection(found.key);
+    return true;
+  };
   /** Double-click in part editing: enter the selected piece, or pick a piece and enter it. */
   const doubleClickSubPart = (object: EditorObject, clientX: number, clientY: number) => {
-    if (!activeCharacterPart) return false;
+    if (!activeCharacterPart || isMultiPartKey(activeCharacterPart)) return false;
     const parent = parentPartOf(activeCharacterPart);
     if (!characterPartEntered && parent && isPartPixelAt(object, activeCharacterPart, clientX, clientY)) { onCharacterPartDoubleClick?.(activeCharacterPart, true); return true; }
     const container = characterPartEntered ? activeCharacterPart : parent;
@@ -798,9 +861,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const newScale = Math.max(0.001, fit.scale * editorZoom);
     const selectedAnchor = objects.find((item) => item.id === selectedObjectId && item.type !== "background" && item.type !== "audio") || null;
     if (selectedAnchor) {
-      const anchor = selectedAnchor.type === "character"
-        ? resolveCharacterTransformAtTime(selectedAnchor, playhead)
-        : { x: selectedAnchor.x, y: selectedAnchor.y, scale: selectedAnchor.scale || 1, rotation: selectedAnchor.rotation || 0 };
+      const anchor = resolveObjectTransformAtTime(selectedAnchor, playhead);
       const screenX = fit.left + pan.x + anchor.x * oldScale;
       const screenY = fit.top + pan.y + anchor.y * oldScale;
       setPan({
@@ -944,21 +1005,25 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     temporaryPartOverrides?: EditorObject["partOverrides"],
     transformOverride?: CharacterTransform,
   ) => {
-    const resolvedTransform = transformOverride || resolveCharacterTransformAtTime(object, playhead);
+    const resolvedTransform = transformOverride || resolveObjectTransformAtTime(object, playhead);
     const resolvedPartOverrides = temporaryPartOverrides || resolvePartOverridesAtTime(object, playhead);
     frame.contentWindow?.postMessage({
       source: "characterbazaarstudio-editor",
       type: "CHARACTER_EDITS",
       partOverrides: resolvedPartOverrides,
       colorOverrides: object.colorOverrides || {},
-      // Recolour rules, plus the rule being previewed in the Recolour panel (not saved yet).
-      colorReplacements: [...(object.colorReplacements || []), ...(previewColorReplacement && previewColorReplacement.objectId === object.id ? [previewColorReplacement.rule] : [])],
+      // Colour rules (Fill/Stroke, Light/Dark, Find/Replace, Adjust colour).
+      colorReplacements: object.colorReplacements || [],
       strokeScale: object.strokeScale ?? 1,
       selectedPart: object.id === selectedObjectId ? (activeCharacterPart || "") : "",
+      onlyParts: object.onlyParts || [],
       // Entered part: the player dims everything outside it (never in render mode).
       // Entered part, or the part a selected piece sits in (its parent), keeps full strength.
       focusPart: !renderMode && object.id === selectedObjectId && activeCharacterPart
-        ? (characterPartEntered ? activeCharacterPart : activeCharacterPart.includes("/") ? activeCharacterPart.slice(0, activeCharacterPart.lastIndexOf("/")) : "")
+        ? (characterPartEntered ? activeCharacterPart : (() => {
+          const parents = Array.from(new Set(partMembers(activeCharacterPart).map(parentPartKey)));
+          return parents.length === 1 ? parents[0] : "";
+        })())
         : "",
       viewport: { width, height },
       camera: useCameraRendering ? {
@@ -977,7 +1042,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         flipX: !!object.flipX,
       },
     }, "*");
-  }, [activeCharacterPart, characterPartEntered, previewColorReplacement, effectiveScale, fit.left, fit.top, height, hostSize.height, hostSize.width, pan.x, pan.y, playhead, readyReplacementKeys, renderMode, replacementReadyKey, selectedObjectId, useCameraRendering, width]);
+  }, [activeCharacterPart, characterPartEntered, effectiveScale, fit.left, fit.top, height, hostSize.height, hostSize.width, pan.x, pan.y, playhead, readyReplacementKeys, renderMode, replacementReadyKey, selectedObjectId, useCameraRendering, width]);
 
   useEffect(() => {
     for (const object of characterObjects) {
@@ -1059,7 +1124,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       const localHeight = frame.offsetHeight;
       if (localWidth <= 0 || localHeight <= 0) continue;
       const rect = frame.getBoundingClientRect();
-      const radians = (resolveCharacterTransformAtTime(object, playhead).rotation || 0) * Math.PI / 180;
+      const radians = (resolveObjectTransformAtTime(object, playhead).rotation || 0) * Math.PI / 180;
       // The element's 2D matrix on screen: rotate · skew · flip (scale comes from its px size).
       const skew = skewOf(object);
       const tanX = Math.tan(skew.x * Math.PI / 180);
@@ -1319,8 +1384,15 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     if (!frame || !rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) { onSymbolDoubleClick?.(null); return; }
     frame.contentWindow?.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_HIT", normalizedX: (event.clientX - rect.left) / rect.width, normalizedY: (event.clientY - rect.top) / rect.height }, "*");
   };
-  // Right-click a character › Edit Symbol (Animate).
+  // Right-click a character (or its selected parts) › Edit Symbol, Distribute to Layers (Animate).
   const [symbolMenu, setSymbolMenu] = useState<{ x: number; y: number; objectId: string } | null>(null);
+  const openCharacterMenu = (event: ReactMouseEvent<HTMLElement>, object: EditorObject) => {
+    if (!onEnterSymbol && !onDistributeParts) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (object.id !== selectedObjectId) onSelect(object.id);
+    setSymbolMenu({ x: event.clientX, y: event.clientY, objectId: object.id });
+  };
   useEffect(() => {
     if (!symbolMenu) return;
     const close = () => setSymbolMenu(null);
@@ -1364,14 +1436,16 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     if (spacePanning) return;
     event.preventDefault();
     event.stopPropagation();
-    // Animate: Shift+click adds the object to (or removes it from) the selection; nothing moves.
+    // Animate: Shift+click adds the object (its whole ⌘G group) to the selection, or takes it out; nothing moves.
+    const picks = groupIdsOf(object);
     if (event.shiftKey && onSelectionChange) {
-      onSelectionChange(selectedIds.includes(object.id) ? selectedIds.filter((id) => id !== object.id) : [...selectedIds, object.id]);
+      onSelectionChange(picks.every((id) => selectedIds.includes(id)) ? selectedIds.filter((id) => !picks.includes(id)) : [...selectedIds, ...picks]);
       return;
     }
-    // Pressing on a member of a multi-selection drags the whole selection.
-    const groupIds = selectedIds.length > 1 && selectedIds.includes(object.id) ? selectedIds : null;
+    // Pressing on a member of a multi-selection (or of a ⌘G group) drags all of it.
+    const groupIds = selectedIds.length > 1 && selectedIds.includes(object.id) ? selectedIds : picks.length > 1 ? picks : null;
     if (!groupIds) onSelect(object.id);
+    else if (!selectedIds.includes(object.id)) onSelect(object.id); // the editor picks the whole group
     const captureTarget = event.currentTarget;
     const target = captureTarget.closest<HTMLElement>("[data-editor-object-id]") || captureTarget;
     captureTarget.setPointerCapture?.(event.pointerId);
@@ -1388,9 +1462,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       const element = id === object.id
         ? target
         : hostRef.current?.querySelector<HTMLElement>(`[data-editor-object-id="${CSS.escape(id)}"]`) || null;
-      const start = item.type === "character"
-        ? resolveCharacterTransformAtTime(item, playhead)
-        : { x: item.x, y: item.y, scale: item.scale || 1, rotation: item.rotation || 0 };
+      const start = resolveObjectTransformAtTime(item, playhead);
       return [{ item, element, start, x: start.x, y: start.y }];
     });
     let moved = false;
@@ -1454,13 +1526,28 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       setMarquee(null);
+      const rect = rectTo(upEvent.clientX, upEvent.clientY);
+      // Inside a character: a click deselects but stays inside; a drag selects the parts it touches.
+      const inside = selectedObjectId && objects.find((item) => item.id === selectedObjectId)?.type === "character" && (activeCharacterPart || characterIsolated) ? selectedObjectId : null;
+      if (inside) {
+        if (!dragging) { if (!additive) onIsolationEmptyClick?.(); return; }
+        const frame = frameRefs.current.get(inside);
+        const box = frame?.getBoundingClientRect();
+        if (!frame || !box || box.width <= 0 || box.height <= 0) return;
+        let keys: string[] = [];
+        try {
+          keys = (frame.contentWindow as (Window & { cbPartsInRect?: (container: string, x0: number, y0: number, x1: number, y1: number) => string[] }) | null)?.cbPartsInRect?.(
+            currentPartContainer(), (rect.left - box.left) / box.width, (rect.top - box.top) / box.height, (rect.right - box.left) / box.width, (rect.bottom - box.top) / box.height) || [];
+        } catch { keys = []; }
+        onPartsInBox?.(keys, additive);
+        return;
+      }
       if (!dragging) {
         if (additive) return;
         if (activeCharacterPart) onActiveCharacterPart?.(null);
         else onSelect(null);
         return;
       }
-      const rect = rectTo(upEvent.clientX, upEvent.clientY);
       // Anything the marquee touches is selected; characters use their tight artwork box.
       const hits = objects.filter((item) => item.type !== "background" && item.type !== "audio" && !item.locked).filter((item) => {
         const element = host.querySelector<HTMLElement>(`[data-editor-object-id="${CSS.escape(item.id)}"]`);
@@ -1496,9 +1583,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     stretch: { x: number; y: number };
   };
   const startScaleSession = (object: EditorObject, element: HTMLElement): ScaleSession => {
-    const t = object.type === "character"
-      ? resolveCharacterTransformAtTime(object, playhead)
-      : { x: object.x, y: object.y, scale: object.scale || 1, rotation: object.rotation || 0 };
+    const t = resolveObjectTransformAtTime(object, playhead);
     return {
       object,
       element,
@@ -1602,7 +1687,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     try {
       const canvas = frame.contentDocument?.querySelector("canvas");
       if (!canvas || !canvas.width || !canvas.height) return true;
-      const rotation = resolveCharacterTransformAtTime(object, playhead).rotation || 0;
+      const rotation = resolveObjectTransformAtTime(object, playhead).rotation || 0;
       const point = playerPointFromClient(frame, rotation, skewOf(object), Boolean(object.flipX), clientX, clientY);
       if (!point) return false;
       // The canvas may cover only the visible part of the player (sharp rendering).
@@ -1832,6 +1917,148 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     window.addEventListener("pointerup", up, { once: true });
   };
 
+  // ---- The group box: Free Transform on several objects (a ⌘G group or any multi-selection). A
+  // corner scales everything from the opposite corner (Option/Alt: from the centre); the ↻ just
+  // outside a corner turns everything about the centre (Shift: 45° steps). One edit on release.
+  const groupBoxRef = useRef<HTMLDivElement | null>(null);
+  const groupBoxIds = !renderMode && onTransformMany && (toolMode === "transform" || toolMode === "scale") && selectedIds.length > 1 && !symbolView
+    ? selectedIds.filter((id) => { const item = objects.find((object) => object.id === id); return Boolean(item) && !["background", "audio", "empty"].includes(item!.type) && !item!.hidden && !item!.locked; })
+    : [];
+  const [groupBox, setGroupBox] = useState<WorldBox | null>(null);
+  // The selection is one whole ⌘G group: its registration point shows, and turning / Option-scaling use it.
+  const boxGroup = (() => {
+    const first = objects.find((item) => item.id === groupBoxIds[0]);
+    const group = first?.group;
+    if (!group || group === enteredObjectGroup) return null;
+    const members = objects.filter((item) => item.group === group && !item.locked).map((item) => item.id);
+    return members.length === selectedIds.length && members.every((id) => selectedIds.includes(id)) ? { id: group, motion: first!.groupMotion } : null;
+  })();
+  const groupPivotNow = (box: WorldBox) => (boxGroup && groupPivotAtTime(boxGroup.motion, playhead)) || { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  // Measured after each render: the box around what is drawn of each object (characters: their artwork).
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const id of groupBoxIds.length > 1 && host ? groupBoxIds : []) {
+      const element = host!.querySelector<HTMLElement>(`[data-editor-object-id="${CSS.escape(id)}"]`);
+      const rect = (element?.querySelector<HTMLElement>(".cb-character-tight-hitbox") || element)?.getBoundingClientRect();
+      if (!rect || (rect.width <= 0 && rect.height <= 0)) continue;
+      const a = clientToWorld(rect.left, rect.top);
+      const b = clientToWorld(rect.right, rect.bottom);
+      left = Math.min(left, a.x); top = Math.min(top, a.y); right = Math.max(right, b.x); bottom = Math.max(bottom, b.y);
+    }
+    const next = Number.isFinite(left) ? { left, top, width: right - left, height: bottom - top } : null;
+    setGroupBox((current) => {
+      if (!next || !current) return next === current ? current : next;
+      const same = Math.abs(current.left - next.left) + Math.abs(current.top - next.top) + Math.abs(current.width - next.width) + Math.abs(current.height - next.height) < 0.05;
+      return same ? current : next;
+    });
+  });
+  const groupSessions = (ids: string[]) => ids.flatMap((id) => {
+    const object = objects.find((item) => item.id === id);
+    const element = hostRef.current?.querySelector<HTMLElement>(`[data-editor-object-id="${CSS.escape(id)}"]`);
+    return object && element ? [startScaleSession(object, element)] : [];
+  });
+  const endGroupDrag = (move: (event: PointerEvent) => void, commit: () => void) => {
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (groupBoxRef.current) groupBoxRef.current.style.transform = "";
+      commit();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
+  };
+  const beginGroupScale = (event: ReactPointerEvent<HTMLElement>, ids: string[], box: WorldBox, corner: string) => {
+    if (renderMode || !onTransformMany) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const sessions = groupSessions(ids);
+    if (!sessions.length) return;
+    // Option/Alt scales about the registration point (the box centre for a plain multi-selection).
+    const centre = groupPivotNow(box);
+    const opposite = { x: corner.includes("w") ? box.left + box.width : box.left, y: corner.includes("n") ? box.top + box.height : box.top };
+    const pointerStart = clientToWorld(event.clientX, event.clientY);
+    const smallest = Math.max(...sessions.map((session) => 0.02 / session.start.scale));
+    const largest = Math.min(...sessions.map((session) => 20 / session.start.scale));
+    let latest: Array<{ id: string; patch: TransformPatch }> | null = null;
+    endGroupDrag((moveEvent) => {
+      const anchor = moveEvent.altKey ? centre : opposite;
+      const from = { x: pointerStart.x - anchor.x, y: pointerStart.y - anchor.y };
+      const pointer = clientToWorld(moveEvent.clientX, moveEvent.clientY);
+      const length = from.x * from.x + from.y * from.y;
+      const factor = clamp(length > 1 ? ((pointer.x - anchor.x) * from.x + (pointer.y - anchor.y) * from.y) / length : 1, smallest, largest);
+      latest = sessions.map((session) => {
+        const next = previewScale(session, anchor, factor, factor, true);
+        return { id: session.object.id, patch: { x: next.x, y: next.y, scale: next.scale } };
+      });
+      if (groupBoxRef.current) {
+        groupBoxRef.current.style.transformOrigin = `${anchor.x - box.left}px ${anchor.y - box.top}px`;
+        groupBoxRef.current.style.transform = `scale(${factor})`;
+      }
+    }, () => { if (latest) onTransformMany(latest); });
+  };
+  /** Drag the group's registration point anywhere (even off the group); double-click puts it back in the middle. */
+  const beginGroupPivotDrag = (event: ReactPointerEvent<HTMLElement>, box: WorldBox) => {
+    if (renderMode || !boxGroup || !onSetGroupPivot) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.currentTarget;
+    const start = groupPivotNow(box);
+    const pointerStart = clientToWorld(event.clientX, event.clientY);
+    let latest: { x: number; y: number } | null = null;
+    const move = (moveEvent: PointerEvent) => {
+      const pointer = clientToWorld(moveEvent.clientX, moveEvent.clientY);
+      latest = { x: start.x + pointer.x - pointerStart.x, y: start.y + pointer.y - pointerStart.y };
+      handle.style.left = `${latest.x - box.left}px`;
+      handle.style.top = `${latest.y - box.top}px`;
+    };
+    const group = boxGroup.id;
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (latest) onSetGroupPivot(group, latest.x, latest.y);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
+  };
+  const beginGroupRotation = (event: ReactPointerEvent<HTMLElement>, ids: string[], box: WorldBox) => {
+    if (renderMode || !onTransformMany || !groupBoxRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const sessions = groupSessions(ids);
+    if (!sessions.length) return;
+    // Turns about the registration point (the box centre for a plain multi-selection).
+    const centre = groupPivotNow(box);
+    const rect = groupBoxRef.current.getBoundingClientRect();
+    const zoomNow = rect.width / Math.max(0.001, box.width);
+    const centreClientX = rect.left + (centre.x - box.left) * zoomNow;
+    const centreClientY = rect.top + (centre.y - box.top) * zoomNow;
+    const startAngle = pointerAngle(event.clientX, event.clientY, centreClientX, centreClientY);
+    let latest: Array<{ id: string; patch: TransformPatch }> | null = null;
+    endGroupDrag((moveEvent) => {
+      const raw = normalizeDegrees(pointerAngle(moveEvent.clientX, moveEvent.clientY, centreClientX, centreClientY) - startAngle);
+      const turn = moveEvent.shiftKey ? Math.round(raw / 45) * 45 : raw;
+      latest = sessions.map(({ object, element, start, stretch }) => {
+        const orbit = toWorld(start.x - centre.x, start.y - centre.y, turn);
+        const x = centre.x + orbit.x;
+        const y = centre.y + orbit.y;
+        const rotation = normalizeDegrees(start.rotation + turn);
+        element.style.left = `${x}px`;
+        element.style.top = `${y}px`;
+        if (object.type === "character") {
+          element.style.transform = characterTransformCss(object, rotation);
+          const frame = frameRefs.current.get(object.id);
+          if (frame) postCharacterEdits(frame, object, undefined, { ...start, x, y, rotation });
+        } else {
+          element.style.transform = layerTransformCss(object, rotation, start.scale, stretch.x, stretch.y);
+        }
+        return { id: object.id, patch: { x, y, rotation } };
+      });
+      groupBoxRef.current!.style.transformOrigin = `${centre.x - box.left}px ${centre.y - box.top}px`;
+      groupBoxRef.current!.style.transform = `rotate(${turn}deg)`;
+    }, () => { if (latest) onTransformMany(latest); });
+  };
+
   // The registration point can sit anywhere, even off the object; double-click re-centres it.
   const beginPivotDrag = (event: ReactPointerEvent<HTMLButtonElement>, object: EditorObject) => {
     if (renderMode || !onTransform) return;
@@ -1878,9 +2105,44 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     window.addEventListener("pointerup", up, { once: true });
   };
 
+  // ---- Several parts selected (lib/partSelection.ts): the box's move, turn and scale become each
+  // part's own edit, about the group's pivot (fixed for the whole gesture).
+  const multiPivotRef = useRef<{ key: string; pivot: { x: number; y: number } | null } | null>(null);
+  const multiPartPatches = (object: EditorObject, key: string, patch: Partial<{ offsetX: number; offsetY: number; rotation: number; scale: number }>) => {
+    const frame = frameRefs.current.get(object.id);
+    const boundsOf = (member: string) => {
+      try { return ((frame?.contentWindow as (Window & { cbPartBoundsOf?: (key: string) => { bounds?: { x: number; y: number; width: number; height: number } } | null }) | null)?.cbPartBoundsOf?.(member)?.bounds) || null; } catch { return null; }
+    };
+    const sourceWidth = object.sourceWidth || 720;
+    const sourceHeight = object.sourceHeight || 960;
+    if (multiPivotRef.current?.key !== key) {
+      const box = boundsOf(key);
+      multiPivotRef.current = { key, pivot: box ? { x: (box.x + box.width * 0.5) * sourceWidth, y: (box.y + box.height) * sourceHeight } : null };
+    }
+    return memberPatches(object, key, patch, playhead, sourceWidth, sourceHeight, multiPivotRef.current.pivot, boundsOf);
+  };
+  const onTransformCharacterPart = (id: string, partKey: CharacterPartKey, patch: Partial<{ offsetX: number; offsetY: number; rotation: number; scale: number; stretchX: number; stretchY: number; flipX: boolean; skewX: number; skewY: number }>) => {
+    if (isMultiPartKey(partKey) && onTransformCharacterParts) {
+      const object = objects.find((item) => item.id === id);
+      const patches = object ? multiPartPatches(object, partKey, patch) : {};
+      multiPivotRef.current = null;
+      onTransformCharacterParts(id, patches);
+      return;
+    }
+    onTransformCharacterPartProp?.(id, partKey, patch);
+  };
+
   const previewCharacterPartTransform = useCallback((object: EditorObject, partKey: CharacterPartKey, patch: Partial<{ offsetX: number; offsetY: number; rotation: number; scale: number; stretchX: number; stretchY: number; flipX: boolean; skewX: number; skewY: number; pivotX: number; pivotY: number }>) => {
     const frame = frameRefs.current.get(object.id);
     if (!frame) return;
+    if (isMultiPartKey(partKey)) {
+      const resolved = resolvePartOverridesAtTime(object, playhead);
+      const merged = { ...resolved };
+      for (const [member, memberPatch] of Object.entries(multiPartPatches(object, partKey, patch))) merged[member] = { ...(object.partOverrides?.[member] || {}), ...(resolved[member] || {}), ...memberPatch };
+      setPreviewPartOverrides((state) => ({ ...state, [object.id]: { ...(state[object.id] || {}), [partKey]: { ...patch } } }));
+      postCharacterEdits(frame, object, merged);
+      return;
+    }
     const resolved = resolvePartOverridesAtTime(object, playhead);
     const current = resolved[partKey] || resolvePartTransformAtTime(object, partKey, playhead);
     const nextOverride = { ...current, ...patch };
@@ -1892,6 +2154,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       ...resolved,
       [partKey]: { ...(object.partOverrides?.[partKey] || {}), ...nextOverride },
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playhead, postCharacterEdits]);
 
   const beginCharacterPartScale = (event: ReactPointerEvent<HTMLButtonElement>, object: EditorObject) => {
@@ -2069,7 +2332,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   };
 
   // Part editing state for the canvas: the selected character with one of its parts open.
-  const partEditing = !renderMode && Boolean(activeCharacterPart) && Boolean(selectedObjectId);
+  const partEditing = !renderMode && (Boolean(activeCharacterPart) || characterIsolated) && Boolean(selectedObjectId);
   const selectedObject = partEditing ? data.objects.find((item) => item.id === selectedObjectId) || null : null;
   const isInsideSelectedCharacter = (target: EventTarget | null) => {
     const element = target as HTMLElement | null;
@@ -2108,9 +2371,12 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   // its box picks another part of the character under the pointer, if any.
   const pressPartBox = (event: ReactPointerEvent<HTMLElement>, object: EditorObject) => {
     if (!activeCharacterPart) return;
+    if (event.button !== 0) { event.stopPropagation(); return; } // right-click keeps the selection for its menu
     if (object.partReplacements?.[activeCharacterPart]?.assetUrl) { beginReplacementPartDrag(event, object, activeCharacterPart); return; }
-    // Inside an entered part a press picks its piece; Shift+click adds shapes to a shape selection.
-    if ((characterPartEntered || event.shiftKey) && pressSubPart(object, event.clientX, event.clientY, event.shiftKey)) { event.preventDefault(); event.stopPropagation(); return; }
+    // Shift+click adds the part under the pointer to the selection, or takes it out (Illustrator).
+    if (event.shiftKey && togglePartAt(object, event.clientX, event.clientY)) { event.preventDefault(); event.stopPropagation(); return; }
+    // Inside an entered part a press picks its piece.
+    if (characterPartEntered && pressSubPart(object, event.clientX, event.clientY, false)) { event.preventDefault(); event.stopPropagation(); return; }
     if (isPartPixelAt(object, activeCharacterPart, event.clientX, event.clientY)) { beginCharacterPartDrag(event, object); return; }
     // A selected piece: a press on another piece of the same part selects that one.
     if (activeCharacterPart.includes("/") && pressSubPart(object, event.clientX, event.clientY, false)) { event.preventDefault(); event.stopPropagation(); return; }
@@ -2141,12 +2407,12 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         </span>
       ))}
       {/* No ⇄ flip button: Reflect (O, then Enter) mirrors a part on any axis. */}
-      {(["top", "bottom", "left", "right"] as const).map((edge) => (
+      {!isMultiPartKey(activeCharacterPart) && (["top", "bottom", "left", "right"] as const).map((edge) => (
         <b key={`part-skew-${edge}`} className={`cb-part-skew-edge ${edge}`} onPointerDown={(event) => beginCharacterPartSkew(event, object, edge)}
           style={{ cursor: skewCursorFor(edge, activeCharacterPart ? Number(getLivePartTransform(object, activeCharacterPart).rotation || 0) : 0) }}
           title="Skew: drag along this edge" />
       ))}
-      {(["n", "e", "s", "w"] as const).map((side) => {
+      {!isMultiPartKey(activeCharacterPart) && (["n", "e", "s", "w"] as const).map((side) => {
         const live = activeCharacterPart ? getLivePartTransform(object, activeCharacterPart) : null;
         return (
           <button key={`part-stretch-${side}`} type="button" className={`cb-part-stretch-handle ${side}`}
@@ -2174,7 +2440,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
 
   const renderCharacterTightHitArea = (object: EditorObject, selected: boolean) => {
     if (renderMode || object.type !== "character") return null;
-    const partMode = selected && Boolean(activeCharacterPart);
+    const partMode = selected && (Boolean(activeCharacterPart) || characterIsolated);
     // Keep an invisible full-character hit area behind the active part. This lets
     // a double-click on a different body part switch groups immediately while the
     // visible whole-character selection box remains closed during part edit mode.
@@ -2186,6 +2452,10 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           if (partMode) {
             event.preventDefault();
             event.stopPropagation();
+            if (event.button !== 0) return; // right-click keeps the selection for its menu
+            if (event.shiftKey && togglePartAt(object, event.clientX, event.clientY)) return;
+            // A press on a see-through spot inside the character starts a drag-select box.
+            if (!isCharacterPixelOpaque(object, event.clientX, event.clientY)) { beginMarquee(event); return; }
             if (pressSubPart(object, event.clientX, event.clientY, event.shiftKey)) return;
             requestCharacterPartAtPoint(object, event.clientX, event.clientY);
             return;
@@ -2194,14 +2464,9 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           // to select a body part (handled by onDoubleClick below).
           beginDrag(event, object);
         }}
-        onContextMenu={(event) => {
-          if (!onEnterSymbol) return;
-          event.preventDefault();
-          event.stopPropagation();
-          setSymbolMenu({ x: event.clientX, y: event.clientY, objectId: object.id });
-        }}
+        onContextMenu={(event) => openCharacterMenu(event, object)}
         onDoubleClick={(event) => {
-          // A double-click on a transparent spot does not enter the character.
+          // A double-click on a transparent spot does not enter the character; inside it, it steps out one level.
           if (!isCharacterPixelOpaque(object, event.clientX, event.clientY)) return;
           event.preventDefault();
           event.stopPropagation();
@@ -2254,7 +2519,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
 
   const getReplacementTransformStyle = (object: EditorObject, partKey: string, space: "source" | "camera") => {
     const transform = getLivePartTransform(object, partKey);
-    const characterTransform = resolveCharacterTransformAtTime(object, playhead);
+    const characterTransform = resolveObjectTransformAtTime(object, playhead);
     const characterScale = Math.max(0.02, Number(characterTransform.scale || 1));
     const translateX = Number(transform.offsetX || 0) * characterScale * (space === "camera" ? effectiveScale : 1);
     const translateY = Number(transform.offsetY || 0) * characterScale * (space === "camera" ? effectiveScale : 1);
@@ -2292,7 +2557,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const current = getLivePartTransform(object, partKey);
     const startOffsetX = Number(current.offsetX || 0);
     const startOffsetY = Number(current.offsetY || 0);
-    const characterTransform = resolveCharacterTransformAtTime(object, playhead);
+    const characterTransform = resolveObjectTransformAtTime(object, playhead);
     const renderedScale = Math.max(0.0001, Number(characterTransform.scale || 1) * effectiveScale);
     const characterRotation = Number(characterTransform.rotation || 0) * Math.PI / 180;
     const flip = object.flipX ? -1 : 1;
@@ -2393,7 +2658,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       const b = saved.bounds;
       const sourceWidth = Math.max(1, Number(object.sourceWidth || 420));
       const sourceHeight = Math.max(1, Number(object.sourceHeight || 760));
-      const characterTransform = resolveCharacterTransformAtTime(object, playhead);
+      const characterTransform = resolveObjectTransformAtTime(object, playhead);
       const characterScale = Math.max(0.02, Number(characterTransform.scale || 1));
       const objectLeft = Number(characterTransform.x || 0) - sourceWidth * characterScale / 2;
       const objectTop = Number(characterTransform.y || 0) - sourceHeight * characterScale / 2;
@@ -2416,7 +2681,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       const b = fallback.bounds;
       const sourceWidth = Math.max(1, Number(object.sourceWidth || 420));
       const sourceHeight = Math.max(1, Number(object.sourceHeight || 760));
-      const characterTransform = resolveCharacterTransformAtTime(object, playhead);
+      const characterTransform = resolveObjectTransformAtTime(object, playhead);
       const characterScale = Math.max(0.02, Number(characterTransform.scale || 1));
       const objectLeft = Number(characterTransform.x || 0) - sourceWidth * characterScale / 2;
       const objectTop = Number(characterTransform.y || 0) - sourceHeight * characterScale / 2;
@@ -2585,6 +2850,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           ["--part-control-zoom" as string]: String(getPartControlScreenScale(object, activeCharacterPart, "source")),
         }}
         onPointerDown={(event) => pressPartBox(event, object)}
+        onContextMenu={(event) => openCharacterMenu(event, object)}
         onDoubleClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -2601,7 +2867,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
 
   const renderSelectionGizmo = (object: EditorObject, selected: boolean) => {
     if (renderMode || !selected) return null;
-    const partMode = object.type === "character" && Boolean(activeCharacterPart);
+    const partMode = object.type === "character" && (Boolean(activeCharacterPart) || characterIsolated);
     if (partMode) return null;
     const pivotX = clamp(object.pivotX ?? 0.5, PIVOT_MIN, PIVOT_MAX);
     const pivotY = clamp(object.pivotY ?? 0.5, PIVOT_MIN, PIVOT_MAX);
@@ -2610,7 +2876,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     // CSS-scaled (scale × stretch), so their gizmo is counter-scaled per axis to stay crisp.
     const viewScale = Math.max(0.02, effectiveScale / Math.max(0.001, browserZoomFactor));
     const stretch = stretchOf(object);
-    const layerScale = object.type === "character" ? 1 : Math.max(0.02, Number(object.scale || 1));
+    const layerScale = object.type === "character" ? 1 : Math.max(0.02, Number(resolveObjectTransformAtTime(object, playhead).scale || 1));
     const zoomX = object.type === "character" ? viewScale : viewScale * layerScale * stretch.x;
     const zoomY = object.type === "character" ? viewScale : viewScale * layerScale * stretch.y;
     const lineWidths = `${1 / zoomY}px ${1 / zoomX}px`;
@@ -2633,7 +2899,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       ["--cb-skew-y" as string]: `${skewOf(object).y}deg`,
       borderWidth: lineWidths,
     };
-    const rotation = object.type === "character" ? resolveCharacterTransformAtTime(object, playhead).rotation || 0 : object.rotation || 0;
+    const rotation = resolveObjectTransformAtTime(object, playhead).rotation || 0;
     const corners = ["nw", "ne", "se", "sw"] as const;
     const sides = ["n", "e", "s", "w"] as const;
     return (
@@ -2690,7 +2956,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   return (
     <div
       ref={hostRef}
-      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""} ${symbolView && !renderMode ? "cb-symbol-viewing" : ""}`}
+      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""} ${symbolView && !renderMode ? "cb-symbol-viewing" : ""} ${isolating && !renderMode ? "cb-isolating" : ""}`}
       onWheel={handleWheel}
       // Scale tool (S) takes the drag before objects or the marquee see it.
       onPointerDownCapture={(event) => {
@@ -2721,10 +2987,13 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           onColorPick(event.clientX, event.clientY, { altKey: event.altKey, shiftKey: event.shiftKey });
           return;
         }
-        // Part editing (double-click mode) is left only by a double-click outside the part, so single
-        // presses elsewhere — empty canvas, background, other objects — are ignored while it is open.
+        // Inside a character (Illustrator's isolation mode) a press on empty canvas deselects or starts
+        // a drag-select box (beginMarquee); other objects are faded and can't be picked.
         if (partEditing) {
-          if (!isInsideSelectedCharacter(event.target)) event.stopPropagation();
+          const target = event.target as HTMLElement;
+          const emptyCanvas = target === event.currentTarget || Boolean(target.closest?.(".cb-stage-background"))
+            || target.classList?.contains("cb-stage-world") || target.classList?.contains("cb-browser-zoom-stable-viewport");
+          if (!emptyCanvas && !isInsideSelectedCharacter(event.target)) event.stopPropagation();
           return;
         }
         if (!beginScaleToolDrag(event)) redirectTransparentPress(event);
@@ -2733,15 +3002,34 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         // With the Zoom tool a double-click is just two zoom clicks, and with Lighten/Darken or an
         // eyedropper two colour clicks: it never selects or enters a part.
         if (toolMode === "zoom" || blockDoubleClick || colorPickActive) { event.preventDefault(); event.stopPropagation(); return; }
-        // Double-click outside the part's solid artwork (blank space, canvas, other objects) closes part
-        // editing and returns to the whole character, like double-clicking outside a symbol in Animate.
+        if (!partEditing && !symbolView) {
+          const owner = (event.target as HTMLElement | null)?.closest?.<HTMLElement>("[data-editor-object-id]");
+          const object = owner ? objects.find((item) => item.id === owner.getAttribute("data-editor-object-id")) : undefined;
+          // Animate: a double-click on an object of a group goes inside the group, with that object picked.
+          if (object?.group && object.group !== enteredObjectGroup && !object.locked && onEnterObjectGroup
+            && (object.type !== "character" || isCharacterPixelOpaque(object, event.clientX, event.clientY))) {
+            event.preventDefault();
+            event.stopPropagation();
+            onEnterObjectGroup(object.group, object.id);
+            return;
+          }
+          // Inside a group, a double-click on empty canvas (or on the faded scene) steps out of it.
+          if (enteredObjectGroup && !object && onObjectGroupStepOut) {
+            event.preventDefault();
+            event.stopPropagation();
+            onObjectGroupStepOut();
+            return;
+          }
+        }
+        // Double-click outside the part's solid artwork (blank space, canvas, other objects) steps out
+        // one level, like double-clicking outside an isolated group in Illustrator.
         if (!partEditing || !selectedObject) return;
         const target = event.target as HTMLElement | null;
         if (target?.closest?.(".cb-part-pivot-point, .cb-part-corner-control, .cb-part-flip-handle, .cb-part-skew-edge, .cb-part-stretch-handle, .cb-persistent-part-replacement")) return;
         if (isInsideSelectedCharacter(event.target) && isCharacterArtworkAt(selectedObject, event.clientX, event.clientY)) return;
         event.preventDefault();
         event.stopPropagation();
-        onActiveCharacterPart?.(null);
+        if (onIsolationStepOut) onIsolationStepOut(); else onActiveCharacterPart?.(null);
       }}
       onPointerDown={(event) => {
         if (beginPan(event)) return;
@@ -2798,6 +3086,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           if (!clickedStage) return;
           beginMarquee(event);
         }}
+
       >
         {data.backgroundImage && <img className="cb-stage-background" src={data.backgroundImage} alt="" draggable={false} />}
 
@@ -2815,9 +3104,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           if (playhead + 0.0001 < layerStart) return null;
           if (layerDuration != null && playhead > layerStart + layerDuration + 0.0001) return null;
           const selected = selectedIds.includes(object.id);
-          const resolvedTransform = object.type === "character"
-            ? resolveCharacterTransformAtTime(object, playhead)
-            : { x: object.x, y: object.y, scale: object.scale || 1, rotation: object.rotation || 0 };
+          const resolvedTransform = resolveObjectTransformAtTime(object, playhead);
           const baseStyle = {
             left: `${resolvedTransform.x}px`,
             top: `${resolvedTransform.y}px`,
@@ -2882,7 +3169,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
               <div
                 key={object.id}
                 data-editor-object-id={object.id}
-                data-symbol-focus={symbolView?.objectId === object.id ? "" : undefined}
+                data-symbol-focus={inFocus(object) ? "" : undefined}
                 className={`cb-stage-character ${lockClass} ${selected && !renderMode ? "selected" : ""} ${selected && activeCharacterPart && !renderMode ? "part-edit-mode" : ""}`}
                 style={{
                   ...baseStyle,
@@ -2930,6 +3217,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
               <div
                 key={object.id}
                 data-editor-object-id={object.id}
+                data-symbol-focus={inFocus(object) ? "" : undefined}
                 className={`cb-stage-prop cb-stage-prop-image ${lockClass} ${selected && !renderMode ? "selected" : ""}`}
                 style={{
                   ...baseStyle,
@@ -2952,8 +3240,9 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
               <div
                 key={object.id}
                 data-editor-object-id={object.id}
+                data-symbol-focus={inFocus(object) ? "" : undefined}
                 className={`cb-stage-text ${lockClass} ${selected && !renderMode && !editing ? "selected" : ""} ${editing ? "cb-stage-text-editing" : ""}`}
-                style={{ ...baseStyle, ...textCss(object), transform: layerTransformCss(object, object.rotation || 0, object.scale || 1, stretchOf(object).x, stretchOf(object).y), transformOrigin: "50% 50%" }}
+                style={{ ...baseStyle, ...textCss(object), transform: layerTransformCss(object, resolvedTransform.rotation || 0, resolvedTransform.scale || 1, stretchOf(object).x, stretchOf(object).y), transformOrigin: "50% 50%" }}
                 onPointerDown={(event) => { if (!editing) beginDrag(event, object); }}
                 onDoubleClick={(event) => { if (!editing && !object.locked && toolMode !== "zoom") { event.stopPropagation(); onEditText?.(object.id, event.clientX, event.clientY); } }}
               >
@@ -2971,14 +3260,42 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
             <div
               key={object.id}
               data-editor-object-id={object.id}
+              data-symbol-focus={inFocus(object) ? "" : undefined}
               className={`cb-stage-prop ${lockClass} ${selected && !renderMode ? "selected" : ""}`}
-              style={{ ...baseStyle, background: object.fillColor || "#17343a", transform: layerTransformCss(object, object.rotation || 0, object.scale || 1, stretchOf(object).x, stretchOf(object).y), transformOrigin: "50% 50%" }}
+              style={{ ...baseStyle, background: object.fillColor || "#17343a", transform: layerTransformCss(object, resolvedTransform.rotation || 0, resolvedTransform.scale || 1, stretchOf(object).x, stretchOf(object).y), transformOrigin: "50% 50%" }}
               onPointerDown={(event) => beginDrag(event, object)}
             >
               <span>◇</span><small>{object.name}</small>{renderSelectionGizmo(object, selected)}
             </div>
           );
         })}
+        {groupBox && groupBoxIds.length > 1 && (() => {
+          const zoomNow = Math.max(0.02, effectiveScale / Math.max(0.001, browserZoomFactor));
+          return (
+            <div ref={groupBoxRef} className="cb-group-box"
+              style={{ left: groupBox.left, top: groupBox.top, width: groupBox.width, height: groupBox.height, borderWidth: 1 / zoomNow, ["--cb-gz" as string]: String(zoomNow) }}>
+              {(["nw", "ne", "se", "sw"] as const).map((corner) => (
+                <span key={corner} className={`cb-group-corner cb-group-${corner}`}>
+                  <button type="button" className="cb-group-rotate" tabIndex={-1} aria-label={`Rotate ${corner}`} title="Turn everything about the centre (Shift: 45° steps)"
+                    onPointerDown={(event) => beginGroupRotation(event, groupBoxIds, groupBox)}>↻</button>
+                  <button type="button" className="cb-group-scale" tabIndex={-1} aria-label={`Scale ${corner}`} title="Resize everything (Option/Alt: from the centre)"
+                    style={{ cursor: corner === "nw" || corner === "se" ? "nwse-resize" : "nesw-resize" }}
+                    onPointerDown={(event) => beginGroupScale(event, groupBoxIds, groupBox, corner)} />
+                </span>
+              ))}
+              {boxGroup && onSetGroupPivot && (() => {
+                const pivot = groupPivotNow(groupBox);
+                return (
+                  <button type="button" className="cb-group-pivot" tabIndex={-1} aria-label="Group registration point"
+                    title="Registration point: the group turns and scales about it, also in its motion. Drag to move it; double-click to put it back in the middle."
+                    style={{ left: pivot.x - groupBox.left, top: pivot.y - groupBox.top }}
+                    onPointerDown={(event) => beginGroupPivotDrag(event, groupBox)}
+                    onDoubleClick={(event) => { event.stopPropagation(); onSetGroupPivot(boxGroup.id, groupBox.left + groupBox.width / 2, groupBox.top + groupBox.height / 2); }} />
+                );
+              })()}
+            </div>
+          );
+        })()}
       </div>
 
       {!renderMode && useCameraRendering && cameraCharacterObjects.map((object, index) => {
@@ -2994,7 +3311,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
               else frameRefs.current.delete(object.id);
             }}
             data-animate-player="1"
-            data-symbol-focus={symbolView?.objectId === object.id ? "" : undefined}
+            data-symbol-focus={inFocus(object) ? "" : undefined}
             title={`${object.name} ${object.actionName || "action"}`}
             src={`${object.assetUrl}?autoplay=0&muted=1&interactive=1&editorStage=1&cameraMode=1&viewportWidth=${width}&viewportHeight=${height}&characterBoxWidth=${object.sourceWidth || 420}&characterBoxHeight=${object.sourceHeight || 760}&qualityScale=${getPlayerQualityScale(width, height)}&bridge=v91`}
             className="cb-character-source-frame cb-character-camera-frame"
@@ -3033,6 +3350,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
               ["--part-control-zoom" as string]: String(getPartControlScreenScale(object, activeCharacterPart, "camera")),
             }}
             onPointerDown={(event) => pressPartBox(event, object)}
+            onContextMenu={(event) => openCharacterMenu(event, object)}
             onDoubleClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -3049,7 +3367,14 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       </div>
       {symbolMenu && (
         <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: symbolMenu.x, top: symbolMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
-          <button type="button" role="menuitem" onClick={() => { const id = symbolMenu.objectId; setSymbolMenu(null); onEnterSymbol?.(id); }}>Edit Symbol<kbd>⌥ double-click</kbd></button>
+          {onEnterSymbol && <button type="button" role="menuitem" onClick={() => { const id = symbolMenu.objectId; setSymbolMenu(null); onEnterSymbol(id); }}>Edit Symbol<kbd>⌥ double-click</kbd></button>}
+          {onDistributeParts && <>
+            <span className="cb-frame-menu-sep" aria-hidden="true" />
+            <button type="button" role="menuitem" onClick={() => { setSymbolMenu(null); onDistributeParts("animated"); }}
+              title="Each body part (or each selected part) on its own layer, still animated">Distribute to Layers<kbd>⇧⌘D</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setSymbolMenu(null); onDistributeParts("still"); }}
+              title="Each body part (or each selected part) as a vector picture of how it looks now — light, but not animated">Distribute as Still (vector)</button>
+          </>}
         </div>
       )}
     </div>

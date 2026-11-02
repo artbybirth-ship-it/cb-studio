@@ -11,6 +11,9 @@ const nextConfig: NextConfig = {
   output: "standalone",
   // Development only: allow LAN and public-IP clients to use the dev server's live-update connection.
   allowedDevOrigins: ["192.168.1.58", "192.168.1.114", "122.180.242.125"],
+  // Uploads proxied to Django (character libraries, imported .fla packages) may be as large as
+  // the installers accept (500 MB); the default stops at 10 MB and the upload fails.
+  experimental: { proxyClientMaxBodySize: "500mb" },
   async rewrites() {
     const beforeFiles: { source: string; destination: string }[] = [];
     if (backendOrigin) {

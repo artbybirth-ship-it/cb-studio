@@ -12,8 +12,9 @@ import { EyedropperIcon } from "./toolIcons";
 /**
  * Fill/Stroke (every colour picker in the app; mockup, after Illustrator's Colour Picker): a colour
  * field and a strip, H/S/B and R/G/B whose radio button chooses what the strip controls, a # code,
- * the canvas eyedropper, and for text Include Stroke / Include Shadow. Nothing is applied until
- * Create (Enter); Cancel (Esc) discards. Modal; dragged by its title like every dialog.
+ * the new / original colour box (a click on the original goes back to it), Include Stroke / Include
+ * Shadow (greyed out where nothing has an outline or a shadow) and the canvas eyedropper. Nothing
+ * is applied until OK (Enter); Cancel (Esc) discards. Modal; dragged by its title like every dialog.
  */
 export type ColourEffects = { stroke: boolean; shadow: boolean };
 
@@ -114,13 +115,15 @@ type Props = {
   /** Starting colour (#rrggbb). */
   initial: string;
   title?: string;
-  /** Text: show Include Stroke / Include Shadow, starting as given; Create returns them. */
+  /** Include Stroke / Include Shadow, starting as given; OK returns them. Without it they are greyed out. */
   effects?: ColourEffects;
+  /** Why the two boxes are greyed out (shown on hover). */
+  effectsNote?: string;
   onOk: (hex: string, effects?: ColourEffects) => void;
   onCancel: () => void;
 };
 
-export default function ColourPicker({ initial, title = "Fill/Stroke", effects, onOk, onCancel }: Props) {
+export default function ColourPicker({ initial, title = "Fill/Stroke", effects, effectsNote = "Only text and characters have outlines and shadows", onOk, onCancel }: Props) {
   const [stroke, setStroke] = useState(Boolean(effects?.stroke));
   const [shadow, setShadow] = useState(Boolean(effects?.shadow));
   const [picking, setPicking] = useState(false);
@@ -224,10 +227,7 @@ export default function ColourPicker({ initial, title = "Fill/Stroke", effects, 
         <header><PanelClose onClose={onCancel} label="Cancel" />{title}</header>
         <div className="cb-fs-body">
           <div className="cb-fs-left">
-            <div className="cb-fs-label">
-              <span>Select Colour</span>
-              <button type="button" className="cb-fs-dropper" aria-label="Eyedropper" title="Eyedropper: click a colour on the canvas" onClick={() => setPicking(true)}><EyedropperIcon /></button>
-            </div>
+            <div className="cb-fs-label"><span>Select Colour</span></div>
             <div className="cb-cp-field" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); dragField(event); }} onPointerMove={(event) => { if (event.buttons) dragField(event); }}>
               <canvas ref={fieldRef} width={SIZE} height={SIZE} aria-hidden="true" />
               <span className={`cb-cp-ring ${colour.hsb.b > 55 && colour.hsb.s < 45 ? "dark" : ""}`} style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }} />
@@ -238,12 +238,14 @@ export default function ColourPicker({ initial, title = "Fill/Stroke", effects, 
               <span className="cb-cp-tri top" style={{ left: `${stripAt * 100}%` }} />
               <span className="cb-cp-tri bottom" style={{ left: `${stripAt * 100}%` }} />
             </div>
-            {effects && (
-              <div className="cb-fs-effects">
-                <label><input type="checkbox" checked={stroke} onChange={(event) => setStroke(event.target.checked)} /> Include Stroke</label>
-                <label><input type="checkbox" checked={shadow} onChange={(event) => setShadow(event.target.checked)} /> Include Shadow</label>
+            <div className="cb-fs-foot">
+              <div className={`cb-fs-effects ${effects ? "" : "off"}`} title={effects ? undefined : effectsNote}>
+                <label><input type="checkbox" checked={Boolean(effects) && stroke} disabled={!effects} onChange={(event) => setStroke(event.target.checked)} /> Include Stroke</label>
+                <label><input type="checkbox" checked={Boolean(effects) && shadow} disabled={!effects} onChange={(event) => setShadow(event.target.checked)} /> Include Shadow</label>
               </div>
-            )}
+              <button type="button" className="cb-fs-dropper" aria-label="Eyedropper" title="Eyedropper: click a colour on the canvas" onClick={() => setPicking(true)}><EyedropperIcon /></button>
+              <button type="button" className="cb-fs-cancel" onClick={onCancel}>Cancel</button>
+            </div>
           </div>
 
           <div className="cb-fs-right">
@@ -273,8 +275,13 @@ export default function ColourPicker({ initial, title = "Fill/Stroke", effects, 
                 {copied && <em>Copied</em>}
               </button>
             </div>
-            <button type="button" className="cb-fs-create" onClick={() => create(hex)}>Create</button>
-            <button type="button" className="cb-fs-cancel" onClick={onCancel}>Cancel</button>
+            {/* Illustrator: the new colour above the colour it started as; a click on the old one goes back. */}
+            <div className="cb-fs-compare">
+              <span style={{ background: hex }} title={`New colour ${hex}`} aria-label={`New colour ${hex}`} role="img" />
+              <button type="button" style={{ background: original }} title={`Original colour ${original}: click to go back to it`} aria-label={`Back to the original colour ${original}`}
+                onClick={() => { setHexDraft(null); setColour((current) => fromRgb(hexToRgb(original)!, current.hsb)); }} />
+            </div>
+            <button type="button" className="cb-fs-create" onClick={() => create(hex)}>OK</button>
           </div>
         </div>
       </div>

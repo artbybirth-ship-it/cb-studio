@@ -167,10 +167,18 @@ function codeClasses(jsText: string): Map<string, CodeLayer[]> {
 
 const plain = (name: string) => (name.split("/").pop() || "").replace(/[^A-Za-z0-9_$]/g, "");
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const mayBe = (jsName: string, xflName: string) => {
+const nameMayBe = (jsName: string, xflName: string) => {
   const base = plain(xflName);
   return jsName === base || new RegExp(`^${escapeRegExp(base)}_\\d+$`).test(jsName);
 };
+
+/** Classes written by CB Studio's .fla import name their library symbol ("fla: <name>"), so a
+ *  pose renamed on import ("Wave") still links to "Symbol 1". */
+function flaNameHints(jsText: string): Map<string, string> {
+  const hints = new Map<string, string>();
+  for (const match of jsText.matchAll(/\(lib\.([A-Za-z0-9_$]+) = function\(mode,startPosition,loop[^\n]*\n(?:[^\n]*\n){0,10}?\t\/\* fla: (.*) \*\/\n/g)) hints.set(match[1], match[2]);
+  return hints;
+}
 
 /** (fla index, code index) of the layers whose code Animate wrote, in order, by name. */
 function align(xflLayers: Layer[], codeLayers: CodeLayer[]): Array<[number, number]> {
@@ -207,6 +215,8 @@ export async function buildFlaTimeline(flaPath: string, jsText: string, outDir: 
   const stage: Timeline = { name: scene[0]?.[0].name || "Scene 1", ...timeline(scene[0]?.[1] || "") };
 
   const classes = codeClasses(jsText);
+  const hints = flaNameHints(jsText);
+  const mayBe = (jsName: string, xflName: string) => (hints.has(jsName) ? hints.get(jsName) === xflName : nameMayBe(jsName, xflName));
   const stageJs = jsText.match(/\/\/ stage content:\s*\n\(lib\.([A-Za-z0-9_$]+) = function/)?.[1] || null;
 
   // Link symbols to classes, from the stage down; then any name that can only mean one class.

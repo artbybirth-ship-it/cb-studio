@@ -7,11 +7,15 @@ import { SCRUB_END, SCRUB_START } from "@/lib/scrub";
 import { useEscClose } from "@/lib/escClose";
 import { compileAnimationPlan } from "@/lib/animationCompiler";
 import { resolveCharacterTransformAtTime, sortKeyframes, upsertCharacterKeyframe } from "@/lib/keyframes";
+import { composeGroupChange, groupPivotAtTime, isRestPose, movePivot, removeGroupPose, resolveGroupPose, resolveObjectTransformAtTime, sortGroupKeyframes } from "@/lib/groupMotion";
 import { extractFrames, newLayerId, shiftObjectTimes } from "@/lib/layerSplit";
+import { canShareLayer, groupOfRow, isGroupRow, layerKeyOf, layerMembers, orderByLayers, retagCopies, rowKeyOf, rowMembersOf, timelineRows } from "@/lib/layerRows";
+import { groupForPart, isMultiPartKey, joinPartKeys, parentPartKey, partMembers, partTitle, togglePartKey } from "@/lib/partSelection";
+import { exportSourceOfPlayer, symbolPlayerUrl } from "@/lib/partVariants";
 import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsertPartKeyframe } from "@/lib/partKeyframes";
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
-import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, Project, RenderJob, Scene } from "@/types";
+import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
 import { readOpenProjects, recentProjectsOf, removeOpenProject, upsertOpenProject, type OpenProjectTab } from "@/lib/openProjects";
@@ -19,11 +23,14 @@ import { buildProjectFile, formatEditedAgo, openProjectFileAsNew, saveProjectFil
 import SymbolTimeline, { type FlaSymbol } from "./SymbolTimeline";
 import Timeline, { selectionLayerIds, type FrameAction, type FrameSelection, type LayerDropTarget } from "./Timeline";
 import CharacterEditPanel from "./CharacterEditPanel";
-import RecolorPanel from "./RecolorPanel";
 import FindReplaceDialog from "./FindReplaceDialog";
 import { addColorRule, addCounts, applyToEditorData, charactersUsingColour, describeCounts, emptyCounts, libraryIdOf, normalizeHex, totalCount, visibleAt, type FindRequest } from "@/lib/findReplace";
-import { shiftLightness } from "@/lib/color";
+import { followColour, shiftLightness, shiftLike } from "@/lib/color";
 import ColourPicker from "./ColourPicker";
+import PanelClose from "./PanelClose";
+import AdjustColourDialog from "./AdjustColourDialog";
+import { sampleStageColour } from "./CanvasEyedropper";
+import { adjustHex, isIdentity, type AdjustSettings } from "@/lib/adjustColour";
 import ReflectDialog from "./ReflectDialog";
 import { partLabel } from "@/lib/partLabels";
 import { axisInsideCharacter, reflectOrientation, reflectPoint, wrapDegrees } from "@/lib/reflect";
@@ -34,8 +41,8 @@ import { renderProjectThumbnail } from "@/lib/projectThumbnail";
 import ScaleRotateDialog from "./ScaleRotateDialog";
 import ToolGroup from "./ToolGroup";
 import {
-  AlignBottomIcon, AlignHCenterIcon, AlignIcon, AlignLeftIcon, AlignRightIcon, AlignTopIcon, AlignVCenterIcon, ColourIcon, DistributeHIcon, DistributeVIcon,
-  ExportIcon, FileIcon, FillIcon, ImportIcon, NewFileIcon, OpenFileIcon, RecolourIcon, ReflectIcon, SaveAsIcon, SaveIcon, ScaleIcon, SelectIcon, StrokeIcon, SwapIcon, TextIcon, TransformIcon,
+  AlignBottomIcon, AlignHCenterIcon, AlignIcon, AlignLeftIcon, AlignRightIcon, AlignTopIcon, AlignVCenterIcon, AdjustColourIcon, ColourIcon, DistributeHIcon, DistributeVIcon,
+  EyedropperIcon, ExportIcon, FileIcon, FillStrokeIcon, FindReplaceIcon, ImportIcon, LightDarkIcon, NewFileIcon, OpenFileIcon, ReflectIcon, SaveAsIcon, SaveIcon, ScaleIcon, SelectIcon, TextIcon, TransformIcon,
 } from "./toolIcons";
 import TextPanel, { type TextValues } from "./TextPanel";
 import TextColourPalette from "./TextColourPalette";
@@ -76,6 +83,68 @@ const moveKeyframedPosition = (item: EditorObject, time: number, x: number, y: n
     || [...frames].reverse().find((key) => key.time <= time + 1e-6)
     || frames[0];
   item.keyframes = frames.map((key) => (key.id === target.id ? { ...key, x: key.x + dx, y: key.y + dy } : key));
+};
+
+// ---- ⌘G group motion (lib/groupMotion.ts). Every member carries the same groupMotion.
+const groupMotionIn = (objects: EditorObject[], group: string) => objects.find((item) => item.group === group && item.groupMotion)?.groupMotion;
+const writeGroupMotion = (objects: EditorObject[], group: string, motion: GroupMotion | undefined) => objects.forEach((item) => {
+  if (item.group !== group) return;
+  if (motion) item.groupMotion = JSON.parse(JSON.stringify(motion)); else delete item.groupMotion;
+});
+type PlacePatch = { x?: number; y?: number; rotation?: number; scale?: number };
+/** A position / turn / size given where the object is drawn → its own (its group's motion taken off). */
+const toOwnPatch = <P extends PlacePatch>(item: EditorObject, patch: P, time: number): P => {
+  if (!item.group || !item.groupMotion) return patch;
+  const pose = resolveGroupPose(item.groupMotion, time);
+  if (isRestPose(pose)) return patch;
+  const drawn = resolveObjectTransformAtTime(item, time);
+  const own = removeGroupPose({ x: patch.x ?? drawn.x, y: patch.y ?? drawn.y, rotation: patch.rotation ?? drawn.rotation, scale: patch.scale ?? drawn.scale }, item.groupMotion, pose);
+  return {
+    ...patch,
+    ...(patch.x != null || patch.y != null ? { x: own.x, y: own.y } : {}),
+    ...(patch.rotation != null ? { rotation: own.rotation } : {}),
+    ...(patch.scale != null ? { scale: own.scale } : {}),
+  };
+};
+/**
+ * An edit that moves, turns or sizes every object of a ⌘G group alike belongs to the group. With
+ * motion it goes into the group's keyframe at the playhead (else the one before it, as with a
+ * character); without, the objects change as usual and the registration point goes along.
+ * Returns the ids it took care of.
+ */
+const applyWholeGroupEdits = (data: EditorData, entries: Array<{ id: string; patch: TransformPatch }>, time: number, enteredGroup: string | null) => {
+  const handled = new Set<string>();
+  const byId = new Map(entries.map((entry) => [entry.id, entry.patch]));
+  const groups = new Set(entries.map((entry) => data.objects.find((item) => item.id === entry.id)?.group).filter((group): group is string => Boolean(group)));
+  for (const group of groups) {
+    if (group === enteredGroup) continue;
+    const members = data.objects.filter((item) => item.group === group && !item.locked);
+    if (!members.length || !members.every((item) => byId.has(item.id))) continue;
+    const patch = byId.get(members[0].id)!;
+    if (patch.skewX != null || patch.skewY != null || patch.stretchX != null || patch.stretchY != null || patch.pivotX != null || patch.pivotY != null) continue;
+    const motion = groupMotionIn(data.objects, group);
+    if (!motion) continue;
+    const drawn = resolveObjectTransformAtTime(members[0], time);
+    const after = { x: patch.x ?? drawn.x, y: patch.y ?? drawn.y };
+    // The turn the short way round (rotations come wrapped to ±180°), so tweens don't spin backwards.
+    const dRotation = patch.rotation != null ? ((((patch.rotation - drawn.rotation) % 360) + 540) % 360) - 180 : 0;
+    const dScale = patch.scale != null ? patch.scale / Math.max(0.0001, drawn.scale) : 1;
+    const pose = resolveGroupPose(motion, time);
+    const next = composeGroupChange(motion, pose, dRotation, dScale, drawn, after);
+    const frames = sortGroupKeyframes(motion.keyframes || []);
+    if (!frames.length) {
+      if (motion.pivotX != null && motion.pivotY != null) writeGroupMotion(data.objects, group, { ...motion, pivotX: motion.pivotX + next.x, pivotY: motion.pivotY + next.y });
+      continue;
+    }
+    const frame = Math.round(time * TIMELINE_FPS);
+    const target = frames.find((key) => Math.round(key.time * TIMELINE_FPS) === frame) || [...frames].reverse().find((key) => key.time <= time + 1e-6) || frames[0];
+    const keyframes = frames.map((key) => (key.id !== target.id ? key : {
+      ...key, x: key.x + next.x - pose.x, y: key.y + next.y - pose.y, rotation: key.rotation + next.rotation - pose.rotation, scale: Math.max(0.02, key.scale * (next.scale / pose.scale)),
+    }));
+    writeGroupMotion(data.objects, group, { ...motion, keyframes });
+    members.forEach((item) => handled.add(item.id));
+  }
+  return handled;
 };
 
 /** A keyframe made by the user. It holds (no tween) unless it splits an existing tween, which
@@ -142,7 +211,13 @@ const writePartTransform = (item: EditorObject, partKey: CharacterPartKey, patch
 
 // Layer clipboard (Copy / Cut / Paste): kept in memory and in this browser's session storage, so
 // it survives switching scenes and projects while CB Studio is open.
-type LayerClipboard = { objects: EditorObject[]; centre: { x: number; y: number } };
+type LayerClipboard = {
+  objects: EditorObject[];
+  centre: { x: number; y: number };
+  /** Copied body parts (⌘C with parts selected): the part layer in `objects`, and which parts of
+   *  which character, so ⌘V onto a selected part of another character can replace that part. */
+  parts?: { keys: CharacterPartKey[]; assetUrl?: string; characterName: string; symbol?: string };
+};
 const LAYER_CLIPBOARD_KEY = "cb-layer-clipboard";
 let layerClipboard: LayerClipboard | null = null;
 const writeLayerClipboard = (clip: LayerClipboard) => {
@@ -158,11 +233,43 @@ const readLayerClipboard = (): LayerClipboard | null => {
   return layerClipboard;
 };
 
-/** New objects fill the selected empty layer (its blank keyframe) instead of adding a layer. */
+const CHARACTER_LAYER_NOTICE = "A character's layer holds just its character — drop these frames on an empty layer or between layers.";
+const GROUP_DROP_NOTICE = "A group's layers stay in the group — drop it between layers, or double-click it to work inside.";
+/** Text, images and shapes can share a layer; characters, backgrounds and sound each have their own. */
+const sharesLayers = (item: EditorObject) => item.type === "text" || item.type === "prop";
+/**
+ * Where a new object goes (Animate: into the selected layer). It fills a selected empty layer's
+ * blank keyframe; text, images and shapes join a selected layer of text / images / shapes, on its
+ * frames; anything else, or onto a character's layer (it holds just its character), is a new layer.
+ */
 const placeInLayer = (data: EditorData, object: EditorObject, targetId: string | null | undefined) => {
-  const index = targetId ? data.objects.findIndex((item) => item.id === targetId && item.type === "empty") : -1;
-  if (index >= 0) data.objects.splice(index, 1, object);
-  else data.objects.push(object);
+  const target = targetId ? data.objects.find((item) => item.id === targetId) : undefined;
+  if (target?.type === "empty") { data.objects.splice(data.objects.indexOf(target), 1, object); return; }
+  if (!target || !joinLayer(data, [object], layerKeyOf(target))) data.objects.push(object);
+};
+/** Puts objects on a layer of text / images / shapes, sharing its frames, just above its top object.
+ *  False (nothing changed) when they or the layer can't share. */
+const joinLayer = (data: EditorData, objects: EditorObject[], key: string) => {
+  const members = layerMembers(data.objects, key);
+  if (!members.length || !objects.every(sharesLayers) || !members.every(sharesLayers) || members.some((item) => item.locked)) return false;
+  const starts = members.map((item) => Math.max(0, Number(item.startTime || 0)));
+  const start = Math.min(...starts);
+  const openEnded = members.some((item) => !item.actionDurationMs);
+  const end = Math.max(...members.map((item, index) => starts[index] + Number(item.actionDurationMs || 0) / 1000));
+  const name = members[members.length - 1].layerName;
+  for (const item of [...members, ...objects]) {
+    item.layer = key;
+    if (name) item.layerName = name; else delete item.layerName;
+  }
+  const top = members[members.length - 1];
+  for (const item of objects) {
+    item.startTime = start;
+    if (openEnded) delete item.actionDurationMs; else item.actionDurationMs = (end - start) * 1000;
+    // A layer inside a ⌘G group: the new objects are in the group too.
+    if (top.group) { item.group = top.group; if (top.groupName) item.groupName = top.groupName; }
+  }
+  data.objects.splice(data.objects.indexOf(members[members.length - 1]) + 1, 0, ...objects);
+  return true;
 };
 
 // Per-scene safety copy in this browser, kept until the autosave reaches the server.
@@ -251,9 +358,6 @@ const MIN_CANVAS_ZOOM = 0.1;
 const MAX_CANVAS_ZOOM = 200;
 const clampCanvasZoom = (value: number) => Math.max(MIN_CANVAS_ZOOM, Math.min(MAX_CANVAS_ZOOM, value));
 
-type EyeDropperResult = { sRGBHex: string };
-type EyeDropperInstance = { open: () => Promise<EyeDropperResult> };
-type WindowWithEyeDropper = Window & { EyeDropper?: new () => EyeDropperInstance };
 
 export default function EditorShell({ projectId }: { projectId: string }) {
   const router = useRouter();
@@ -308,12 +412,23 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const openButtonRef = useRef<HTMLButtonElement>(null);
   const [canvasViewResetRevision, setCanvasViewResetRevision] = useState(0);
   const [partReplacementBrowserOpen, setPartReplacementBrowserOpen] = useState(false);
+  // Inside a character (Illustrator's isolation mode): true from the first double-click into it
+  // until stepping all the way out, even with no part selected. enteredGroupId: a ⌘G group that was
+  // double-clicked, so its members are picked one by one.
+  const [characterIsolated, setCharacterIsolated] = useState(false);
+  const [enteredGroupId, setEnteredGroupId] = useState<string | null>(null);
+  const enteredGroupRef = useRef(enteredGroupId);
+  enteredGroupRef.current = enteredGroupId;
+  const isolatedObjectRef = useRef<EditorObject | null>(null);
+  isolatedObjectRef.current = draft?.objects.find((item) => item.id === selectedObjectId) || null;
+  // A ⌘G group of objects on the canvas that was double-clicked: its objects are picked one by one
+  // (the rest of the scene fades) until Esc or a double-click on empty canvas.
+  const [enteredObjectGroup, setEnteredObjectGroup] = useState<string | null>(null);
+  const enteredObjectGroupRef = useRef(enteredObjectGroup);
+  enteredObjectGroupRef.current = enteredObjectGroup;
   const [referenceCharacterId, setReferenceCharacterId] = useState("");
   const [aiAnimateOpen, setAIAnimateOpen] = useState(false);
   // "select" = Animate Selection tool (V), "transform" = Free Transform tool (Q).
-  // Recolour (Fill/Stroke boxes at the bottom of the tool palette, Illustrator-style).
-  const [recolorOpen, setRecolorOpen] = useState(false);
-  const [recolorTarget, setRecolorTarget] = useState<ColorReplacement["target"]>("both");
   // Fill / Stroke boxes (Illustrator): click = active box, double-click = Colour Picker. For a
   // character they hold an ORIGINAL colour of its artwork (picked with the eyedropper, else its
   // most-used fill / outline colour) and show what that colour currently looks like.
@@ -322,10 +437,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const [boxPalette, setBoxPalette] = useState<{ key: string; entries: { color: string; current: string; fills: number; strokes: number }[] } | null>(null);
   const [boxPicking, setBoxPicking] = useState(false);
   const [boxPicker, setBoxPicker] = useState<"fill" | "stroke" | null>(null);
-  const [colorPickActive, setColorPickActive] = useState(false);
-  const [pickedColor, setPickedColor] = useState<{ color: string; nonce: number } | null>(null);
-  const [previewColorReplacement, setPreviewColorReplacement] = useState<{ objectId: string; rule: ColorReplacement } | null>(null);
-  const [recolorPosition, setRecolorPosition] = useState({ left: 70, bottom: 40 });
   const frameAccessRef = useRef<((objectId: string) => HTMLIFrameElement | undefined) | null>(null);
   const viewCenterRef = useRef<(() => { x: number; y: number }) | null>(null);
   const layerGeometryRef = useRef<((objectId: string) => LayerGeometry | null) | null>(null);
@@ -340,11 +451,19 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // The desktop app may use ⌘T; Chrome always keeps it for "new tab", so the browser uses ⌥⌘T.
   const [transformShortcut, setTransformShortcut] = useState("⌥⌘T");
   useEffect(() => { if (/Electron/i.test(navigator.userAgent)) setTransformShortcut("⌘T"); }, []);
-  const pickScopeRef = useRef("*");
-  // Lighten / Darken tool: click = lighter, Alt/Option = darker, Shift = fine step.
-  const [toneShades, setToneShades] = useState(true);
-  const [toneDarken, setToneDarken] = useState(false);
+  // Light/Dark tool (Colour palette, ⌘L): a click makes the colour under the pointer lighter or darker
+  // (the Dark / Light buttons), Alt/Option reverses, Shift = fine step.
+  const [toneReverse, setToneReverse] = useState(false);
+  const [toneDirection, setToneDirection] = useState<"light" | "dark">("light");
+  const [toneStroke, setToneStroke] = useState(true);
+  const [toneShadow, setToneShadow] = useState(false);
   const [toneBarPosition] = useState({ left: 70, top: 300 });
+  const toneDarkNow = (toneDirection === "dark") !== toneReverse;
+  // Fill/Stroke (<) for text, and Adjust colour (⌘J): what it was opened on, kept to preview and cancel.
+  const [textFillStrokeOpen, setTextFillStrokeOpen] = useState(false);
+  // Fill/Stroke on a character: Include Stroke / Include Shadow, remembered while the editor is open.
+  const [boxEffects, setBoxEffects] = useState({ stroke: true, shadow: false });
+  const [adjust, setAdjust] = useState<{ ids: string[]; label: string; hasShadow: boolean; base: Record<string, Partial<EditorObject>>; palettes: Record<string, { scope: string; entries: { color: string; current: string; fills: number; strokes: number }[] }> } | null>(null);
   // Panel borders (Animate): drag the canvas/timeline border and the right panel's left edge.
   // null = the stylesheet's default size; a custom size is remembered per browser.
   const [timelineHeight, setTimelineHeight] = useState<number | null>(null);
@@ -405,7 +524,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // Picking a colour on the canvas: Esc cancels the pick before it closes the panel that asked for it.
   useEscClose(Boolean(frPicking), () => setFrPicking(null));
   useEscClose(boxPicking, () => { setBoxPicking(false); setActiveTool("select"); });
-  useEscClose(colorPickActive, () => setColorPickActive(false));
   const [activeTool, setActiveTool] = useState<"select" | "transform" | "scale" | "reflect" | "zoom" | "import" | "text" | "eyedropper" | "bone" | "tone" | null>("select");
   const activeToolRef = useRef(activeTool);
   activeToolRef.current = activeTool;
@@ -426,7 +544,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // One dark box on the rail at a time, only once a tool is used: the last tool clicked keeps it
   // until another is clicked; tool shortcuts (V / Q / S / O, Cmd+F) move it too. None when the
   // editor opens, and automatic tool changes (back to Select after a pick or Esc) don't move it.
-  const [railHighlight, setRailHighlight] = useState<"edit" | "file" | "text" | "colour" | "align" | "find" | null>(null);
+  const [railHighlight, setRailHighlight] = useState<"edit" | "file" | "text" | "colour" | "align" | null>(null);
 
   // A refresh must never lose work: every change is also kept in this browser until the
   // autosave reaches the server, and a newer local copy wins when the scene is opened.
@@ -494,9 +612,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // A whole clip drag is one undo step: only its first change is recorded in the history.
   const dragHistoryRef = useRef(false);
   const [clipDragEndTick, setClipDragEndTick] = useState(0);
+  // A merged layer row being dragged in time: where its objects started when the drag began.
+  const rowDragBaseRef = useRef<{ key: string; rowStart: number; starts: Record<string, number> } | null>(null);
   const onClipDragChange = useCallback((active: boolean) => {
     clipDraggingRef.current = active;
     dragHistoryRef.current = false;
+    rowDragBaseRef.current = null;
     if (!active) setClipDragEndTick((tick) => tick + 1);
   }, []);
   useEffect(() => {
@@ -565,16 +686,31 @@ export default function EditorShell({ projectId }: { projectId: string }) {
 
   // Plain selection (click, drag, panel): keeps the part entered only when it is the same part.
   // Set both explicitly: canvas picks re-select the character first, which resets the part level.
+  // A part in a ⌘G group selects the whole group (until the group is entered).
   const handleActiveCharacterPart = useCallback((partKey: CharacterPartKey | null) => {
     const { part, entered } = partLevelRef.current;
-    setActiveCharacterPart(partKey || null);
-    setPartReplacementBrowserOpen(Boolean(partKey) && partKey === part && entered);
+    const group = partKey ? groupForPart(isolatedObjectRef.current, partKey, enteredGroupRef.current) : null;
+    const key = group ? group.members.join("|") : partKey || null;
+    setActiveCharacterPart(key);
+    setPartReplacementBrowserOpen(Boolean(key) && key === part && entered && !group);
+    if (key) setCharacterIsolated(true);
   }, []);
 
   // Canvas double-click: selects a part, or enters it when it was already the selected part
   // before the gesture began. The canvas re-selects the character first, which clears the part,
   // so the part is always set again here.
+  // A double-click on a member of the selected group goes inside the group (Illustrator); on a
+  // grouped part otherwise it selects the group.
   const handleCharacterPartDoubleClick = useCallback((partKey: CharacterPartKey, alreadySelected: boolean) => {
+    setCharacterIsolated(true);
+    const group = groupForPart(isolatedObjectRef.current, partKey, enteredGroupRef.current);
+    if (group) {
+      const groupKey = group.members.join("|");
+      if (partLevelRef.current.part === groupKey) { setEnteredGroupId(group.id); setActiveCharacterPart(partKey); }
+      else setActiveCharacterPart(groupKey);
+      setPartReplacementBrowserOpen(false);
+      return;
+    }
     setActiveCharacterPart(partKey);
     setPartReplacementBrowserOpen(alreadySelected);
   }, []);
@@ -658,37 +794,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     });
   }, [mutate, selectedObjectId]);
 
-  // ---- Recolour panel (opened from the Colour group in the tool rail, or the character panel).
-  const openRecolor = (target: ColorReplacement["target"]) => {
-    setRecolorTarget(target);
-    setRecolorOpen(true);
-  };
-  const closeRecolor = () => { setRecolorOpen(false); setColorPickActive(false); setPreviewColorReplacement(null); };
-  const commitColorReplacement = (rule: Omit<ColorReplacement, "id">) => {
-    if (selected?.type !== "character") return;
-    mutateSelected((item) => {
-      item.colorReplacements = [...(item.colorReplacements || []), { ...rule, id: `cr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` }];
-    });
-  };
-  const removeColorReplacement = (id: string) => mutateSelected((item) => { item.colorReplacements = (item.colorReplacements || []).filter((rule) => rule.id !== id); });
-  const resetColorReplacements = () => mutateSelected((item) => { item.colorReplacements = []; });
-  // Eyedropper: the source colour under the pointer becomes the panel's "Find" colour.
-  const pickCharacterColor = (clientX: number, clientY: number) => {
-    setColorPickActive(false);
-    if (selected?.type !== "character") return;
-    const frame = frameAccessRef.current?.(selected.id);
-    const rect = frame?.getBoundingClientRect();
-    if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
-    try {
-      const colorAt = (frame.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null)?.cbColorAt;
-      const result = typeof colorAt === "function"
-        ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, pickScopeRef.current === "*" ? "" : pickScopeRef.current)
-        : null;
-      if (result) setPickedColor((previous) => ({ color: result.original, nonce: (previous?.nonce || 0) + 1 }));
-      else showNotice("No character colour there. Click on the character's artwork.");
-    } catch { /* player not reachable */ }
-  };
-
   // Shift+Cmd/Ctrl+F opens Find and Replace (Cmd+F is Paste in Front); Esc cancels its canvas eyedropper.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -698,7 +803,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         if (element && (element.isContentEditable || /^(input|textarea|select)$/i.test(element.tagName))) return;
         event.preventDefault();
         setFindReplaceOpen(true);
-        setRailHighlight("find");
+        setRailHighlight("colour");
       }
     };
     window.addEventListener("keydown", onKey, { capture: true });
@@ -723,10 +828,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [boxPicking]);
 
-  // Alt/Option flips the Lighten / Darken tool to darken (cursor shows − instead of +).
+  // Alt/Option reverses the Light/Dark tool (cursor and magnifier show − instead of +, or back).
   useEffect(() => {
-    if (activeTool !== "tone") { setToneDarken(false); return; }
-    const sync = (event: KeyboardEvent | PointerEvent) => setToneDarken(event.altKey);
+    if (activeTool !== "tone") { setToneReverse(false); return; }
+    const sync = (event: KeyboardEvent | PointerEvent) => setToneReverse(event.altKey);
     window.addEventListener("keydown", sync);
     window.addEventListener("keyup", sync);
     window.addEventListener("pointermove", sync);
@@ -737,35 +842,84 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     };
   }, [activeTool]);
 
-  // ---- Lighten / Darken tool. A click finds the ORIGINAL colour under the pointer (as the eyedropper
-  // does) and adds or updates one recolour rule for it, moving only its lightness (hue and saturation
-  // stay). Repeated clicks keep adjusting the same rule; back at the original, the rule is removed.
-  const adjustCharacterTone = (clientX: number, clientY: number, darker: boolean, fine: boolean) => {
-    if (selected?.type !== "character") return;
+  /** The text layer under a point on the stage (topmost), if any. */
+  const textLayerAt = (clientX: number, clientY: number) => {
+    for (const element of document.elementsFromPoint(clientX, clientY)) {
+      const id = (element as HTMLElement).closest?.<HTMLElement>(".cb-stage-text[data-editor-object-id]")?.dataset.editorObjectId;
+      const layer = id ? draftRef.current?.objects.find((item) => item.id === id) : undefined;
+      if (layer?.type === "text" && !layer.locked && !layer.hidden) return layer;
+    }
+    return null;
+  };
+
+  // ---- Light/Dark tool. A click makes the colour clicked lighter or darker (hue and saturation stay);
+  // with Include Stroke its outlines, and with Include Shadow its shadows, change with it in the same
+  // ratio. On text: its colour, outline and shadow colours. On the selected character: the ORIGINAL
+  // colour under the pointer (as the eyedropper finds it) gets a recolour rule; Include Stroke adds the
+  // outline colours of the shapes filled with it, Include Shadow the darker colours of its shading
+  // family (cbColorRelatives). Repeated clicks keep adjusting the same rules; a colour back at its
+  // original loses its rule.
+  const adjustTone = (clientX: number, clientY: number, reverse: boolean, fine: boolean) => {
+    const darker = (toneDirection === "dark") !== reverse;
+    const delta = (darker ? -1 : 1) * (fine ? 0.03 : 0.08);
+    const text = textLayerAt(clientX, clientY);
+    if (text) {
+      mutate((data) => {
+        const item = data.objects.find((object) => object.id === text.id);
+        if (!item) return;
+        const before = normalizeHex(item.fillColor) || "#000000";
+        const after = shiftLightness(before, delta);
+        item.fillColor = after;
+        if (toneStroke && item.textStrokeColor) item.textStrokeColor = shiftLike(normalizeHex(item.textStrokeColor) || "#000000", before, after);
+        if (toneShadow && item.textShadowColor) item.textShadowColor = shiftLike(normalizeHex(item.textShadowColor) || "#000000", before, after);
+      });
+      return;
+    }
+    if (selected?.type !== "character") { showNotice("Select a character first, then click its colours, or click a text layer."); return; }
     const scope = activeCharacterPart || "*";
+    const scopeArg = scope === "*" ? "" : scope;
     const frame = frameAccessRef.current?.(selected.id);
     const rect = frame?.getBoundingClientRect();
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
+    type PlayerColours = Window & {
+      cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null;
+      cbColorPalette?: (scope: string) => { color: string; current: string }[];
+      cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[] };
+    };
     let original = "";
+    let palette: { color: string; current: string }[] = [];
+    let relatives = { strokes: [] as string[], shadows: [] as string[] };
     try {
-      const colorAt = (frame.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null)?.cbColorAt;
-      const result = typeof colorAt === "function" ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, scope === "*" ? "" : scope) : null;
-      original = result?.original || "";
-    } catch { original = ""; }
-    if (!/^#[0-9a-f]{6}$/i.test(original)) { showNotice("No character colour there. Click on the character's artwork."); return; }
-    original = original.toLowerCase();
-    // An existing rule for this colour (e.g. a find-and-replace) is adjusted from its current result.
-    const existing = [...(selected.colorReplacements || [])].reverse().find((rule) => rule.from === original && rule.scope === scope);
-    const next = shiftLightness(existing?.to || original, (darker ? -1 : 1) * (fine ? 0.03 : 0.08));
-    mutateSelected((item) => {
-      const rules = item.colorReplacements || [];
-      if (existing) {
-        item.colorReplacements = next === original
-          ? rules.filter((rule) => rule.id !== existing.id)
-          : rules.map((rule) => (rule.id === existing.id ? { ...rule, to: next } : rule));
-      } else {
-        item.colorReplacements = [...rules, { id: `tone-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, from: original, to: next, target: "both", scope, match: toneShades ? "shades" : "exact" }];
+      const player = frame.contentWindow as PlayerColours | null;
+      original = normalizeHex(player?.cbColorAt?.((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, scopeArg)?.original) || "";
+      if (original) {
+        palette = player?.cbColorPalette?.(scopeArg) || [];
+        if (toneStroke || toneShadow) relatives = player?.cbColorRelatives?.(original, scopeArg) || relatives;
       }
+    } catch { original = ""; }
+    if (!original) { showNotice("No character colour there. Click on the character's artwork."); return; }
+    const rules = selected.colorReplacements || [];
+    const isTone = (rule: ColorReplacement) => rule.id.startsWith("tone-") && rule.scope === scope;
+    // What a colour shows now: its own Light/Dark rule, else what the player draws.
+    const currentOf = (from: string, target?: ColorReplacement["target"]) =>
+      [...rules].reverse().find((rule) => isTone(rule) && rule.from === from && (!target || rule.target === target))?.to
+      || normalizeHex(palette.find((entry) => entry.color === from)?.current) || from;
+    const target: ColorReplacement["target"] = toneStroke ? "both" : "fill";
+    const before = currentOf(original);
+    const after = shiftLightness(before, delta);
+    const changes: { from: string; to: string; target: ColorReplacement["target"] }[] = [{ from: original, to: after, target }];
+    // Outlines and shadows follow the clicked colour's whole change from its original, so clicking
+    // back to the original puts them back exactly.
+    if (toneStroke) for (const stroke of relatives.strokes) changes.push({ from: stroke, to: shiftLike(stroke, original, after), target: "stroke" });
+    if (toneShadow) for (const shadow of relatives.shadows) changes.push({ from: shadow, to: shiftLike(shadow, original, after), target });
+    mutateSelected((item) => {
+      let list = item.colorReplacements || [];
+      changes.forEach((change, index) => {
+        // The colour clicked keeps one rule, whatever it covered before; the others one per target.
+        list = list.filter((rule) => !(isTone(rule) && rule.from === change.from && (rule.target === change.target || change.from === original)));
+        if (change.to !== change.from) list = [...list, { id: `tone-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`, from: change.from, to: change.to, target: change.target, scope, match: "exact" }];
+      });
+      item.colorReplacements = list;
     });
   };
   // Find and Replace eyedropper: the colour of whatever is under the pointer. A character gives the
@@ -904,14 +1058,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return { message, changed: true };
   };
 
-  // Stage presses while picking: the dialogs' eyedroppers first, otherwise the Lighten / Darken tool.
+  // Stage presses while picking: the dialogs' eyedroppers first, otherwise the Light/Dark tool or the
+  // Colour Dropper.
   const handleStageColorPress = (clientX: number, clientY: number, modifiers: { altKey: boolean; shiftKey: boolean }) => {
     if (frPicking) { pickDialogColour(clientX, clientY); return; }
     if (boxPicking) { pickBoxColour(clientX, clientY); return; }
-    if (colorPickActive) { pickCharacterColor(clientX, clientY); return; }
-    if (activeTool === "tone") adjustCharacterTone(clientX, clientY, modifiers.altKey, modifiers.shiftKey);
+    if (activeTool === "tone") adjustTone(clientX, clientY, modifiers.altKey, modifiers.shiftKey);
+    else if (activeTool === "eyedropper") void dropColour(clientX, clientY);
   };
-  const toneToolLive = activeTool === "tone" && selected?.type === "character";
+  // Light/Dark and the Colour Dropper work on any click on the stage.
+  const stageColourTool = activeTool === "tone" || activeTool === "eyedropper";
 
   // ---- Fill / Stroke boxes (Illustrator). What they hold depends on the selection:
   // text → its colour (no stroke); prop → its fill; nothing (or an empty layer) → the scene
@@ -963,12 +1119,28 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (hex === original && !othersApply) return rest; // back to the artwork's own colour
     return [...rest, { id: mine?.id || `box-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, from: original, to: hex, target: box, scope: boxScope, match: "exact" as const }];
   };
-  const applyBoxColour = (box: "fill" | "stroke", hex: string) => {
+  /** A colour from the Fill / Stroke box. On a character, Include Stroke / Include Shadow (Fill/Stroke
+   *  window) make the outlines and the darker shades that go with the colour (cbColorRelatives, as
+   *  Light/Dark finds them) follow the change, each keeping its difference from the colour. */
+  const applyBoxColour = (box: "fill" | "stroke", hex: string, effects?: { stroke: boolean; shadow: boolean }) => {
     if (boxState.kind === "background") mutate((data) => { data.background = hex; });
     else if ((boxState.kind === "text" || boxState.kind === "prop") && box === "fill") mutateSelected((item) => { item.fillColor = hex; });
-    else if (boxState.kind === "character") {
+    else if (boxState.kind === "character" && selected?.type === "character") {
       const original = box === "fill" ? boxState.fillOriginal : boxState.strokeOriginal;
-      if (original) mutateSelected((item) => { item.colorReplacements = withBoxRule(item.colorReplacements || [], original, box, hex); });
+      if (!original) return;
+      let relatives = { strokes: [] as string[], shadows: [] as string[] };
+      if (effects?.stroke || effects?.shadow) {
+        try {
+          const player = frameAccessRef.current?.(selected.id)?.contentWindow as (Window & { cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[] } }) | null | undefined;
+          relatives = player?.cbColorRelatives?.(original, boxScope === "*" ? "" : boxScope) || relatives;
+        } catch { /* player not reachable: the colour alone */ }
+      }
+      mutateSelected((item) => {
+        let rules = withBoxRule(item.colorReplacements || [], original, box, hex);
+        if (effects?.stroke) for (const stroke of relatives.strokes) rules = withBoxRule(rules, stroke, "stroke", followColour(stroke, original, hex));
+        if (effects?.shadow) for (const shadow of relatives.shadows) rules = withBoxRule(rules, shadow, box, followColour(shadow, original, hex));
+        item.colorReplacements = rules;
+      });
     }
   };
   // ⇄ / Shift+X: a character's fill colour and outline colour trade places.
@@ -996,33 +1168,147 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     } catch { /* player not reachable */ }
   };
 
-  const sampleCanvasColor = async () => {
-    // On a character the eyedropper loads one of its colours into the active Fill / Stroke box.
-    if (selected?.type === "character") {
-      setActiveTool("eyedropper");
-      setBoxPicking(true);
-      showNotice(`Click a colour on the character: it goes into the ${activeBox === "fill" ? "Fill" : "Stroke"} box.`);
+  // ---- Colour Dropper (i), Illustrator's Eyedropper: a click on the stage copies onto the selection.
+  // Text selected + a click on another text layer → its colour, outline, shadow and type style. A
+  // character selected + a click on its own artwork → that colour goes into the Fill / Stroke box (what
+  // Fill/Stroke then changes); elsewhere → the box's colour becomes the colour clicked. Text and
+  // pictures take the colour clicked; with nothing selected it becomes the stage background.
+  const TEXT_STYLE_KEYS = ["fillColor", "textStrokeColor", "textStrokeWidth", "textShadowColor", "textShadow", "fontFamily", "fontSize", "fontWeight", "fontStyle", "fontUrl", "lineHeight", "letterSpacing", "textAlign"] as const;
+  const dropColour = async (clientX: number, clientY: number) => {
+    // The colour clicked, read from the scene drawn at the playhead (only when it is needed).
+    const sample = async () => normalizeHex((await sampleStageColour(clientX, clientY)) || "");
+    const objects = draftRef.current?.objects || [];
+    const targets = selectedIdsRef.current.map((id) => objects.find((item) => item.id === id)).filter((item): item is EditorObject => Boolean(item) && !item!.locked);
+    const source = textLayerAt(clientX, clientY);
+    const texts = targets.filter((item) => item.type === "text" && item.id !== source?.id);
+    if (source && texts.length) {
+      mutate((data) => {
+        for (const item of data.objects) {
+          if (!texts.some((text) => text.id === item.id)) continue;
+          for (const key of TEXT_STYLE_KEYS) {
+            if (source[key] === undefined) delete item[key];
+            else (item as Record<string, unknown>)[key] = source[key];
+          }
+        }
+      });
+      showNotice(`Copied the colour and type style of “${(source.text || source.name || "text").slice(0, 24)}”.`);
       return;
     }
-    setActiveTool("eyedropper");
-    const EyeDropper = (window as WindowWithEyeDropper).EyeDropper;
-    if (!EyeDropper) {
-      showNotice("Canvas color sampling is not supported in this browser. Try Chrome or the CB Studio desktop app.");
+    if (targets.length === 1 && targets[0].type === "character") {
+      const character = targets[0];
+      const frame = frameAccessRef.current?.(character.id);
+      const rect = frame?.getBoundingClientRect();
+      if (frame && rect && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+        try {
+          const colorAt = (frame.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null)?.cbColorAt;
+          const original = normalizeHex(typeof colorAt === "function" ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, boxScope === "*" ? "" : boxScope)?.original : "");
+          if (original) {
+            setBoxPicks((previous) => ({ ...(previous?.objectId === character.id && previous.scope === boxScope ? previous : {}), objectId: character.id, scope: boxScope, [activeBox]: original }));
+            showNotice(`${activeBox === "fill" ? "Fill" : "Stroke"} box: ${original}. Fill/Stroke (<) changes it.`);
+            return;
+          }
+        } catch { /* player not reachable: use the colour clicked */ }
+      }
+      const hex = boxState[activeBox] ? await sample() : null;
+      if (hex) applyBoxColour(activeBox, hex);
+      else showNotice("Click one of the character's colours to choose it.");
       return;
     }
+    const hex = await sample();
+    if (!hex) return;
+    const fillable = targets.filter((item) => item.type === "text" || item.type === "prop");
+    if (fillable.length) {
+      mutate((data) => { for (const item of data.objects) if (fillable.some((target) => target.id === item.id)) item.fillColor = hex; });
+      return;
+    }
+    if (!targets.length) mutate((data) => { data.background = hex; });
+  };
 
-    try {
-      const { sRGBHex } = await new EyeDropper().open();
-      if (selected?.type === "text" || selected?.type === "prop") {
-        mutateSelected((item) => { item.fillColor = sRGBHex; });
-      } else {
-        mutate((data) => { data.background = sRGBHex; });
-      }
-    } catch (cause) {
-      if (!(cause instanceof DOMException && cause.name === "AbortError")) {
-        showNotice(cause instanceof Error ? cause.message : "Could not sample canvas color", "error");
-      }
+  // ---- Fill/Stroke (<): text → its colour with Include Stroke / Shadow; a character → the colour in its
+  // Fill / Stroke box; a picture → its fill; nothing selected → the stage background.
+  const openFillStroke = () => {
+    if (editingTextRef.current || selected?.type === "text") { setTextFillStrokeOpen(true); return; }
+    if (boxState.kind === "none") { showNotice("Fill/Stroke works on text, characters, pictures and the stage background."); return; }
+    const box = boxState[activeBox] ? activeBox : "fill";
+    if (!boxState[box]) { showNotice("Choose one of the character's colours first: Colour Dropper (i), then click it."); return; }
+    setActiveBox(box);
+    setBoxPicker(box);
+  };
+
+  // ---- Adjust colour (⌘J). Opening keeps each layer's colours as they are (`base`) and, for a
+  // character, its palette (every original colour and what it shows now). Preview writes the result
+  // over the base without an undo step; Create writes it once (one undo step); Cancel puts it back.
+  type AdjustState = NonNullable<typeof adjust>;
+  const openAdjust = () => {
+    const objects = draftRef.current?.objects || [];
+    const items = selectedIdsRef.current.map((id) => objects.find((item) => item.id === id))
+      .filter((item): item is EditorObject => Boolean(item) && !item!.locked && (item!.type === "character" || item!.type === "text"));
+    if (!items.length) { showNotice("Select a character or a text layer to adjust its colours."); return; }
+    const scope = items.length === 1 ? activeCharacterPart || "*" : "*";
+    const base: AdjustState["base"] = {};
+    const palettes: AdjustState["palettes"] = {};
+    for (const item of items) {
+      base[item.id] = { colorReplacements: item.colorReplacements?.map((rule) => ({ ...rule })), fillColor: item.fillColor, textStrokeColor: item.textStrokeColor, textShadowColor: item.textShadowColor };
+      if (item.type !== "character") continue;
+      try {
+        const list = (frameAccessRef.current?.(item.id)?.contentWindow as (Window & { cbColorPalette?: (scope: string) => AdjustState["palettes"][string]["entries"] }) | null | undefined)?.cbColorPalette?.(scope === "*" ? "" : scope);
+        if (Array.isArray(list) && list.length) palettes[item.id] = { scope, entries: list.map((entry) => ({ ...entry })) };
+      } catch { /* player not reachable */ }
     }
+    if (items.every((item) => item.type === "character" && !palettes[item.id])) { showNotice("The character is still loading. Try again in a moment."); return; }
+    const label = items.length > 1 ? `${items.length} layers` : scope !== "*" ? `${items[0].name} · ${partLabel(items[0], scope)}` : items[0].type === "text" ? (items[0].text || items[0].name || "Text").slice(0, 32) : items[0].name;
+    setAdjust({ ids: items.map((item) => item.id), label, hasShadow: items.some((item) => item.type === "text"), base, palettes });
+  };
+  const adjustPatches = (state: AdjustState, settings: AdjustSettings) => {
+    const patches: Record<string, Partial<EditorObject>> = {};
+    if (isIdentity(settings)) return patches;
+    for (const id of state.ids) {
+      const base = state.base[id];
+      const palette = state.palettes[id];
+      if (palette) {
+        const target: ColorReplacement["target"] | null = settings.fill && settings.stroke ? "both" : settings.fill ? "fill" : settings.stroke ? "stroke" : null;
+        if (!target) continue;
+        let rules = [...(base.colorReplacements || [])];
+        palette.entries.forEach((entry, index) => {
+          if (target === "fill" ? !entry.fills : target === "stroke" ? !entry.strokes : !entry.fills && !entry.strokes) return;
+          const current = normalizeHex(entry.current) || entry.color;
+          const to = adjustHex(current, settings);
+          if (to === current) return;
+          rules = rules.filter((rule) => !(rule.from === entry.color && rule.scope === palette.scope && rule.target === target && rule.match === "exact"));
+          rules.push({ id: `adjust-${Date.now()}-${index}`, from: entry.color, to, target, scope: palette.scope, match: "exact" });
+        });
+        patches[id] = { colorReplacements: rules };
+        continue;
+      }
+      const patch: Partial<EditorObject> = {};
+      if (settings.fill) patch.fillColor = adjustHex(normalizeHex(base.fillColor) || "#ffffff", settings);
+      if (settings.stroke && base.textStrokeColor) patch.textStrokeColor = adjustHex(normalizeHex(base.textStrokeColor) || "#000000", settings);
+      if (settings.shadow && base.textShadowColor) patch.textShadowColor = adjustHex(normalizeHex(base.textShadowColor) || "#000000", settings);
+      patches[id] = patch;
+    }
+    return patches;
+  };
+  /** The layers as they were when Adjust colour opened, with `patches` on top; no undo step. */
+  const showAdjusted = (state: AdjustState, patches: Record<string, Partial<EditorObject>>) => {
+    setDraft((current) => (current ? { ...current, objects: current.objects.map((item) => (state.base[item.id] ? { ...item, ...state.base[item.id], ...patches[item.id] } : item)) } : current));
+  };
+  const previewAdjust = (settings: AdjustSettings | null) => { if (adjust) showAdjusted(adjust, settings ? adjustPatches(adjust, settings) : {}); };
+  const cancelAdjust = () => { if (adjust) showAdjusted(adjust, {}); setAdjust(null); };
+  const createAdjust = (settings: AdjustSettings) => {
+    if (!adjust) return;
+    const patches = adjustPatches(adjust, settings);
+    showAdjusted(adjust, {});
+    if (Object.keys(patches).length) mutate((data) => { for (const item of data.objects) if (patches[item.id]) Object.assign(item, patches[item.id]); });
+    setAdjust(null);
+  };
+
+  // The Colour palette's keys (Light/Dark ⌘L, Fill/Stroke <, Adjust colour ⌘J, Colour Dropper i).
+  const colourActionsRef = useRef({ lightDark: () => undefined as void, fillStroke: () => undefined as void, adjust: () => undefined as void, dropper: () => undefined as void });
+  colourActionsRef.current = {
+    lightDark: () => { setActiveTool((tool) => (tool === "tone" ? "select" : "tone")); setRailHighlight("colour"); },
+    fillStroke: openFillStroke,
+    adjust: openAdjust,
+    dropper: () => { setActiveTool("eyedropper"); setRailHighlight("colour"); },
   };
 
   const draftRef = useRef(draft);
@@ -1085,6 +1371,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     noticeTimerRef.current = window.setTimeout(() => setNotice(null), 4000);
   }, []);
   const selectEditorObject = useCallback((id: string | null) => {
+    // Another object (or none) leaves the character it was inside.
+    if (id !== useEditorStore.getState().selectedObjectId) { setCharacterIsolated(false); setEnteredGroupId(null); }
     selectObject(id);
     setActiveCharacterPart(null);
       setPartReplacementBrowserOpen(false);
@@ -1097,31 +1385,185 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     setSelection(ids);
     setActiveCharacterPart(null);
     setPartReplacementBrowserOpen(false);
+    setCharacterIsolated(false);
+    setEnteredGroupId(null);
   }, [selectEditorObject, setSelection]);
+
+  // ---- Inside a character, Illustrator style. The level you are in (the container): the character
+  // itself (""), an entered part ("head"), or the part a selected piece sits in. A click on empty
+  // canvas deselects but stays in that level; a double-click there, Esc or ⇦ go out one level.
+  const containerOfPart = (part: string | null, entered: boolean) => {
+    if (!part) return "";
+    if (entered) return part;
+    const parents = Array.from(new Set(partMembers(part).map(parentPartKey)));
+    return parents.length === 1 ? parents[0] : "";
+  };
+  const isolationEmptyClick = useCallback(() => {
+    const { part, entered } = partLevelRef.current;
+    if (!part || entered) return;
+    if (enteredGroupRef.current) { setActiveCharacterPart(null); setPartReplacementBrowserOpen(false); return; }
+    const container = containerOfPart(part, false);
+    setActiveCharacterPart(container || null);
+    setPartReplacementBrowserOpen(Boolean(container));
+  }, []);
+  const stepOutPartIsolation = useCallback(() => {
+    const { part, entered } = partLevelRef.current;
+    if (enteredGroupRef.current) {
+      const group = (isolatedObjectRef.current?.partGroups || []).find((item) => item.id === enteredGroupRef.current);
+      setEnteredGroupId(null);
+      setActiveCharacterPart(group ? group.members.join("|") : null);
+      setPartReplacementBrowserOpen(false);
+      return;
+    }
+    if (part && entered) { setPartReplacementBrowserOpen(false); return; }
+    if (part) {
+      const container = containerOfPart(part, false);
+      if (container) { setActiveCharacterPart(container); setPartReplacementBrowserOpen(false); return; }
+      setActiveCharacterPart(null);
+    }
+    setPartReplacementBrowserOpen(false);
+    setCharacterIsolated(false);
+  }, []);
+  /** The isolation bar: back to the character (""), or into a part on the path. */
+  const goToPartLevel = useCallback((level: string) => {
+    setEnteredGroupId(null);
+    setActiveCharacterPart(level || null);
+    setPartReplacementBrowserOpen(Boolean(level));
+    setCharacterIsolated(true);
+  }, []);
+  /** Shift+click: adds the part (or its whole group) to the selection, or takes it out. */
+  const togglePartSelection = useCallback((partKey: CharacterPartKey) => {
+    const group = groupForPart(isolatedObjectRef.current, partKey, enteredGroupRef.current);
+    const { part, entered } = partLevelRef.current;
+    setActiveCharacterPart(togglePartKey(entered ? null : part, group ? group.members.join("|") : partKey));
+    setPartReplacementBrowserOpen(false);
+    setCharacterIsolated(true);
+  }, []);
+  /** Drag-select inside a character: every part the box touched (Shift adds to the selection). */
+  const selectPartsInBox = useCallback((keys: CharacterPartKey[], additive: boolean) => {
+    const object = isolatedObjectRef.current;
+    const picked = keys.flatMap((key) => groupForPart(object, key, enteredGroupRef.current)?.members || [key]);
+    const { part, entered } = partLevelRef.current;
+    const next = joinPartKeys([...(additive && !entered ? partMembers(part) : []), ...picked]);
+    if (!next && !additive) { isolationEmptyClick(); return; }
+    if (next) { setActiveCharacterPart(next); setPartReplacementBrowserOpen(false); }
+  }, [isolationEmptyClick]);
 
   // ---- Animate frame timeline: frame selection, keyframe/frame commands, empty layers.
   const [frameSelection, setFrameSelection] = useState<FrameSelection>(null);
   const frameSelectionRef = useRef<FrameSelection>(null);
   frameSelectionRef.current = frameSelection;
+  // Frames selected because something was picked on the canvas (not on the timeline): Delete then
+  // removes the object, and F5 / F6 / F7 work at the playhead, as in Animate.
+  const frameSelectionFromCanvasRef = useRef(false);
   const playheadRef = useRef(playhead);
   playheadRef.current = playhead;
 
   const selectFrames = useCallback((selection: FrameSelection) => {
+    frameSelectionFromCanvasRef.current = false;
     setFrameSelection(selection);
     if (!selection) return;
     setPlaying(false);
-    // The selected layers are selected on the canvas too.
-    const ids = selectionLayerIds(selection);
+    // The selected layers are selected on the canvas too (every object of a layer that holds several).
+    const ids = Array.from(new Set(selectionLayerIds(selection).flatMap((key) => {
+      const members = rowMembersOf(draft?.objects || [], key).map((item) => item.id);
+      return members.length ? members : [key];
+    })));
     if (ids.length > 1) {
       const current = selectedIdsRef.current;
       if (current.length !== ids.length || ids.some((id) => !current.includes(id))) changeSelection(ids);
-    } else if (selectedObjectId !== selection.layerId) selectEditorObject(selection.layerId);
+    } else if (selectedObjectId !== ids[0]) selectEditorObject(ids[0]);
     // The playhead follows the selection but never goes past the last frame.
     setPlayhead(Math.min(duration, selection.from / TIMELINE_FPS));
-  }, [changeSelection, duration, selectEditorObject, selectedObjectId, setPlaying]);
+  }, [changeSelection, draft, duration, selectEditorObject, selectedObjectId, setPlaying]);
   // Picking something on the canvas ends the frame selection (Delete then removes objects again).
-  const selectFromCanvas = useCallback((id: string | null) => { setFrameSelection(null); selectEditorObject(id); }, [selectEditorObject]);
-  const changeSelectionFromCanvas = useCallback((ids: string[]) => { setFrameSelection(null); changeSelection(ids); }, [changeSelection]);
+  // Animate: whatever is picked on the canvas (an object, a character, a part in it) selects all
+  // frames of its layer on the timeline; the playhead stays where it is.
+  const layerFramesSelection = useCallback((ids: string[]): FrameSelection => {
+    const fps = TIMELINE_FPS;
+    const lastSceneFrame = Math.max(0, Math.ceil(duration * fps - 1e-6) - 1);
+    const picked = new Set(ids);
+    const objects = draft?.objects || [];
+    const rows = [...objects].reverse().filter((item) => picked.has(item.id));
+    if (!rows.length) return null;
+    // Rows: a layer, or a whole ⌘G group (its one row) unless the group is entered.
+    const keyOf = (item: EditorObject) => rowKeyOf(item, enteredObjectGroupRef.current);
+    const keys = Array.from(new Set(rows.map(keyOf)));
+    const members = objects.filter((item) => keys.includes(keyOf(item)) && item.type !== "empty");
+    if (!members.length) return { layerId: keys[0], ...(keys.length > 1 ? { layerIds: keys } : {}), from: 0, to: lastSceneFrame };
+    const spans = members.map((item) => {
+      const start = Math.max(0, Number(item.startTime || 0));
+      const startFrame = Math.round(start * fps);
+      return { from: startFrame, to: item.actionDurationMs ? Math.max(startFrame, Math.round((start + item.actionDurationMs / 1000) * fps) - 1) : Math.max(startFrame, lastSceneFrame) };
+    });
+    return { layerId: keys[0], ...(keys.length > 1 ? { layerIds: keys } : {}), from: Math.min(...spans.map((span) => span.from)), to: Math.max(...spans.map((span) => span.to)) };
+  }, [draft, duration]);
+  /** A pick on the canvas takes whole ⌘G groups (not the group that was entered); picking
+   *  something outside the entered group leaves it. */
+  const withObjectGroups = useCallback((ids: string[]) => {
+    const objects = draftRef.current?.objects || [];
+    const groupOf = (id: string) => objects.find((item) => item.id === id)?.group;
+    let entered = enteredObjectGroupRef.current;
+    if (entered && ids.some((id) => groupOf(id) !== entered)) { entered = null; enteredObjectGroupRef.current = null; setEnteredObjectGroup(null); }
+    const groups = new Set(ids.map(groupOf).filter((group): group is string => Boolean(group) && group !== entered));
+    const members = objects.filter((item) => item.group && groups.has(item.group) && !item.locked).map((item) => item.id);
+    return Array.from(new Set([...ids, ...members]));
+  }, []);
+  const selectFromCanvas = useCallback((id: string | null) => {
+    const ids = id ? withObjectGroups([id]) : [];
+    if (ids.length > 1) changeSelection(ids);
+    else selectEditorObject(id);
+    const selection = ids.length ? layerFramesSelection(ids) : null;
+    frameSelectionFromCanvasRef.current = Boolean(selection);
+    setFrameSelection(selection);
+  }, [changeSelection, layerFramesSelection, selectEditorObject, withObjectGroups]);
+  const changeSelectionFromCanvas = useCallback((picked: string[]) => {
+    const ids = withObjectGroups(picked);
+    changeSelection(ids);
+    const selection = ids.length ? layerFramesSelection(ids) : null;
+    frameSelectionFromCanvasRef.current = Boolean(selection);
+    setFrameSelection(selection);
+  }, [changeSelection, layerFramesSelection, withObjectGroups]);
+  /** Double-click on a group: go inside it, with the clicked object picked. */
+  const enterObjectGroup = useCallback((group: string, id: string) => {
+    enteredObjectGroupRef.current = group;
+    setEnteredObjectGroup(group);
+    selectFromCanvas(id);
+  }, [selectFromCanvas]);
+  /** Esc / double-click on empty canvas inside a group: out of it, with the whole group picked. */
+  const stepOutObjectGroup = useCallback(() => {
+    const group = enteredObjectGroupRef.current;
+    enteredObjectGroupRef.current = null;
+    setEnteredObjectGroup(null);
+    const members = (draftRef.current?.objects || []).filter((item) => group && item.group === group && !item.locked).map((item) => item.id);
+    if (members.length) changeSelectionFromCanvas(members);
+  }, [changeSelectionFromCanvas]);
+  /** A group's registration point dragged on the canvas (where it is drawn now). With motion, the
+   *  keyframes are adjusted so the group stays where it is (lib/groupMotion.ts movePivot). */
+  const setGroupPivot = useCallback((group: string, x: number, y: number) => {
+    mutate((data) => {
+      const motion = groupMotionIn(data.objects, group) || {};
+      if (motion.pivotX == null || motion.pivotY == null || !(motion.keyframes || []).length) { writeGroupMotion(data.objects, group, { ...motion, pivotX: x, pivotY: y }); return; }
+      const own = removeGroupPose({ x, y, rotation: 0, scale: 1 }, motion, resolveGroupPose(motion, playhead));
+      writeGroupMotion(data.objects, group, movePivot(motion, own.x, own.y));
+    });
+  }, [mutate, playhead]);
+  /** The group row on the timeline (its ⤵ button, or a double-click on its frames): go inside it. */
+  const enterGroupRow = useCallback((key: string) => {
+    if (!isGroupRow(key)) return;
+    enteredObjectGroupRef.current = groupOfRow(key);
+    setEnteredObjectGroup(groupOfRow(key));
+    selectEditorObject(null);
+    frameSelectionFromCanvasRef.current = false;
+    setFrameSelection(null);
+  }, [selectEditorObject]);
+  // The entered group ends when its objects are gone or something outside it gets selected.
+  useEffect(() => {
+    if (!enteredObjectGroup) return;
+    const objects = draft?.objects || [];
+    if (!objects.some((item) => item.group === enteredObjectGroup)
+      || selectedObjectIds.some((id) => objects.find((item) => item.id === id)?.group !== enteredObjectGroup)) setEnteredObjectGroup(null);
+  }, [draft, enteredObjectGroup, selectedObjectIds]);
 
   // Frame commands act on every selected layer. Each layer is checked on its own: layers the
   // command doesn't fit are skipped, and the reason is shown only when it fits none of them.
@@ -1366,11 +1808,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       // Animate timeline keys: K/F6 keyframe, F7 blank keyframe, F5 insert frame,
       // Shift+F5 remove frames, Shift+F6 clear keyframe, "," / "." previous / next frame.
       const timelineCommand = (action: FrameAction) => {
-        const selection = frameSelectionRef.current;
-        const layerId = selection?.layerId || selectedIdsRef.current[0];
-        if (!layerId) { showNotice("Select a layer or a frame on the timeline first"); return; }
+        const selection = frameSelectionFromCanvasRef.current ? null : frameSelectionRef.current;
+        // Nothing picked on the timeline: every selected object (all of a group) at the playhead.
+        const objects = draftRef.current?.objects || [];
+        const layerIds = selection ? selectionLayerIds(selection) : Array.from(new Set(selectedIdsRef.current.map((id) => {
+          const item = objects.find((object) => object.id === id);
+          return item ? rowKeyOf(item, enteredObjectGroupRef.current) : id;
+        })));
+        if (!layerIds.length) { showNotice("Select a layer or a frame on the timeline first"); return; }
         const frame = selection ? selection.from : Math.floor(playheadRef.current * TIMELINE_FPS + 1e-6);
-        frameActionRef.current(action, selection ? selectionLayerIds(selection) : layerId, frame, selection ? selection.to : frame);
+        frameActionRef.current(action, layerIds, frame, selection ? selection.to : frame);
       };
       const functionKey = !event.metaKey && !event.ctrlKey && !event.altKey && !isEditableTarget(event.target);
       if (functionKey && (event.key === "F5" || event.key === "F6" || event.key === "F7")) {
@@ -1446,7 +1893,18 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         setRailHighlight("edit");
         return;
       }
-      if (event.key === "Escape" && !activeCharacterPart) setActiveTool((tool) => (tool === "scale" || tool === "tone" || tool === "reflect" || tool === "zoom" || tool === "text" ? "select" : tool));
+      // Colour palette: Colour Dropper (i) and Fill/Stroke (<).
+      if (plainKey && !event.shiftKey && event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        colourActionsRef.current.dropper();
+        return;
+      }
+      if (plainKey && event.key === "<") {
+        event.preventDefault();
+        colourActionsRef.current.fillStroke();
+        return;
+      }
+      if (event.key === "Escape" && !activeCharacterPart) setActiveTool((tool) => (tool === "scale" || tool === "tone" || tool === "eyedropper" || tool === "reflect" || tool === "zoom" || tool === "text" ? "select" : tool));
 
       const commandOrControl = event.metaKey || event.ctrlKey;
       // Cmd/Ctrl+S save (.cb), Shift = Save As; Cmd/Ctrl+O open a .cb — also while typing.
@@ -1496,6 +1954,15 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (commandOrControl && event.shiftKey && !event.altKey && (event.code === "KeyL" || event.code === "KeyC" || event.code === "KeyR")
         && (!isEditableTarget(event.target) || (event.target as HTMLElement).closest?.(".cb-stage-text-editing"))) {
         if (textAlignRef.current(event.code === "KeyL" ? "left" : event.code === "KeyC" ? "center" : "right")) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+      }
+      // Colour palette: Light/Dark (⌘L) and Adjust colour (⌘J).
+      if (commandOrControl && !event.altKey && !event.shiftKey && (event.code === "KeyL" || event.code === "KeyJ") && !isEditableTarget(event.target)
+        && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (event.code === "KeyL") colourActionsRef.current.lightDark();
+        else colourActionsRef.current.adjust();
+        return;
       }
       if (!commandOrControl || isEditableTarget(event.target)) return;
 
@@ -1824,13 +2291,22 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     });
   }, []);
 
+  /** Moves given where the objects are drawn: a whole ⌘G group's move goes into its motion; any
+   *  other object is moved itself (a keyframed character at its keyframe). */
+  const moveInto = (data: EditorData, moves: Array<{ id: string; x: number; y: number }>) => {
+    const handled = applyWholeGroupEdits(data, moves.map(({ id, x, y }) => ({ id, patch: { x, y } })), playhead, enteredObjectGroupRef.current);
+    const byId = new Map(moves.map((entry) => [entry.id, entry]));
+    for (const item of data.objects) {
+      const target = byId.get(item.id);
+      if (!target || handled.has(item.id)) continue;
+      const own = toOwnPatch(item, { x: target.x, y: target.y }, playhead);
+      if (item.type === "character" && (item.keyframes || []).length > 0) moveKeyframedPosition(item, playhead, own.x!, own.y!);
+      else { item.x = own.x!; item.y = own.y!; }
+    }
+  };
   const moveObject = useCallback((id: string, x: number, y: number) => {
-    mutate((data) => {
-      const item = data.objects.find((object) => object.id === id);
-      if (!item) return;
-      if (item.type === "character" && (item.keyframes || []).length > 0) moveKeyframedPosition(item, playhead, x, y);
-      else { item.x = x; item.y = y; }
-    });
+    mutate((data) => moveInto(data, [{ id, x, y }]));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mutate, playhead]);
 
   /** Option/Alt + drag (Illustrator): a copy stays where the layers were, directly below them; the
@@ -1839,29 +2315,25 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const byId = new Map(moves.map((entry) => [entry.id, entry]));
     const stamp = Date.now();
     mutate((data) => {
+      const copies: EditorObject[] = [];
       data.objects = data.objects.flatMap((item, index) => {
-        const target = byId.get(item.id);
-        if (!target) return [item];
+        if (!byId.has(item.id)) return [item];
         const copy = clone(item);
         copy.id = `${String(item.id).split("-copy-")[0]}-copy-${stamp}${index}`;
-        if (item.type === "character" && (item.keyframes || []).length > 0) moveKeyframedPosition(item, playhead, target.x, target.y);
-        else { item.x = target.x; item.y = target.y; }
+        copies.push(copy);
         return [copy, item];
       });
+      // The copies get groups of their own first, so a moved group's motion is not theirs.
+      retagCopies(copies, stamp);
+      moveInto(data, moves);
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mutate, playhead]);
 
   /** Multi-selection drag: every moved layer is committed in one edit (one undo step). */
   const moveObjects = useCallback((moves: Array<{ id: string; x: number; y: number }>) => {
-    const byId = new Map(moves.map((entry) => [entry.id, entry]));
-    mutate((data) => {
-      for (const item of data.objects) {
-        const target = byId.get(item.id);
-        if (!target) continue;
-        if (item.type === "character" && (item.keyframes || []).length > 0) moveKeyframedPosition(item, playhead, target.x, target.y);
-        else { item.x = target.x; item.y = target.y; }
-      }
-    });
+    mutate((data) => moveInto(data, moves));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mutate, playhead]);
 
   const applyScaleRotate = useCallback((scalePercent: number, rotateDegrees: number) => {
@@ -1889,40 +2361,32 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (next <= -180) next += 360;
       return next;
     };
-    mutate((data) => {
-      const states = data.objects
-        .filter((item) => ids.has(item.id) && item.type !== "background" && item.type !== "audio")
-        .map((item) => ({
-          item,
-          current: item.type === "character"
-            ? resolveCharacterTransformAtTime(item, playhead)
-            : { x: item.x, y: item.y, scale: item.scale || 1, rotation: item.rotation || 0 },
-        }));
-      if (!states.length) return;
-      const xs = states.map((state) => state.current.x);
-      const ys = states.map((state) => state.current.y);
-      const centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
-      const centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
-      for (const { item, current } of states) {
-        let x = current.x;
-        let y = current.y;
-        if (states.length > 1) {
-          // Group transform: positions scale and turn (clockwise, like Animate) around the selection centre.
-          const dx = (current.x - centerX) * factor;
-          const dy = (current.y - centerY) * factor;
-          x = centerX + dx * cos - dy * sin;
-          y = centerY + dx * sin + dy * cos;
-        }
-        const scale = Math.min(20, Math.max(0.02, Number(current.scale || 1) * factor));
-        const rotation = wrapDegrees(Number(current.rotation || 0) + rotateDegrees);
-        // Character keyframes animate position only; scale and rotation live on the object.
-        if (item.type === "character" && (item.keyframes || []).length > 0) moveKeyframedPosition(item, playhead, x, y);
-        else { item.x = x; item.y = y; }
-        item.scale = scale; item.rotation = rotation;
+    // Where the objects are drawn now; several turn and scale about one point: a whole ⌘G group's
+    // registration point, else the selection's centre. The commit sorts out group motion.
+    const states = (draft?.objects || [])
+      .filter((item) => ids.has(item.id) && item.type !== "background" && item.type !== "audio")
+      .map((item) => ({ item, current: resolveObjectTransformAtTime(item, playhead) }));
+    if (!states.length) return;
+    const xs = states.map((state) => state.current.x);
+    const ys = states.map((state) => state.current.y);
+    const group = states[0].item.group;
+    const wholeGroup = group && group !== enteredObjectGroup && (draft?.objects || []).filter((item) => item.group === group && !item.locked).every((item) => ids.has(item.id));
+    const pivot = (wholeGroup && groupPivotAtTime(states[0].item.groupMotion, playhead))
+      || { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+    transformObjectsRef.current(states.map(({ item, current }) => {
+      let x = current.x;
+      let y = current.y;
+      if (states.length > 1) {
+        // Positions scale and turn (clockwise, like Animate) around that point.
+        const dx = (current.x - pivot.x) * factor;
+        const dy = (current.y - pivot.y) * factor;
+        x = pivot.x + dx * cos - dy * sin;
+        y = pivot.y + dx * sin + dy * cos;
       }
-    });
+      return { id: item.id, patch: { x, y, scale: Math.min(20, Math.max(0.02, Number(current.scale || 1) * factor)), rotation: wrapDegrees(Number(current.rotation || 0) + rotateDegrees) } };
+    }));
     // transformCharacterPart is declared below; it only depends on mutate and playhead (listed here).
-  }, [activeCharacterPart, draft, mutate, playhead, selectedObjectIds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeCharacterPart, draft, enteredObjectGroup, mutate, playhead, selectedObjectIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Reflect (Illustrator). One layer mirrors in place around its centre; several also mirror
   // their positions around the selection's centre; a selected part mirrors around its registration
@@ -2002,9 +2466,32 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // ---- Copy / Cut / Paste layers (Cmd/Ctrl+C, X, V; Cmd/Ctrl+Shift+V = Paste in Place), as in
   // Animate. Whole layers with everything on them (pose, part edits, colours, keyframes, timing).
   // The clipboard lives in this browser / app while it is open, so it works across scenes and projects.
+  // Body parts selected inside a character: they are copied as a part layer (a copy of the
+  // character that draws only those parts, with their animation and edits).
+  const selectedPartsForClipboard = () => {
+    const object = draft?.objects.find((item) => item.id === selectedObjectId);
+    if (!object || object.type !== "character" || !activeCharacterPart || partReplacementBrowserOpen) return null;
+    return { object, keys: partMembers(activeCharacterPart) };
+  };
+  const copyParts = (): boolean => {
+    const picked = selectedPartsForClipboard();
+    if (!picked) return false;
+    const { object, keys } = picked;
+    const layer: EditorObject = { ...clone(object), name: `${object.name} · ${keys.length === 1 ? partTitle(keys[0]) : `${keys.length} parts`}`, onlyParts: keys };
+    const point = resolveCharacterTransformAtTime(object, playhead);
+    // One part: remember its library symbol, so it can replace a part of another character.
+    let symbol = "";
+    if (keys.length === 1) {
+      try { symbol = (frameAccessRef.current?.(object.id)?.contentWindow as (Window & { cbPartSymbolName?: (key: string) => string }) | null | undefined)?.cbPartSymbolName?.(keys[0]) || ""; } catch { symbol = ""; }
+    }
+    writeLayerClipboard({ objects: [layer], centre: { x: point.x, y: point.y }, parts: { keys, assetUrl: object.assetUrl, characterName: object.name, symbol } });
+    showNotice(`Copied ${keys.length === 1 ? partTitle(keys[0]) : `${keys.length} parts`} — ⌘V pastes them as a layer, or onto a selected part of a character to replace it.`);
+    return true;
+  };
   const copyLayers = (): boolean => {
     if (!draft) return false;
-    if (activeCharacterPart) { showNotice("Press Esc to select the whole character, then copy."); return false; }
+    if (activeCharacterPart && !partReplacementBrowserOpen) return copyParts();
+    if (activeCharacterPart || characterIsolated) { showNotice("Select the parts to copy (click, Shift+click or drag a box), or press Esc to copy the whole character."); return false; }
     const ids = new Set(selectedObjectIds);
     const objects = draft.objects.filter((item) => ids.has(item.id) && item.type !== "empty");
     if (!objects.length) return false;
@@ -2017,6 +2504,20 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return true;
   };
   const cutLayers = () => {
+    const picked = activeCharacterPart && !partReplacementBrowserOpen ? selectedPartsForClipboard() : null;
+    if (picked) {
+      // Cut parts: copied, then hidden in the character (like Delete).
+      if (!copyParts()) return;
+      mutate((data) => {
+        const item = data.objects.find((entry) => entry.id === picked.object.id);
+        if (!item) return;
+        item.partOverrides = { ...(item.partOverrides || {}) };
+        for (const key of picked.keys) item.partOverrides[key] = { ...(item.partOverrides[key] || {}), visible: false };
+      });
+      setActiveCharacterPart(null);
+      setPartReplacementBrowserOpen(false);
+      return;
+    }
     if (!copyLayers()) return;
     const ids = new Set(selectedObjectIds);
     mutate((data) => { data.objects = data.objects.filter((item) => !ids.has(item.id)); });
@@ -2027,10 +2528,24 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const pasteLayers = (inPlace: boolean, where: "top" | "front" | "back" = "top") => {
     const clip = readLayerClipboard();
     if (!clip || !draft) { showNotice("Nothing to paste. Select layers and press Cmd/Ctrl+C first."); return; }
+    // A copied body part pasted onto one selected part of a character replaces that part with it
+    // (it keeps playing its own animation); anywhere else it is pasted as a part layer.
+    const targetCharacter = draft.objects.find((item) => item.id === selectedObjectId);
+    if (clip.parts && targetCharacter?.type === "character" && activeCharacterPart && !partReplacementBrowserOpen && !isMultiPartKey(activeCharacterPart)) {
+      const parts = clip.parts;
+      if (!parts.symbol || !parts.assetUrl) { showNotice("Copy a single part to replace a part with it (several parts paste as a layer — press Esc first)."); return; }
+      const targetPart = activeCharacterPart;
+      void exportSourceOfPlayer(parts.assetUrl).then((source) => {
+        if (!source) { showNotice("Couldn't find the copied part's character file.", "error"); return; }
+        applyLibraryPartReplacement(targetPart, symbolPlayerUrl(source, parts.symbol!), `${parts.characterName} · ${partTitle(parts.keys[0])}`, "source-symbol");
+        showNotice(`Replaced ${partTitle(targetPart)} with ${parts.characterName}'s ${partTitle(parts.keys[0])}.`);
+      });
+      return;
+    }
     const target = inPlace || where !== "top" ? clip.centre : (viewCenterRef.current?.() || clip.centre);
     const dx = target.x - clip.centre.x, dy = target.y - clip.centre.y;
     const stamp = Date.now();
-    const pasted = clip.objects.map((item, index) => {
+    const pasted = retagCopies(clip.objects.map((item, index) => {
       const copy = clone(item);
       copy.id = `${String(item.id).split("-copy-")[0]}-copy-${stamp}${index}`;
       if (dx || dy) {
@@ -2040,9 +2555,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         copy.keyframes = (copy.keyframes || []).map((frame) => ({ ...frame, x: Number(frame.x || 0) + dx, y: Number(frame.y || 0) + dy }));
       }
       return copy;
-    });
+    }), stamp);
     const selectedIds = new Set(selectedIdsRef.current);
     mutate((data) => {
+      // Plain paste with one layer selected (Animate): text, images and shapes go onto that layer.
+      const target = where === "top" && selectedIds.size === 1 ? data.objects.find((item) => selectedIds.has(item.id)) : undefined;
+      const sharing = pasted.filter(sharesLayers);
+      if (target && target.type !== "empty" && sharing.length && joinLayer(data, sharing, layerKeyOf(target))) {
+        data.objects.push(...pasted.filter((item) => !sharing.includes(item)));
+        return;
+      }
       const indexes = data.objects.map((item, index) => (selectedIds.has(item.id) ? index : -1)).filter((index) => index >= 0);
       const at = where === "front" ? (indexes.length ? Math.max(...indexes) + 1 : data.objects.length)
         : where === "back" ? (indexes.length ? Math.min(...indexes) : backgroundFloor(data.objects))
@@ -2052,7 +2574,155 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     setActiveCharacterPart(null);
     setPartReplacementBrowserOpen(false);
     changeSelection(pasted.map((item) => item.id));
+    // The timeline highlights the pasted objects' layers (not the frames picked before).
+    frameSelectionFromCanvasRef.current = false;
+    setFrameSelection(null);
   };
+  // ---- Distribute to Layers (Animate ⇧⌘D): each body part of the character (or each selected part)
+  // on its own layer, stacked back to front as drawn, so the character looks the same. "animated":
+  // part layers (a copy of the character drawing only that part); "still": a vector picture of the
+  // part as it is now (SVG). Distributing every part replaces the character's layer.
+  const distributeParts = async (mode: "animated" | "still") => {
+    const object = draft?.objects.find((item) => item.id === selectedObjectId);
+    if (!object || object.type !== "character") { showNotice("Select a character, or some of its parts, to distribute them to layers."); return; }
+    const selection = activeCharacterPart && !partReplacementBrowserOpen ? partMembers(activeCharacterPart) : [];
+    const all = selection.length === 0;
+    type StackPart = { key: string; label: string };
+    const player = frameAccessRef.current?.(object.id)?.contentWindow as (Window & { cbPartsByStack?: (keys?: string[]) => StackPart[] }) | null | undefined;
+    let parts: StackPart[] = [];
+    try { parts = player?.cbPartsByStack?.(all ? undefined : selection) || []; } catch { parts = []; }
+    if (!parts.length) { showNotice("No body parts were found in this character to distribute."); return; }
+    if (mode === "animated" && parts.length > 8
+      && !window.confirm(`Distribute ${parts.length} parts to layers?\n\nEach part layer plays its own copy of ${object.name}'s animation, so this many layers can make the editor slower. (Distribute as Still makes light vector pictures instead.)`)) return;
+    const stamp = Date.now();
+    const layers: EditorObject[] = mode === "still"
+      ? await stillPartLayers(object, parts, stamp)
+      : parts.map((part, index) => ({ ...clone(object), id: `${object.id}-part-${stamp}${index}`, name: `${object.name} · ${partTitle(part.key, part.label)}`, onlyParts: [part.key], partGroups: undefined, layer: undefined, layerName: undefined }));
+    if (!layers.length) return;
+    mutate((data) => {
+      const at = data.objects.findIndex((item) => item.id === object.id);
+      if (at < 0) return;
+      if (all) { data.objects.splice(at, 1, ...layers); return; }
+      const item = data.objects[at];
+      item.partOverrides = { ...(item.partOverrides || {}) };
+      for (const part of parts) item.partOverrides[part.key] = { ...(item.partOverrides[part.key] || {}), visible: false };
+      data.objects.splice(at + 1, 0, ...layers);
+    });
+    setActiveCharacterPart(null);
+    setPartReplacementBrowserOpen(false);
+    setCharacterIsolated(false);
+    setEnteredGroupId(null);
+    changeSelection(layers.map((layer) => layer.id));
+    showNotice(`Distributed ${layers.length} part${layers.length === 1 ? "" : "s"} to ${mode === "still" ? "vector picture " : ""}layers.`);
+  };
+  /** Distribute as Still: each part as a vector picture layer (SVG from the player, cbPartsToSvg),
+   *  placed exactly where the part is drawn now — same size, turn, stretch and flip as the character. */
+  async function stillPartLayers(object: EditorObject, parts: Array<{ key: string; label: string }>, stamp: number): Promise<EditorObject[]> {
+    if (!project) return [];
+    type Svg = { svg: string; x: number; y: number; width: number; height: number; playerWidth: number; playerHeight: number; skipped: Record<string, number> } | { error: string } | null;
+    const player = frameAccessRef.current?.(object.id)?.contentWindow as (Window & { cbPartsToSvg?: (keys: string[]) => Svg }) | null | undefined;
+    if (!player?.cbPartsToSvg) { showNotice("This character's player isn't ready — try again in a moment.", "error"); return []; }
+    const t = resolveCharacterTransformAtTime(object, playhead);
+    const stretchX = Number(object.stretchX ?? 1);
+    const stretchY = Number(object.stretchY ?? 1);
+    const flip = object.flipX ? -1 : 1;
+    const angle = (Number(t.rotation || 0) * Math.PI) / 180;
+    const layers: EditorObject[] = [];
+    const skipped: Record<string, number> = {};
+    for (const [index, part] of parts.entries()) {
+      showNotice(`Making vector pictures… ${index + 1} / ${parts.length}`);
+      const result = player.cbPartsToSvg([part.key]);
+      if (!result || "error" in result) continue;
+      for (const [what, count] of Object.entries(result.skipped || {})) skipped[what] = (skipped[what] || 0) + count;
+      const name = `${object.name} · ${partTitle(part.key, part.label)}`;
+      let url = "";
+      try {
+        const file = new File([result.svg], `${name.replace(/[^\w.-]+/g, "-")}.svg`, { type: "image/svg+xml" });
+        url = (await api.uploadAsset(project.id, "background", file)).url;
+      } catch { continue; }
+      // Player px → stage px, as the character is drawn (its box is the player, centred on x, y).
+      const kx = ((object.sourceWidth || result.playerWidth) * t.scale * stretchX) / result.playerWidth;
+      const ky = ((object.sourceHeight || result.playerHeight) * t.scale * stretchY) / result.playerHeight;
+      const lx = (result.x + result.width / 2 - result.playerWidth / 2) * kx * flip;
+      const ly = (result.y + result.height / 2 - result.playerHeight / 2) * ky;
+      layers.push({
+        id: `${object.id}-still-${stamp}${index}`, type: "prop", name, assetKind: "image", assetUrl: url, mimeType: "image/svg+xml",
+        sourceWidth: result.width, sourceHeight: result.height,
+        x: t.x + lx * Math.cos(angle) - ly * Math.sin(angle), y: t.y + lx * Math.sin(angle) + ly * Math.cos(angle),
+        scale: t.scale * ((object.sourceWidth || result.playerWidth) / result.playerWidth), stretchX, stretchY,
+        rotation: t.rotation || 0, flipX: Boolean(object.flipX), skewX: object.skewX, skewY: object.skewY, opacity: object.opacity ?? 1,
+        startTime: object.startTime, actionDurationMs: object.actionDurationMs,
+      });
+    }
+    const notes = Object.entries(skipped).map(([what, count]) => `${count} ${what}${count > 1 ? "s" : ""}`);
+    if (notes.length) window.setTimeout(() => showNotice(`Vector pictures made; not converted: ${notes.join(", ")}.`), 4200);
+    if (!layers.length) showNotice("Couldn't make vector pictures of these parts.", "error");
+    return layers;
+  }
+  // ---- Merge Layers (⇧⌘M): the selected layers become one layer holding all their objects, kept
+  // together in the stacking order at the top layer's place. Distribute to Layers splits it again.
+  const mergeLayers = (keysIn?: string[]) => {
+    if (!draft) return;
+    const keys = Array.from(new Set(keysIn?.length ? keysIn : [
+      ...selectedObjectIds.map((id) => draft.objects.find((item) => item.id === id)).filter((item): item is EditorObject => Boolean(item)).map((item) => rowKeyOf(item, enteredObjectGroup)),
+      ...(frameSelection ? selectionLayerIds(frameSelection) : []),
+    ]));
+    if (keys.some(isGroupRow)) { showNotice("A group can't be merged — double-click it to go inside and merge its layers there."); return; }
+    if (keys.length < 2) { showNotice("Select two or more layers to merge (Shift+click them on the canvas, or drag across their frames)."); return; }
+    if (!canShareLayer(draft.objects.filter((item) => keys.includes(layerKeyOf(item))))) {
+      showNotice("A character's layer holds just its character — merge layers of text, images and shapes, or body-part layers of one character.");
+      return;
+    }
+    const tops = keys.map((key) => ({ key, at: draft.objects.reduce((top, item, index) => (layerKeyOf(item) === key ? index : top), -1) })).filter((entry) => entry.at >= 0).sort((a, b) => b.at - a.at);
+    const topKey = tops[0]?.key;
+    if (!topKey) return;
+    const topMembers = draft.objects.filter((item) => layerKeyOf(item) === topKey);
+    // The merged layer keeps the top layer's own name (an unnamed one shows its objects' names).
+    const name = topMembers[topMembers.length - 1]?.layerName;
+    const memberIds: string[] = [];
+    mutate((data) => {
+      const inMerge = (item: EditorObject) => keys.includes(layerKeyOf(item)) && item.type !== "empty";
+      const merged = data.objects.filter(inMerge);
+      const topIndex = data.objects.reduce((top, item, index) => (inMerge(item) ? index : top), -1);
+      const below = data.objects.slice(0, topIndex + 1).filter((item) => !inMerge(item) && !(keys.includes(layerKeyOf(item)) && item.type === "empty"));
+      const above = data.objects.slice(topIndex + 1);
+      merged.forEach((item) => { item.layer = topKey; if (name) item.layerName = name; else delete item.layerName; memberIds.push(item.id); });
+      data.objects = [...below, ...merged, ...above];
+    });
+    window.setTimeout(() => changeSelection(memberIds), 0);
+    showNotice(name ? `Merged ${keys.length} layers into “${name}”.` : `Merged ${keys.length} layers into one — double-click its name to rename it.`);
+  };
+  const splitLayers = (keys: string[]) => {
+    const split = new Set(keys);
+    // Each object's layer is named after the object again.
+    mutate((data) => data.objects.forEach((item) => { if (split.has(layerKeyOf(item))) { delete item.layer; delete item.layerName; } }));
+    showNotice("Each object is on a layer of its own again.");
+  };
+  const layerCommandsRef = useRef({ mergeLayers, splitLayers });
+  layerCommandsRef.current = { mergeLayers, splitLayers };
+  const distributeRef = useRef(distributeParts);
+  distributeRef.current = distributeParts;
+  useEffect(() => {
+    const onDistributeKey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey || (event.code !== "KeyD" && event.code !== "KeyM")) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (["input", "textarea", "select"].includes((target.tagName || "").toLowerCase()) || target.isContentEditable)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.code === "KeyM") { layerCommandsRef.current.mergeLayers(); return; }
+      // Several objects selected: each to a layer of its own; one character: its body parts.
+      const ids = useEditorStore.getState().selectedObjectIds;
+      if (ids.length > 1) {
+        const objects = draftRef.current?.objects || [];
+        layerCommandsRef.current.splitLayers(Array.from(new Set(ids.map((id) => objects.find((item) => item.id === id)).filter((item): item is EditorObject => Boolean(item)).map(layerKeyOf))));
+        return;
+      }
+      void distributeRef.current("animated");
+    };
+    window.addEventListener("keydown", onDistributeKey, { capture: true });
+    return () => window.removeEventListener("keydown", onDistributeKey, { capture: true });
+  }, []);
+
   // Arrange (Illustrator): front / back of everything, or one step past the next layer. "Back" stays
   // above the background pictures at the bottom, which would otherwise hide the layers.
   const arrangeLayers = (mode: "front" | "back" | "forward" | "backward") => {
@@ -2082,10 +2752,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const clipboardActionsRef = useRef({ copy: copyLayers, cut: cutLayers, paste: pasteLayers, arrange: arrangeLayers });
   clipboardActionsRef.current = { copy: copyLayers, cut: cutLayers, paste: pasteLayers, arrange: arrangeLayers };
 
-  const transformObject = useCallback((id: string, patch: TransformPatch) => {
+  /** Several objects transformed together (the group box of a multi-selection): one undo step. */
+  /** Values come from the canvas (where objects are drawn): a whole ⌘G group's move, turn or size
+   *  goes into its motion; other objects get them as their own (their group's motion taken off). */
+  const transformObjects = useCallback((entries: Array<{ id: string; patch: TransformPatch }>) => {
     mutate((data) => {
+      const handled = applyWholeGroupEdits(data, entries, playhead, enteredObjectGroupRef.current);
+      entries.forEach(({ id, patch: drawnPatch }) => {
       const item = data.objects.find((object) => object.id === id);
-      if (!item) return;
+      if (!item || handled.has(id)) return;
+      const patch = toOwnPatch(item, drawnPatch, playhead);
       // Character keyframes animate position only (see resolveCharacterTransformAtTime);
       // scale and rotation always live on the object, or they would silently not apply.
       const hasPositionPatch = patch.x != null || patch.y != null;
@@ -2105,8 +2781,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       // The registration point may sit outside the object (Animate), within reason.
       if (patch.pivotX != null) item.pivotX = Math.max(-2, Math.min(3, patch.pivotX));
       if (patch.pivotY != null) item.pivotY = Math.max(-2, Math.min(3, patch.pivotY));
+      });
     });
   }, [mutate, playhead]);
+  const transformObjectsRef = useRef(transformObjects);
+  transformObjectsRef.current = transformObjects;
+  const transformObject = useCallback((id: string, patch: TransformPatch) => transformObjects([{ id, patch }]), [transformObjects]);
 
   // ---- Transform panel and Align (Illustrator). A layer's numbers describe its artwork box (what
   // the selection hugs): X / Y are its registration point on the stage, W / H its size; size,
@@ -2333,30 +3013,34 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   }, [mutate, playhead]);
 
   // Layers dragged by their name: the timeline lists them top to bottom, the scene stores them bottom up.
-  const reorderLayers = useCallback((idsTopToBottom: string[]) => {
-    mutate((data) => {
-      const byId = new Map(data.objects.map((item) => [item.id, item]));
-      const ordered = [...idsTopToBottom].reverse().map((id) => byId.get(id)).filter((item): item is EditorObject => Boolean(item));
-      if (ordered.length !== data.objects.length) return;
-      data.objects = ordered;
-    });
+  const reorderLayers = useCallback((keysTopToBottom: string[]) => {
+    mutate((data) => { data.objects = orderByLayers(data.objects, [...keysTopToBottom].reverse()); });
   }, [mutate]);
 
-  // Frames dragged up or down onto another layer (Animate). A layer holds one object, so the
-  // frames go onto an empty layer (which they replace) or into a new layer between two layers.
+  // Frames dragged up or down onto another layer (Animate). The frames replace an empty layer,
+  // join a layer that holds something (Merge Layers; never a character's layer, and a character's
+  // frames join nothing), or become a new layer between two layers.
   // Part of a layer splits it: the dragged frames become their own piece, and what stays behind
   // keeps its place as up to two pieces (before and after the gap). A whole layer leaves an
   // empty layer behind, as in Animate. Sound always moves whole.
   const moveFramesToLayer = useCallback((sourceId: string, from: number, to: number, shift: number, target: LayerDropTarget) => {
     const fps = TIMELINE_FPS;
-    const source = draft?.objects.find((item) => item.id === sourceId);
-    if (!draft || !source || source.type === "empty") return;
+    if (!draft) return;
+    // A layer with several objects moves as a whole: all of them, onto (into) the other layer.
+    if (target.kind === "layer" && isGroupRow(target.id)) { showNotice(GROUP_DROP_NOTICE); return; }
+    const sourceMembers = rowMembersOf(draft.objects, sourceId);
+    if (sourceMembers.length > 1 || (sourceMembers[0] && sourceMembers[0].id !== sourceId)) { moveWholeLayer(sourceId, shift, target); return; }
+    const source = draft.objects.find((item) => item.id === sourceId);
+    if (!source || source.type === "empty") return;
+    // Dropped onto a layer that holds something: the frames join that layer (several objects per layer).
+    let joinKey: string | null = null;
     if (target.kind === "layer") {
-      const destination = draft.objects.find((item) => item.id === target.id);
-      if (!destination || destination.id === sourceId) return;
-      if (destination.type !== "empty" || destination.locked) {
-        showNotice(destination.locked ? "That layer is locked." : "That layer already holds something — drop the frames on an empty layer, or between two layers for a new one.");
-        return;
+      const destination = layerMembers(draft.objects, target.id);
+      if (!destination.length || target.id === sourceId) return;
+      if (destination.some((item) => item.locked)) { showNotice("That layer is locked."); return; }
+      if (!(destination.length === 1 && destination[0].type === "empty")) {
+        if (!canShareLayer([source, ...destination])) { showNotice(CHARACTER_LAYER_NOTICE); return; }
+        joinKey = target.id;
       }
     }
     const lastSceneFrame = Math.max(0, Math.ceil(duration * fps - 1e-6) - 1);
@@ -2375,32 +3059,90 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (index < 0) return;
       const item = data.objects[index];
       let moved: EditorObject;
+      // A merged layer's name stays with the layer: frames that leave it go without it (joining a merged layer, they take its name).
       if (whole) {
         moved = item;
         shiftObjectTimes(moved, moveBy / fps);
-        data.objects.splice(index, 1, { id: newLayerId(), type: "empty", name: "Empty layer", x: item.x, y: item.y, startTime: 0 });
+        data.objects.splice(index, 1, { id: newLayerId(), type: "empty", name: "Empty layer", x: item.x, y: item.y, startTime: 0, ...(item.layerName ? { layerName: item.layerName } : {}) });
+        delete moved.layerName;
       } else {
         moved = extractFrames(item, a, b, moveBy, fps, movedId);
+        delete moved.layerName;
         const before = a > startFrame ? extractFrames(item, startFrame, a - 1, 0, fps, item.id) : null;
         const after = b < endFrame ? extractFrames(item, b + 1, endFrame, 0, fps, before ? newLayerId() : item.id) : null;
+        if (after && before) delete after.layerName;
         // What stays keeps the layer's place: the earlier piece on top, the later one just below.
         data.objects.splice(index, 1, ...[after, before].filter((piece): piece is EditorObject => Boolean(piece)));
       }
-      if (target.kind === "layer") {
+      if (joinKey) {
+        // Join the layer: tagged with it, just above its top object.
+        const members = data.objects.filter((object) => layerKeyOf(object) === joinKey);
+        const name = members[members.length - 1]?.layerName;
+        [...members, moved].forEach((object) => { object.layer = joinKey!; if (name) object.layerName = name; else delete object.layerName; });
+        const top = data.objects.lastIndexOf(members[members.length - 1]);
+        data.objects.splice(top + 1, 0, moved);
+      } else if (target.kind === "layer") {
         const destination = data.objects.findIndex((object) => object.id === target.id);
         if (destination >= 0) data.objects.splice(destination, 1, moved);
         else data.objects.splice(index, 0, moved);
       } else if (target.belowId == null) data.objects.unshift(moved);
       else {
-        const below = data.objects.findIndex((object) => object.id === target.belowId);
-        data.objects.splice(below >= 0 ? below + 1 : index, 0, moved);
+        // Just above the row below the gap (its top object: a merged layer or a group has several).
+        const below = rowMembersOf(data.objects, target.belowId).pop();
+        data.objects.splice(below ? data.objects.indexOf(below) + 1 : index, 0, moved);
       }
     });
     const movedFrom = first + moveBy;
     const movedTo = (whole ? endFrame : b) + moveBy;
     setDuration((current) => Math.max(current, (movedTo + 1) / fps));
-    selectFrames({ layerId: movedId, from: movedFrom, to: movedTo });
+    selectFrames({ layerId: joinKey || movedId, from: movedFrom, to: movedTo });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, duration, mutate, selectFrames, showNotice]);
+  /** A layer of several objects (or a group) dragged up / down: every object moves (in time too);
+   *  onto another layer they join it, between layers they stay a layer of their own. An empty layer
+   *  stays behind (not for a group). */
+  const moveWholeLayer = (key: string, shift: number, target: LayerDropTarget) => {
+    const fps = TIMELINE_FPS;
+    const members = rowMembersOf(draft?.objects || [], key);
+    if (!members.length) return;
+    if (target.kind === "layer" && target.id === key) return;
+    if (target.kind === "layer") {
+      const destination = layerMembers(draft?.objects || [], target.id);
+      const intoEmpty = destination.length === 1 && destination[0].type === "empty";
+      // A group moves only as a whole, between layers (its objects keep their own layers).
+      if (isGroupRow(key) && !intoEmpty) { showNotice(GROUP_DROP_NOTICE); return; }
+      if (!intoEmpty && !canShareLayer([...destination, ...members])) { showNotice(CHARACTER_LAYER_NOTICE); return; }
+    }
+    const firstFrame = Math.min(...members.map((item) => Math.round(Math.max(0, Number(item.startTime || 0)) * fps)));
+    const moveBy = Math.max(-firstFrame, shift) / fps;
+    const ids = new Set(members.map((item) => item.id));
+    mutate((data) => {
+      const index = data.objects.findIndex((item) => ids.has(item.id));
+      const moving = data.objects.filter((item) => ids.has(item.id));
+      data.objects = data.objects.filter((item) => !ids.has(item.id));
+      // The layer's name stays with the empty layer left behind; joining a merged layer, the objects take its name.
+      // A group just moves: no layer is left behind and its own layers keep their names.
+      const group = isGroupRow(key);
+      const leftName = moving[moving.length - 1].layerName;
+      if (!group) data.objects.splice(Math.max(0, index), 0, { id: newLayerId(), type: "empty", name: "Empty layer", x: moving[0].x, y: moving[0].y, startTime: 0, ...(leftName ? { layerName: leftName } : {}) });
+      moving.forEach((item) => { shiftObjectTimes(item, moveBy); if (!group) delete item.layerName; });
+      if (target.kind === "layer") {
+        const destination = data.objects.filter((item) => layerKeyOf(item) === target.id);
+        const name = destination[destination.length - 1]?.layerName;
+        if (destination.length === 1 && destination[0].type === "empty") {
+          data.objects.splice(data.objects.indexOf(destination[0]), 1, ...moving);
+          return;
+        }
+        [...destination, ...moving].forEach((item) => { item.layer = target.id; if (name) item.layerName = name; else delete item.layerName; });
+        data.objects.splice(data.objects.indexOf(destination[destination.length - 1]) + 1, 0, ...moving);
+      } else if (target.belowId == null) data.objects.unshift(...moving);
+      else {
+        const below = rowMembersOf(data.objects, target.belowId).pop();
+        data.objects.splice(below ? data.objects.indexOf(below) + 1 : Math.max(0, index), 0, ...moving);
+      }
+    });
+    changeSelection(members.map((item) => item.id));
+  };
 
   // ---- Step inside a character (Animate's edit in place; view only). A character uploaded with
   // its .fla has its symbols' own timelines (cb-fla-timeline, lib/server/flaTimeline.ts): ⌥ Option
@@ -2568,7 +3310,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
 
     const deleteSelectedObject = (event: KeyboardEvent) => {
       if (scaleRotateOpenRef.current || (event.key !== "Delete" && event.key !== "Backspace") || isEditableTarget(event.target)) return;
-      const frames = frameSelectionRef.current;
+      const frames = frameSelectionFromCanvasRef.current ? null : frameSelectionRef.current;
       if (frames) {
         // Frames are selected on the timeline: Delete clears the keyframe there (Animate).
         event.preventDefault();
@@ -2581,7 +3323,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       event.stopImmediatePropagation();
       // A body part is open (double-click mode): remove only that part, not the character.
       if (activeCharacterPart && selectedObjectIds.length === 1) {
-        removeCharacterPart(selectedObjectIds[0], activeCharacterPart);
+        for (const member of partMembers(activeCharacterPart)) removeCharacterPart(selectedObjectIds[0], member);
         return;
       }
       // Removes the selected layers from this scene only; library characters are untouched.
@@ -2596,10 +3338,119 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return () => window.removeEventListener("keydown", deleteSelectedObject, { capture: true });
   }, [activeCharacterPart, mutate, removeCharacterPart, selectObject, selectedObjectIds]);
 
+  // Several selected parts: the change is relative (arrow keys move each part by the same amount);
+  // the canvas sends per-part edits for turns and scales (transformCharacterParts).
   const transformCharacterPart = useCallback((id: string, partKey: CharacterPartKey, patch: PartPatch) => {
     mutate((data) => {
       const item = data.objects.find((object) => object.id === id);
-      if (item && item.type === "character") writePartTransform(item, partKey, patch, playhead);
+      if (!item || item.type !== "character") return;
+      if (!isMultiPartKey(partKey)) { writePartTransform(item, partKey, patch, playhead); return; }
+      for (const member of partMembers(partKey)) {
+        const current = resolvePartTransformAtTime(item, member, playhead);
+        writePartTransform(item, member, {
+          offsetX: current.offsetX + Number(patch.offsetX || 0),
+          offsetY: current.offsetY + Number(patch.offsetY || 0),
+          ...(patch.rotation != null ? { rotation: current.rotation + patch.rotation } : {}),
+          ...(patch.scale != null ? { scale: current.scale * patch.scale } : {}),
+        }, playhead);
+      }
+    });
+  }, [mutate, playhead]);
+  // ⌘G groups the selected parts of the character (saved with it in this scene); ⌘⇧G ungroups the
+  // selected (or entered) group. A click on any member then selects the whole group.
+  // Outside a character the same keys group (ungroup) the selected objects on the canvas.
+  useEffect(() => {
+    const groupObjects = (event: KeyboardEvent) => {
+      if (!draft) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const picked = draft.objects.filter((item) => selectedObjectIds.includes(item.id) && item.type !== "background" && item.type !== "audio" && item.type !== "empty");
+      if (event.shiftKey) {
+        const groups = new Set(picked.map((item) => item.group).filter(Boolean));
+        if (!groups.size) { showNotice("Select a group to ungroup it (⇧⌘G)."); return; }
+        // The group's motion goes with it: each object stays where it was drawn now.
+        mutate((data) => {
+          for (const item of data.objects) {
+            if (!item.group || !groups.has(item.group)) continue;
+            if (item.groupMotion) {
+              const drawn = resolveObjectTransformAtTime(item, playhead);
+              const own = resolveObjectTransformAtTime({ ...item, groupMotion: undefined }, playhead);
+              if (drawn.x !== own.x || drawn.y !== own.y) {
+                if (item.type === "character" && (item.keyframes || []).length > 0) item.keyframes = (item.keyframes || []).map((key) => ({ ...key, x: key.x + drawn.x - own.x, y: key.y + drawn.y - own.y }));
+                else { item.x = drawn.x; item.y = drawn.y; }
+              }
+              item.rotation = drawn.rotation;
+              item.scale = drawn.scale;
+            }
+            delete item.group; delete item.groupName; delete item.groupMotion;
+          }
+        });
+        setEnteredObjectGroup(null);
+        showNotice(groups.size === 1 ? "Ungrouped." : `Ungrouped ${groups.size} groups.`);
+        return;
+      }
+      if (picked.length < 2) { showNotice("Select two or more objects to group them — Shift+click or drag a box around them."); return; }
+      // One level of groups: grouping objects that are in a group takes them into the new one.
+      const id = `group-${Date.now().toString(36)}`;
+      const ids = new Set(picked.map((item) => item.id));
+      // Its name on the timeline: "Sardar parts" for parts of one character ("Sardar · Head", …), else "Group 2".
+      const owners = Array.from(new Set(picked.map((item) => (item.name.includes(" · ") ? item.name.split(" · ")[0] : ""))));
+      const groupName = owners.length === 1 && owners[0] ? `${owners[0]} parts` : `Group ${new Set(draft.objects.map((item) => item.group).filter(Boolean)).size + 1}`;
+      mutate((data) => {
+        for (const item of data.objects) if (ids.has(item.id)) { item.group = id; item.groupName = groupName; delete item.groupMotion; }
+        const left = new Map<string, number>();
+        data.objects.forEach((item) => { if (item.group) left.set(item.group, (left.get(item.group) || 0) + 1); });
+        for (const item of data.objects) if (item.group && (left.get(item.group) || 0) < 2) { delete item.group; delete item.groupName; delete item.groupMotion; }
+      });
+      setEnteredObjectGroup(null);
+      showNotice(`Grouped ${picked.length} objects as “${groupName}” — one row on the timeline; double-click the group (or its ⤵ on the timeline) to go inside.`);
+    };
+    const onGroupKey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "g" || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (["input", "textarea", "select"].includes((target.tagName || "").toLowerCase()) || target.isContentEditable)) return;
+      const object = draft?.objects.find((item) => item.id === selectedObjectId);
+      if (!object || object.type !== "character" || !(activeCharacterPart || characterIsolated)) { groupObjects(event); return; }
+      event.preventDefault();
+      event.stopPropagation();
+      const members = partReplacementBrowserOpen ? [] : partMembers(activeCharacterPart);
+      const groups = object.partGroups || [];
+      if (event.shiftKey) {
+        const selectedGroup = groups.find((group) => group.id === enteredGroupId)
+          || groups.find((group) => group.members.length === members.length && group.members.every((member) => members.includes(member)));
+        if (!selectedGroup) { showNotice("Select a group to ungroup it (⌘⇧G)."); return; }
+        mutate((data) => {
+          const item = data.objects.find((entry) => entry.id === object.id);
+          if (item) item.partGroups = (item.partGroups || []).filter((group) => group.id !== selectedGroup.id);
+        });
+        setEnteredGroupId(null);
+        setActiveCharacterPart(joinPartKeys(selectedGroup.members));
+        setPartReplacementBrowserOpen(false);
+        return;
+      }
+      if (members.length < 2) { showNotice("Select two or more parts to group them — Shift+click or drag a box around them."); return; }
+      // A part can be in one group: grouping parts that are already grouped regroups them.
+      const id = `group-${Date.now().toString(36)}`;
+      const used = new Set(groups.map((group) => group.name));
+      let number = groups.length + 1;
+      while (used.has(`Group ${number}`)) number += 1;
+      mutate((data) => {
+        const item = data.objects.find((entry) => entry.id === object.id);
+        if (!item) return;
+        const rest = (item.partGroups || []).map((group) => ({ ...group, members: group.members.filter((member) => !members.includes(member)) })).filter((group) => group.members.length > 1);
+        item.partGroups = [...rest, { id, name: `Group ${number}`, members }];
+      });
+      setEnteredGroupId(null);
+      showNotice(`Grouped ${members.length} parts as “Group ${number}” — a click on any of them selects the group; double-click to go inside it.`);
+    };
+    window.addEventListener("keydown", onGroupKey, { capture: true });
+    return () => window.removeEventListener("keydown", onGroupKey, { capture: true });
+  }, [activeCharacterPart, characterIsolated, draft, enteredGroupId, mutate, partReplacementBrowserOpen, playhead, selectedObjectId, selectedObjectIds, showNotice]);
+  /** One undo step for edits to several parts at once (a multi-part move, turn or scale). */
+  const transformCharacterParts = useCallback((id: string, patches: Record<CharacterPartKey, PartPatch>) => {
+    mutate((data) => {
+      const item = data.objects.find((object) => object.id === id);
+      if (item && item.type === "character") for (const [member, patch] of Object.entries(patches)) writePartTransform(item, member, patch, playhead);
     });
   }, [mutate, playhead]);
 
@@ -2618,15 +3469,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const onKeyDown = (event: KeyboardEvent) => {
       if (scaleRotateOpenRef.current || isTypingTarget(event.target)) return;
 
-      // Esc steps out one level: entered part → selected part → (a piece inside a part: back to that
-      // part, entered) → whole character.
-      if (event.key === "Escape" && activeCharacterPart) {
+      // Esc steps out one level (Illustrator's isolation mode): an entered group or part, the part a
+      // selected piece sits in, then the character itself.
+      if (event.key === "Escape" && (activeCharacterPart || characterIsolated)) {
         event.preventDefault();
-        if (partReplacementBrowserOpen) setPartReplacementBrowserOpen(false);
-        else if (activeCharacterPart.includes("/")) {
-          setActiveCharacterPart(activeCharacterPart.slice(0, activeCharacterPart.lastIndexOf("/")));
-          setPartReplacementBrowserOpen(true);
-        } else setActiveCharacterPart(null);
+        stepOutPartIsolation();
+        return;
+      }
+      if (event.key === "Escape" && enteredObjectGroupRef.current) {
+        event.preventDefault();
+        stepOutObjectGroup();
         return;
       }
 
@@ -2655,18 +3507,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         event.preventDefault();
         const step = event.shiftKey ? 10 : 1;
         const [dx, dy] = arrows[event.key];
-        const ids = new Set(selectedObjectIds);
-        mutate((data) => {
-          for (const item of data.objects) {
-            if (!ids.has(item.id)) continue;
-            if (item.type === "character" && (item.keyframes || []).length > 0) {
-              const current = resolveCharacterTransformAtTime(item, playhead);
-              moveKeyframedPosition(item, playhead, current.x + dx * step, current.y + dy * step);
-            } else {
-              item.x += dx * step; item.y += dy * step;
-            }
-          }
-        });
+        // Through the same commit as a drag: a whole ⌘G group's nudge goes into its motion.
+        moveObjects((draft?.objects || []).filter((item) => selectedObjectIds.includes(item.id)).map((item) => {
+          const drawn = resolveObjectTransformAtTime(item, playhead);
+          return { id: item.id, x: drawn.x + dx * step, y: drawn.y + dy * step };
+        }));
         return;
       }
 
@@ -2706,7 +3551,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [activeCharacterPart, draft, duration, isPlaying, moveCharacterPart, mutate, partReplacementBrowserOpen, playhead, selectedObjectId, selectedObjectIds, setPlaying, transformCharacterPart]);
+  }, [activeCharacterPart, characterIsolated, draft, duration, isPlaying, moveCharacterPart, moveObjects, mutate, partReplacementBrowserOpen, playhead, selectedObjectId, selectedObjectIds, setPlaying, stepOutObjectGroup, stepOutPartIsolation, transformCharacterPart]);
 
   const addOrUpdatePartKeyframe = useCallback((id: string, partKey: CharacterPartKey, time = playhead) => {
     mutate((data) => {
@@ -2758,7 +3603,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (!character || character.type !== "character") return;
       event.preventDefault();
       event.stopPropagation();
-      if (activeCharacterPart) addOrUpdatePartKeyframe(character.id, activeCharacterPart, playhead);
+      if (activeCharacterPart) for (const member of partMembers(activeCharacterPart)) addOrUpdatePartKeyframe(character.id, member, playhead);
       else addOrUpdateCharacterKeyframe(character.id, playhead);
     };
     window.addEventListener("keydown", handleKeyframeShortcut, { capture: true });
@@ -3284,6 +4129,184 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     resetCanvasView();
   };
 
+  // ---- Timeline rows are layers, or a whole ⌘G group (lib/layerRows.ts). A row of several objects acts on all of them.
+  const rowMembers = (key: string) => rowMembersOf(draft?.objects || [], key);
+  const onRow = (key: string) => { const ids = new Set(rowMembers(key).map((item) => item.id)); return (item: EditorObject) => ids.has(item.id); };
+  const isCombinedRow = (key: string) => { const members = rowMembers(key); return members.length > 1 || (members[0] && members[0].id !== key); };
+  // A click on a layer's name selects the layer and all its frames (Animate), like a pick on the canvas.
+  /** Shift / ⌘-click on layer names: those layers, every object on them, and all their frames. */
+  const selectRows = (keys: string[]) => {
+    const ids = Array.from(new Set(keys.flatMap((key) => { const members = rowMembers(key).map((item) => item.id); return members.length ? members : [key]; })));
+    if (ids.length > 1) changeSelection(ids); else selectEditorObject(ids[0] ?? null);
+    const selection = layerFramesSelection(ids);
+    frameSelectionFromCanvasRef.current = Boolean(selection);
+    setFrameSelection(selection);
+  };
+  const selectRow = (key: string) => {
+    const ids = rowMembers(key).map((item) => item.id);
+    if (ids.length > 1) changeSelection(ids); else selectEditorObject(ids[0] ?? key);
+    const selection = layerFramesSelection(ids.length ? ids : [key]);
+    frameSelectionFromCanvasRef.current = Boolean(selection);
+    setFrameSelection(selection);
+  };
+  const deleteRow = (key: string) => {
+    if (!isCombinedRow(key)) { deleteLayer(key); return; }
+    const ids = new Set(rowMembers(key).map((item) => item.id));
+    mutate((data) => { data.objects = data.objects.filter((item) => !ids.has(item.id)); });
+    if (selectedObjectIds.some((id) => ids.has(id))) { selectObject(null); setActiveCharacterPart(null); setPartReplacementBrowserOpen(false); }
+  };
+  const toggleRowFlag = (key: string, flag: "hidden" | "locked") => {
+    const next = !rowMembers(key).every((item) => item[flag]);
+    const member = onRow(key);
+    mutate((data) => data.objects.forEach((item) => { if (member(item)) item[flag] = next; }));
+  };
+  // ⌥-click an eye: only this layer shows; again (when it already is the only one): every layer shows.
+  const soloRow = (key: string) => {
+    const objects = draft?.objects || [];
+    const member = onRow(key);
+    const alone = objects.every((item) => member(item) ? !item.hidden : item.hidden);
+    mutate((data) => data.objects.forEach((item) => { item.hidden = alone ? false : !member(item); }));
+  };
+  // Renaming on the timeline: a group's name, a merged layer's own name ("" = its objects' names
+  // again), or the name of a layer's one object (an older layer name on it goes).
+  const renameRow = (key: string, name: string) => {
+    const member = onRow(key);
+    const field = isGroupRow(key) ? "groupName" : "layerName";
+    mutate((data) => data.objects.forEach((item) => {
+      if (!member(item)) return;
+      if (name) item[field] = name; else delete item[field];
+    }));
+  };
+  const renameRowObject = (key: string, name: string) => {
+    if (!name || isCombinedRow(key)) return;
+    mutate((data) => { const item = data.objects.find((object) => object.id === key); if (item) { item.name = name; delete item.layerName; } });
+  };
+  const toggleRowLoop = (key: string) => {
+    const characters = rowMembers(key).filter((item) => item.type === "character");
+    const next = characters.some((item) => item.loopMode === "loop") ? "once" : "loop";
+    const member = onRow(key);
+    mutate((data) => data.objects.forEach((item) => { if (member(item) && item.type === "character") item.loopMode = next; }));
+  };
+  // Moving the row moves every object; trimming its start or end trims (or extends) the objects at that edge.
+  const updateRowTiming = (key: string, patch: { startTime?: number; actionDurationMs?: number }) => {
+    if (!isCombinedRow(key)) { updateLayerTiming(key, patch); return; }
+    const members = rowMembers(key);
+    const spans = members.map((item) => { const start = Math.max(0, Number(item.startTime || 0)); return { item, start, end: item.actionDurationMs ? start + item.actionDurationMs / 1000 : duration }; });
+    const oldStart = Math.min(...spans.map((span) => span.start));
+    const oldEnd = Math.max(...spans.map((span) => span.end));
+    const frame = 1 / TIMELINE_FPS;
+    if (typeof patch.startTime === "number" && typeof patch.actionDurationMs !== "number") {
+      // Measured from where the drag began, so every update of one drag lands in the same place.
+      if (rowDragBaseRef.current?.key !== key) rowDragBaseRef.current = { key, rowStart: oldStart, starts: Object.fromEntries(spans.map((span) => [span.item.id, span.start])) };
+      const base = rowDragBaseRef.current;
+      const delta = patch.startTime - base.rowStart;
+      spans.forEach((span) => updateLayerTiming(span.item.id, { startTime: Math.max(0, (base.starts[span.item.id] ?? span.start) + delta) }));
+      return;
+    }
+    if (typeof patch.startTime === "number") {
+      const newStart = Math.max(0, patch.startTime);
+      spans.forEach((span) => {
+        if (span.start > oldStart + 1e-6 && span.start >= newStart) return;
+        if (span.end - newStart >= frame) updateLayerTiming(span.item.id, { startTime: newStart, actionDurationMs: (span.end - newStart) * 1000 });
+      });
+      return;
+    }
+    if (typeof patch.actionDurationMs === "number") {
+      const newEnd = oldStart + patch.actionDurationMs / 1000;
+      spans.forEach((span) => {
+        if (span.end < oldEnd - 1e-6 && span.end <= newEnd) return;
+        if (newEnd - span.start >= frame) updateLayerTiming(span.item.id, { actionDurationMs: (newEnd - span.start) * 1000 });
+      });
+    }
+  };
+  // ---- A ⌘G group's own motion on its row: K / F6, Clear Keyframe, Create / Remove Tween,
+  // dragging its keyframes and their ease (lib/groupMotion.ts).
+  /** The middle of a group's objects as they stand without group motion: its first registration point. */
+  const groupRestCentre = (objects: EditorObject[], group: string) => {
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const item of objects.filter((object) => object.group === group && object.type !== "empty")) {
+      const own = resolveObjectTransformAtTime({ ...item, groupMotion: undefined }, playhead);
+      const box = layerGeometryRef.current?.(item.id);
+      const corners = box ? [[box.left, box.top], [box.left + box.width, box.top], [box.left, box.top + box.height], [box.left + box.width, box.top + box.height]] : [[0, 0]];
+      const r = (own.rotation * Math.PI) / 180;
+      for (const [cx, cy] of corners) {
+        const x = own.x + cx * Math.cos(r) - cy * Math.sin(r);
+        const y = own.y + cx * Math.sin(r) + cy * Math.cos(r);
+        left = Math.min(left, x); top = Math.min(top, y); right = Math.max(right, x); bottom = Math.max(bottom, y);
+      }
+    }
+    return Number.isFinite(left) ? { x: (left + right) / 2, y: (top + bottom) / 2 } : { x: 0, y: 0 };
+  };
+  const groupFrameAction = (group: string, action: FrameAction, from: number, to: number) => {
+    const objects = draft?.objects || [];
+    const members = objects.filter((item) => item.group === group);
+    if (!members.length) return;
+    const fps = TIMELINE_FPS;
+    const frameOf = (time: number) => Math.round(time * fps);
+    const motion: GroupMotion = JSON.parse(JSON.stringify(groupMotionIn(objects, group) || {}));
+    if (motion.pivotX == null || motion.pivotY == null) { const centre = groupRestCentre(objects, group); motion.pivotX = centre.x; motion.pivotY = centre.y; }
+    let keys = sortGroupKeyframes(motion.keyframes || []);
+    const time = from / fps;
+    if (action === "keyframe") {
+      if (keys.some((key) => frameOf(key.time) === from)) return;
+      const keyAt = (at: number, tween: GroupKeyframe["tween"]): GroupKeyframe => ({ id: `gk-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, time: at, ...resolveGroupPose(motion, at), tween });
+      // The first keyframe also fixes the group's first frame, so the frames before it stay put.
+      const startFrame = Math.min(...members.map((item) => Math.round(Math.max(0, Number(item.startTime || 0)) * fps)));
+      if (!keys.length && from !== startFrame) keys.push(keyAt(startFrame / fps, false));
+      const previous = [...keys].reverse().find((key) => key.time < time - 1e-6);
+      const next = keys.find((key) => key.time > time + 1e-6);
+      keys.push(keyAt(time, previous && next && previous.tween !== false ? (previous.tween ? { ...previous.tween } : { easeIn: 0, easeOut: 0 }) : false));
+    } else if (action === "clear-keyframe") {
+      keys = keys.filter((key) => frameOf(key.time) < from || frameOf(key.time) > to);
+    } else {
+      const left = [...keys].reverse().find((key) => frameOf(key.time) <= from);
+      const right = keys.find((key) => frameOf(key.time) > from);
+      if (!left || !right) { showNotice(action === "tween" ? "A tween needs a keyframe before and after — press K at two frames first." : "There's no tween here."); return; }
+      keys = keys.map((key) => (key.id !== left.id ? key : { ...key, tween: action === "tween" ? (key.tween || { easeIn: 0, easeOut: 0 }) : false }));
+    }
+    motion.keyframes = sortGroupKeyframes(keys);
+    if (!motion.keyframes.length) delete motion.keyframes;
+    mutate((data) => writeGroupMotion(data.objects, group, motion));
+  };
+  const editGroupKeyframes = (group: string, edit: (keys: GroupKeyframe[]) => GroupKeyframe[]) => {
+    const motion = groupMotionIn(draft?.objects || [], group);
+    if (!motion?.keyframes?.length) return;
+    mutate((data) => writeGroupMotion(data.objects, group, { ...motion, keyframes: sortGroupKeyframes(edit(motion.keyframes || [])) }));
+  };
+  const moveRowKeyframe = (key: string, fromFrame: number, toFrame: number) => {
+    if (isGroupRow(key)) {
+      const frameOf = (time: number) => Math.round(time * TIMELINE_FPS);
+      editGroupKeyframes(groupOfRow(key), (keys) => keys.filter((item) => frameOf(item.time) !== toFrame).map((item) => (frameOf(item.time) === fromFrame ? { ...item, time: toFrame / TIMELINE_FPS } : item)));
+      return;
+    }
+    if (!isCombinedRow(key)) { moveKeyframe(key, fromFrame, toFrame); return; }
+    rowMembers(key).filter((item) => (item.keyframes || []).some((frame) => Math.round(frame.time * TIMELINE_FPS) === fromFrame)).forEach((item) => moveKeyframe(item.id, fromFrame, toFrame));
+  };
+  const setRowTweenEase = (key: string, keyframeId: string, easeIn: number, easeOut: number) => {
+    if (isGroupRow(key)) { editGroupKeyframes(groupOfRow(key), (keys) => keys.map((item) => (item.id === keyframeId ? { ...item, tween: { easeIn, easeOut } } : item))); return; }
+    const owner = rowMembers(key).find((item) => (item.keyframes || []).some((frame) => frame.id === keyframeId));
+    setTweenEase(owner?.id || key, keyframeId, easeIn, easeOut);
+  };
+  const rowFrameAction = (action: FrameAction, keys: string | string[], from: number, to: number) => {
+    const list = Array.isArray(keys) ? keys : [keys];
+    // A group's row: its keyframes and tweens are the group's own motion.
+    const motionAction = action === "keyframe" || action === "clear-keyframe" || action === "tween" || action === "remove-tween";
+    if (motionAction) list.filter(isGroupRow).forEach((key) => groupFrameAction(groupOfRow(key), action, from, to));
+    const rest = motionAction ? list.filter((key) => !isGroupRow(key)) : list;
+    if (!rest.length) return;
+    const ids = rest.flatMap((key) => { const members = rowMembers(key).map((item) => item.id); return members.length ? members : [key]; });
+    frameAction(action, ids, from, to);
+  };
+  // Keys (K, F5–F7) and Delete name timeline rows too: a merged layer's row is all its objects.
+  frameActionRef.current = rowFrameAction;
+  // Inside a ⌘G group the timeline lists only the group's layers; inside a character (double-click),
+  // only the layer that holds it.
+  const rows = draft ? timelineRows(draft.objects, enteredObjectGroup) : [];
+  const insideCharacterKey = selected?.type === "character" && (characterIsolated || activeCharacterPart) ? rowKeyOf(selected, enteredObjectGroup) : null;
+  const rowSourceDurations: Record<string, number> = { ...sourceDurations };
+  for (const row of rows) if (!(row.id in rowSourceDurations)) { const first = rowMembers(row.id).find((item) => sourceDurations[item.id]); if (first) rowSourceDurations[row.id] = sourceDurations[first.id]; }
+  const rowMemberCounts: Record<string, number> = Object.fromEntries(rows.map((row) => [row.id, rowMembers(row.id).length]));
+
   if (busy || !project || !scene || !draft) {
     return <div className="cb-loading"><div className="cb-logo-mark">CB</div><strong>Loading CB Studio</strong><span>{loadError}</span></div>;
   }
@@ -3373,13 +4396,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
           <ToolGroup label="Text" icon={<TextIcon />} active={railHighlight === "text"} onPress={() => setRailHighlight("text")} buttonRef={textRailRef}
             title="Text tool (T): click the canvas to type; double-click, hold, or T then Return, for the Text panel"
             onPrimary={() => setActiveTool("text")} onOpenPanel={() => setTextPanelOpen((open) => !open)} panelOpen={textPanelOpen} />
-          <ToolGroup label="Colour" panelTitle="Colour" icon={<ColourIcon />} active={railHighlight === "colour"} onPress={() => setRailHighlight("colour")} title="Fill and stroke colours, and recolouring"
+          <ToolGroup label="Colour" panelTitle="Colour" panelClassName="cb-colour-flyout" icon={<ColourIcon />} active={railHighlight === "colour"} onPress={() => setRailHighlight("colour")} title="Colour: light/dark, fill and stroke, find and replace, adjust colour and the colour dropper"
             items={[
-              { id: "fill", label: "Fill colour", icon: <FillIcon />, disabled: !boxState.fill, title: boxState.fill ? `Fill ${boxState.fill}: choose a colour` : "This layer has no fill colour", onSelect: () => { setActiveBox("fill"); setBoxPicker("fill"); } },
-              { id: "stroke", label: "Stroke colour", icon: <StrokeIcon />, disabled: !boxState.stroke, title: boxState.stroke ? `Stroke ${boxState.stroke}: choose a colour` : "No stroke colour here", onSelect: () => { setActiveBox("stroke"); setBoxPicker("stroke"); } },
-              { id: "swap", label: "Swap", shortcut: "⇧X", icon: <SwapIcon />, disabled: !(boxState.kind === "character" && boxState.fill && boxState.stroke), title: "Swap fill and stroke colours", onSelect: swapBoxColours },
-              { id: "recolour", label: "Recolour", icon: <RecolourIcon />, title: "The selected character's palette, colour by colour", onSelect: () => openRecolor("both") },
-            ]} />
+              { id: "light-dark", label: "Light/Dark", shortcut: "⌘ L", icon: <LightDarkIcon />, active: activeTool === "tone", title: "Light/Dark: click colours on the selected character, or a text layer, to make them lighter or darker (Option reverses)", onSelect: () => { setActiveTool("tone"); setRailHighlight("colour"); } },
+              { id: "fill-stroke", label: "Fill/Stroke", shortcut: "<", icon: <FillStrokeIcon />, title: "Fill/Stroke: choose a colour for the selection (text: with an outline or a shadow)", onSelect: openFillStroke },
+              { id: "find-replace", label: "Find/Replace", shortcut: "⇧⌘F", icon: <FindReplaceIcon />, active: findReplaceOpen, title: "Find and Replace: colour, text or font", onSelect: () => setFindReplaceOpen(true) },
+              { id: "adjust", label: "Adjust colour", shortcut: "⌘ J", icon: <AdjustColourIcon />, active: Boolean(adjust), title: "Adjust colour balance of the selected character or text", onSelect: openAdjust },
+              { id: "dropper", label: "Colour Dropper", shortcut: "i", icon: <EyedropperIcon />, active: activeTool === "eyedropper", title: "Colour Dropper: click the canvas to copy a colour (or a text layer's style) onto the selection", onSelect: () => { setActiveTool("eyedropper"); setRailHighlight("colour"); } },            ]} />
           <ToolGroup label="Align" panelTitle="Align" panelClassName="cb-align-flyout" icon={<AlignIcon />} active={railHighlight === "align"} onPress={() => setRailHighlight("align")} title="Align and distribute the selected layers"
             items={[
               { id: "left", label: "Left", icon: <AlignLeftIcon />, keepOpen: true, onSelect: () => runAlign("left") },
@@ -3395,29 +4418,41 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               <input type="checkbox" checked={alignToStage} onChange={(event) => setAlignToStage(event.target.checked)} /> Align to stage
             </label>
           </ToolGroup>
-          <button type="button" className={`cb-find-replace-color ${railHighlight === "find" ? "active" : ""}`} title="Find and Replace (Shift+Cmd/Ctrl+F): colour, text or font" aria-label="Find and Replace" aria-pressed={railHighlight === "find"}
-            onPointerDown={(event) => { if (event.button === 0) setRailHighlight("find"); }} onClick={() => { setRailHighlight("find"); setFindReplaceOpen(true); }}>
-            {/* "A → B": find something and replace it (the magnifier belongs to the Zoom tool). */}
-            <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 20l3.5-9 3.5 9M6.3 17h4.4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M13.5 16h5M17 13.5l2.5 2.5-2.5 2.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/><path d="M21.5 11h3.2a2.2 2.2 0 0 1 0 4.4h-3.2zM21.5 15.4h3.7a2.3 2.3 0 0 1 0 4.6h-3.7z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/></svg>
-          </button>
         </aside>
         {activeTool === "tone" && (
-          <div className="cb-tone-bar" style={{ left: toneBarPosition.left, top: toneBarPosition.top }} role="toolbar" aria-label="Lighten / Darken options">
-            <div className="cb-tone-head" data-drag-handle title="Drag to move">
-              <strong>{toneDarken ? "Darken" : "Lighten"}</strong>
-              <span className="cb-drag-grip" aria-hidden="true" />
+          <div className="cb-light-dark" style={{ left: toneBarPosition.left, top: toneBarPosition.top }} role="dialog" aria-label="Light/Dark">
+            <header><PanelClose onClose={() => setActiveTool("select")} label="Close Light/Dark" />Light/Dark</header>
+            <div className="cb-light-dark-body">
+              <div className="cb-light-dark-toggle" role="radiogroup" aria-label="Direction">
+                <button type="button" role="radio" className={toneDarkNow ? "active" : ""} aria-checked={toneDirection === "dark"} onClick={() => setToneDirection("dark")}>Dark</button>
+                <button type="button" role="radio" className={!toneDarkNow ? "active" : ""} aria-checked={toneDirection === "light"} onClick={() => setToneDirection("light")}>Light</button>
+              </div>
+              <div className="cb-light-dark-checks">
+                <label><input type="checkbox" checked={toneStroke} onChange={(event) => setToneStroke(event.target.checked)} /> Include Stroke</label>
+                <label title="Text shadows"><input type="checkbox" checked={toneShadow} onChange={(event) => setToneShadow(event.target.checked)} /> Include Shadow</label>
+              </div>
+              <p>Select a character first, then click its colours{selected?.type === "character" && activeCharacterPart ? " (selected part only)" : ""}, or click a text layer. Include Stroke: its outlines change too; Include Shadow: its shadows change too, in the same ratio. Press Option for reverse, Shift for a small step.</p>
             </div>
-            <div className="cb-tone-toggle" role="radiogroup" aria-label="What changes">
-              <button type="button" className={toneShades ? "active" : ""} aria-pressed={toneShades} onClick={() => setToneShades(true)}>With shades</button>
-              <button type="button" className={!toneShades ? "active" : ""} aria-pressed={!toneShades} onClick={() => setToneShades(false)}>This colour only</button>
-            </div>
-            <small>{selected?.type === "character" ? `Click = lighter · Alt/Option = darker · Shift = fine · ${activeCharacterPart ? "selected part only" : "whole character"}` : "Select a character first, then click its colours."}</small>
           </div>
+        )}
+        {textFillStrokeOpen && textTarget && (
+          <ColourPicker initial={normalizeHex(textTarget.fillColor) || "#ffffff"}
+            effects={{ stroke: Boolean(textTarget.textStrokeColor), shadow: Boolean(textTarget.textShadowColor) }}
+            onOk={(hex, effects) => {
+              setTextFillStrokeOpen(false);
+              applyTextPatch({ fillColor: hex, textStrokeColor: effects?.stroke ? hex : undefined, textShadowColor: effects?.shadow ? hex : undefined, ...(effects?.shadow ? {} : { textShadow: false }) });
+            }}
+            onCancel={() => setTextFillStrokeOpen(false)} />
+        )}
+        {adjust && (
+          <AdjustColourDialog hasShadow={adjust.hasShadow} targetLabel={adjust.label} onPreview={previewAdjust} onCreate={createAdjust} onCancel={cancelAdjust} />
         )}
         {boxPicker && (boxPicker === "fill" ? boxState.fill : boxState.stroke) && (
           <ColourPicker
             initial={(boxPicker === "fill" ? boxState.fill : boxState.stroke) || "#000000"}
-            onOk={(hex) => { applyBoxColour(boxPicker, hex); setBoxPicker(null); }}
+            effects={boxState.kind === "character" ? boxEffects : undefined}
+            effectsNote={boxState.kind === "background" ? "The stage background has no outline or shadow" : "A picture has no outline or shadow"}
+            onOk={(hex, chosen) => { if (chosen) setBoxEffects(chosen); applyBoxColour(boxPicker, hex, chosen); setBoxPicker(null); }}
             onCancel={() => setBoxPicker(null)}
           />
         )}
@@ -3429,25 +4464,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onRequestPick={(target) => setFrPicking(target)}
             picking={frPicking}
             picked={frPicked}
-          />
-        )}
-        {recolorOpen && (
-          <RecolorPanel
-            character={selected?.type === "character" ? selected : null}
-            activePart={selected?.type === "character" ? activeCharacterPart : null}
-            activePartLabel={selected?.type === "character" && activeCharacterPart ? partLabel(selected, activeCharacterPart) : undefined}
-            getFrame={() => (selected ? frameAccessRef.current?.(selected.id) : undefined)}
-            initialTarget={recolorTarget}
-            pickedColor={pickedColor?.color || null}
-            pickNonce={pickedColor?.nonce || 0}
-            pickActive={colorPickActive}
-            onRequestPick={(scope) => { pickScopeRef.current = scope; setColorPickActive((active) => !active); }}
-            onPreview={(rule) => setPreviewColorReplacement(rule && selected?.type === "character" ? { objectId: selected.id, rule } : null)}
-            onCommit={commitColorReplacement}
-            onRemove={removeColorReplacement}
-            onResetAll={resetColorReplacements}
-            onClose={closeRecolor}
-            position={recolorPosition}
           />
         )}
 
@@ -3572,6 +4588,45 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               }
             }}
           >
+            {selected?.type === "character" && (characterIsolated || activeCharacterPart) && !symbolView && (() => {
+              // Illustrator's isolation bar: where you are inside the character; a name goes back to it.
+              const container = partReplacementBrowserOpen ? activeCharacterPart || "" : (() => {
+                const parents = Array.from(new Set(partMembers(activeCharacterPart).map(parentPartKey)));
+                return parents.length === 1 ? parents[0] : "";
+              })();
+              const segments = container ? container.split("/") : [];
+              const title = (segment: string) => segment.replace(/^shape(_\d+)?.*$/i, "Shape").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (letter) => letter.toUpperCase());
+              const group = enteredGroupId ? (selected.partGroups || []).find((item) => item.id === enteredGroupId) : null;
+              return (
+                <nav className="cb-isolation-bar" aria-label="Inside the character">
+                  <button type="button" className="cb-isolation-back" onClick={stepOutPartIsolation} title="Back one level (Esc, or double-click empty canvas)" aria-label="Back one level">
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M7 3 2 8l5 5M2.5 8H14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </button>
+                  <svg className="cb-isolation-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5 8 3l5.5 2.5L8 8zM2.5 8.5 8 11l5.5-2.5M2.5 11.5 8 14l5.5-2.5" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /></svg>
+                  <button type="button" className={!segments.length && !group ? "current" : ""} onClick={() => goToPartLevel("")}>{selected.name}</button>
+                  {segments.map((segment, index) => {
+                    const level = segments.slice(0, index + 1).join("/");
+                    return (
+                      <span key={level}>
+                        <i aria-hidden="true">›</i>
+                        <button type="button" className={index === segments.length - 1 && !group ? "current" : ""} onClick={() => goToPartLevel(level)}>{title(segment)}</button>
+                      </span>
+                    );
+                  })}
+                  {group && <span><i aria-hidden="true">›</i><button type="button" className="current">{group.name}</button></span>}
+                </nav>
+              );
+            })()}
+            {enteredObjectGroup && !(selected?.type === "character" && (characterIsolated || activeCharacterPart)) && !symbolView && (
+              <nav className="cb-isolation-bar" aria-label="Inside the group">
+                <button type="button" className="cb-isolation-back" onClick={stepOutObjectGroup} title="Out of the group (Esc, or double-click empty canvas)" aria-label="Out of the group">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M7 3 2 8l5 5M2.5 8H14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                </button>
+                <svg className="cb-isolation-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5 8 3l5.5 2.5L8 8zM2.5 8.5 8 11l5.5-2.5M2.5 11.5 8 14l5.5-2.5" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /></svg>
+                <button type="button" onClick={stepOutObjectGroup}>{scene.name || "Scene"}</button>
+                <span><i aria-hidden="true">›</i><button type="button" className="current">{draft.objects.find((item) => item.group === enteredObjectGroup)?.groupName || "Group"}</button></span>
+              </nav>
+            )}
             {notice && (
               <div key={notice.id} className={`cb-canvas-notice ${notice.tone === "error" ? "error" : ""}`} role={notice.tone === "error" ? "alert" : "status"}>
                 {notice.text}
@@ -3600,6 +4655,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onMoveMany={moveObjects}
               onDuplicateMoved={duplicateMovedObjects}
               onTransform={transformObject}
+              onTransformMany={transformObjects}
+              enteredObjectGroup={enteredObjectGroup}
+              onEnterObjectGroup={enterObjectGroup}
+              onObjectGroupStepOut={stepOutObjectGroup}
+              onSetGroupPivot={setGroupPivot}
               activeCharacterPart={selected?.type === "character" ? activeCharacterPart : null}
               onMoveCharacterPart={moveCharacterPart}
               onTransformCharacterPart={transformCharacterPart}
@@ -3607,16 +4667,22 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onActiveCharacterPart={handleActiveCharacterPart}
               onCharacterPartDoubleClick={handleCharacterPartDoubleClick}
               characterPartEntered={selected?.type === "character" && Boolean(activeCharacterPart) && partReplacementBrowserOpen}
-              previewColorReplacement={previewColorReplacement}
               frameAccessRef={frameAccessRef}
               viewCenterRef={viewCenterRef}
               layerGeometryRef={layerGeometryRef}
-              blockDoubleClick={activeTool === "tone" || colorPickActive || boxPicking || Boolean(frPicking)}
+              blockDoubleClick={stageColourTool || boxPicking || Boolean(frPicking)}
               symbolView={stageSymbolView}
+              characterIsolated={characterIsolated && selected?.type === "character"}
+              onTogglePartSelection={togglePartSelection}
+              onPartsInBox={selectPartsInBox}
+              onIsolationEmptyClick={isolationEmptyClick}
+              onIsolationStepOut={stepOutPartIsolation}
+              onTransformCharacterParts={transformCharacterParts}
               onSymbolDoubleClick={symbolDoubleClick}
               onEnterSymbol={(id) => void enterSymbol(id)}
-              colorPickActive={colorPickActive || toneToolLive || Boolean(frPicking) || boxPicking}
-              colorPickCursor={colorPickActive || frPicking || boxPicking ? "pick" : toneDarken ? "darken" : "lighten"}
+              onDistributeParts={(mode) => void distributeRef.current(mode)}
+              colorPickActive={stageColourTool || Boolean(frPicking) || boxPicking}
+              colorPickCursor={frPicking || boxPicking || activeTool === "eyedropper" ? "pick" : toneDarkNow ? "darken" : "lighten"}
               onColorPick={handleStageColorPress}
               onCharacterPartsReady={setCharacterPartsReady}
               zoom={canvasZoom}
@@ -3656,13 +4722,15 @@ export default function EditorShell({ projectId }: { projectId: string }) {
           <Timeline
             scenes={project.scenes}
             activeId={scene.id}
-            layers={draft.objects}
-            selectedObjectId={selectedObjectId}
+            layers={insideCharacterKey ? rows.filter((row) => row.id === insideCharacterKey) : rows}
+            selectedObjectId={selected ? rowKeyOf(selected, enteredObjectGroup) : null}
+            onEnterGroup={enterGroupRow}
+            onSelectLayers={selectRows}
             isPlaying={isPlaying}
             playhead={playhead}
             activeDuration={duration}
             onSelect={changeScene}
-            onSelectLayer={selectEditorObject}
+            onSelectLayer={selectRow}
             onAdd={addScene}
             onSeek={(seconds) => setPlayhead(Math.max(0, Math.min(duration, seconds)))}
             onPlay={() => { if (!isPlaying && playhead >= duration) setPlayhead(0); setPlaying(!isPlaying); }}
@@ -3671,19 +4739,25 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onCreateMotion={(id) => createMotion(id)}
             onReorderLayers={reorderLayers}
             onMoveFramesToLayer={moveFramesToLayer}
-            onDeleteLayer={deleteLayer}
-            onUpdateLayerTiming={updateLayerTiming}
-            onToggleLayerLoop={toggleLayerLoop}
+            onDeleteLayer={deleteRow}
+            onUpdateLayerTiming={updateRowTiming}
+            onToggleLayerLoop={toggleRowLoop}
             onClipDragChange={onClipDragChange}
             frameSelection={frameSelection}
             onSelectFrames={selectFrames}
-            onFrameAction={frameAction}
-            onMoveKeyframe={moveKeyframe}
-            onSetTweenEase={setTweenEase}
+            onFrameAction={rowFrameAction}
+            onMoveKeyframe={moveRowKeyframe}
+            onSetTweenEase={setRowTweenEase}
             onAddLayer={addLayer}
-            onToggleLayerHidden={(id) => toggleLayerFlag(id, "hidden")}
-            onToggleLayerLocked={(id) => toggleLayerFlag(id, "locked")}
-            sourceDurations={sourceDurations}
+            onToggleLayerHidden={(id) => toggleRowFlag(id, "hidden")}
+            onSoloLayer={soloRow}
+            onRenameLayer={renameRow}
+            onRenameObject={renameRowObject}
+            onToggleLayerLocked={(id) => toggleRowFlag(id, "locked")}
+            onMergeLayers={(keys) => mergeLayers(keys)}
+            onSplitLayers={splitLayers}
+            layerMemberCounts={rowMemberCounts}
+            sourceDurations={rowSourceDurations}
           />
           )}
         </section>
@@ -3723,7 +4797,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onApplyLibraryReplacement={applyLibraryPartReplacement}
             onSwapPartSymbol={swapCharacterPartSymbol}
             onRestorePart={(partKey) => restoreCharacterPart(selected.id, partKey)}
-            onOpenRecolor={() => openRecolor("both")}
             onDelete={() => deleteLayer(selected.id)}
           />
         ) : (

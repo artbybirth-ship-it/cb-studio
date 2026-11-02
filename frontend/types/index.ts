@@ -93,6 +93,26 @@ export type CharacterKeyframe = {
   tween?: { easeIn: number; easeOut: number } | false;
 };
 
+/** A keyframe of a ⌘G group's motion: its move (x, y in stage px), turn (degrees) and size,
+ *  relative to where its objects themselves are; tween as on CharacterKeyframe. */
+export type GroupKeyframe = {
+  id: string;
+  /** Seconds from the start of the scene. */
+  time: number;
+  x: number;
+  y: number;
+  rotation: number;
+  scale: number;
+  tween?: { easeIn: number; easeOut: number } | false;
+};
+
+/** A ⌘G group's registration point (stage px, with no motion applied) and its keyframes. */
+export type GroupMotion = {
+  pivotX?: number;
+  pivotY?: number;
+  keyframes?: GroupKeyframe[];
+};
+
 export type AnimationClip = {
   id: string;
   type: "gesture" | "move" | "talk";
@@ -210,6 +230,23 @@ export type EditorObject = {
   keyframes?: CharacterKeyframe[];
   /** Static per-source-part offsets, layered below animated part keyframes. */
   partOverrides?: Record<CharacterPartKey, CharacterPartOverride>;
+  /** Timeline layer this object is on (Merge Layers): objects with the same tag share one layer
+   *  row, kept next to each other in the stacking order. No tag = a layer of its own. */
+  layer?: string;
+  /** A merged timeline layer's own name (same on every object of the layer). Unset = the row shows
+   *  its objects' names; a one-object layer shows its object's `name`. */
+  layerName?: string;
+  /** ⌘G group of objects on the canvas: a click on any member selects them all. On the timeline
+   *  the group is one row (named groupName, same on every member) until it is entered. */
+  group?: string;
+  groupName?: string;
+  /** The group's registration point and motion (same on every member; lib/groupMotion.ts). */
+  groupMotion?: GroupMotion;
+  /** A part layer (Distribute to Layers, pasted parts): the character draws only these parts. */
+  onlyParts?: CharacterPartKey[];
+  /** ⌘G groups of parts (Illustrator): a click on any member selects them all, until the group is
+   *  entered (double-click). Saved with this character in this scene. */
+  partGroups?: Array<{ id: string; name: string; members: CharacterPartKey[] }>;
   /** Prompt/manual body-part animation keyframes layered over the source Animate timeline. */
   partKeyframes?: Record<CharacterPartKey, CharacterPartKeyframe[]>;
   /** Visual/action metadata used by the timeline and AI planner. */

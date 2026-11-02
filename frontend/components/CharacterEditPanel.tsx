@@ -43,8 +43,6 @@ type Props = {
   onSwapPartSymbol: (partKey: CharacterPartKey, symbol: string | null) => void;
   /** Brings back a body part removed with Delete in double-click mode. */
   onRestorePart: (partKey: CharacterPartKey) => void;
-  /** Opens the Recolour panel (Fill/Stroke boxes in the tool palette). */
-  onOpenRecolor: () => void;
   replacementBrowserOpen: boolean;
   onReplacementBrowserOpenChange: (open: boolean) => void;
   referenceCharacterId: string;
@@ -102,7 +100,7 @@ const renderLibraryThumb = (thumbUrl: string, label: string, _assetUrl?: string)
   <CharacterThumb thumbUrl={thumbUrl || EMPTY_PREVIEW} label={label} />
 );
 
-export default function CharacterEditPanel({ character, activePart, onActivePart, onBack, onLibrariesHome, onPatch, onDelete, onUploadVoice, canvasZoom, onCanvasZoomChange, onCanvasFit, playhead, duration, currentTransform, onAddOrUpdateKeyframe, onDeleteKeyframe, onSeek, onClearKeyframes, onAddOrUpdatePartKeyframe, onDeletePartKeyframe, onClearPartKeyframes, onReplacePartAsset, onClearPartReplacement, onApplyLibraryReplacement, onSwapPartSymbol, onRestorePart, onOpenRecolor, replacementBrowserOpen, onReplacementBrowserOpenChange, referenceCharacterId, onReferenceCharacterChange, onReferenceActionChange }: Props) {
+export default function CharacterEditPanel({ character, activePart, onActivePart, onBack, onLibrariesHome, onPatch, onDelete, onUploadVoice, canvasZoom, onCanvasZoomChange, onCanvasFit, playhead, duration, currentTransform, onAddOrUpdateKeyframe, onDeleteKeyframe, onSeek, onClearKeyframes, onAddOrUpdatePartKeyframe, onDeletePartKeyframe, onClearPartKeyframes, onReplacePartAsset, onClearPartReplacement, onApplyLibraryReplacement, onSwapPartSymbol, onRestorePart, replacementBrowserOpen, onReplacementBrowserOpenChange, referenceCharacterId, onReferenceCharacterChange, onReferenceActionChange }: Props) {
   const { characters: characterLibrary } = useCharacterLibrary();
   const parts = character.sourceParts || [];
   const effectivePart = activePart || null;
@@ -559,7 +557,7 @@ export default function CharacterEditPanel({ character, activePart, onActivePart
 
         {browserTab === "colors" && (
           <div className="cb-visual-browser-block cb-v79-browser-content cb-character-colors-panel">
-            <div className="cb-visual-source-caption">Character colors · use the Fill/Stroke boxes at the bottom of the tool palette to recolour.</div>
+            <div className="cb-visual-source-caption">Character colours · use Fill/Stroke or Find/Replace in the Colour palette.</div>
 
             <div className="cb-color-control-card">
               <div className="cb-color-control-title"><strong>Global Filter</strong><small>Optional · affects the whole character including clothes</small></div>
@@ -569,10 +567,10 @@ export default function CharacterEditPanel({ character, activePart, onActivePart
               <button className="cb-color-reset-button" onClick={() => onPatch({ characterHue: 0, characterSaturation: 100, characterBrightness: 100 }, true)}>Reset Global Filter</button>
             </div>
 
-            {/* Real vector recolouring lives in the tool palette (Fill/Stroke boxes), replacing the old tint cards. */}
+            {/* Every colour change made with the Colour palette (Fill/Stroke, Light/Dark, Find/Replace, Adjust colour) is a rule; Reset removes them all (one undo step). */}
             <div className="cb-color-control-card">
-              <div className="cb-color-control-title"><strong>Recolour character</strong><small>Change any colour of the artwork itself, with its shades, for the whole character or the selected part. Find and replace works like Adobe Animate.</small></div>
-              <button className="cb-color-reset-button" onClick={onOpenRecolor}>Open Recolour (tool palette)</button>
+              <div className="cb-color-control-title"><strong>Original colours</strong><small>{character.colorReplacements?.length ? "Put back every colour of this character as it was drawn. Undo brings your changes back." : "This character has its original colours."}</small></div>
+              <button className="cb-color-reset-button" disabled={!character.colorReplacements?.length} onClick={() => onPatch({ colorReplacements: [] }, true)}>Reset colours</button>
             </div>
           </div>
         )}

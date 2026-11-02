@@ -52,15 +52,49 @@ export const OpenFileIcon = () => (
 export const NewFileIcon = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M14 12.5h10.5V24H8V17" {...line} /><path d="M11 18h10.5M11 21h10.5" {...line} /><path d="M10.5 6.5v8M6.5 10.5h8" {...line} /></svg>
 );
-export const ColourIcon = () => (
-  <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="13" y="13" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="3" /><rect x="7.5" y="7.5" width="11" height="11" fill="currentColor" stroke="#2b2b2b" strokeWidth="1" /></svg>
+/** The Colour group on the rail shows the Fill / Stroke boxes (mockup). */
+export const ColourIcon = () => <FillStrokeIcon />;
+
+// Colour palette tiles: the user's vectors ("colour tools icons.svg"), exact. Each viewBox is the
+// tile (#3a3a3a, drawn by the flyout), so the icons keep the mockup's size inside it.
+/** Light/Dark: a circle, dark on the left and light on the right. */
+export const LightDarkIcon = () => (
+  <svg viewBox="361.83 424.71 31.6 31.6" aria-hidden="true">
+    <circle cx="377.6" cy="440.11" r="9.31" fill="#000" stroke="currentColor" strokeMiterlimit="10" />
+    <path d="M386.91,440.11c0,5.15-4.17,9.32-9.32,9.32v-18.62c5.15,0,9.32,4.17,9.32,9.31Z" fill="currentColor" />
+    <line x1="377.6" y1="430.8" x2="377.6" y2="449.43" stroke="currentColor" strokeMiterlimit="10" />
+  </svg>
 );
+/** Adjust colour: three sliders. */
+export const AdjustColourIcon = () => (
+  <svg viewBox="361.83 482.71 31.6 31.6" aria-hidden="true">
+    {[491.61, 498.11, 504.61].map((y) => <line key={y} x1="368.31" y1={y} x2="386.94" y2={y} stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />)}
+    <circle cx="382.29" cy="491.61" r="1.46" fill="currentColor" />
+    <circle cx="371.84" cy="498.11" r="1.46" fill="currentColor" />
+    <circle cx="378.26" cy="504.61" r="1.46" fill="currentColor" />
+  </svg>
+);
+/** Find/Replace: "F → R". */
+export const FindReplaceIcon = () => {
+  const stroke = { fill: "none", stroke: "currentColor", strokeLinecap: "round", strokeLinejoin: "round" } as const;
+  return (
+    <svg viewBox="491.65 424.71 31.6 31.6" aria-hidden="true">
+      <line x1="504.2" y1="440.16" x2="510.07" y2="440.16" {...stroke} strokeWidth=".5" />
+      <polygon points="509.37 441.7 511.58 440.16 509.37 438.62 509.37 441.7" fill="currentColor" />
+      <line x1="513.7" y1="436.29" x2="513.7" y2="444.71" {...stroke} />
+      <path d="M516.31,440.53c.93,0,1.68.94,1.68,2.09s.44,2.28.44,2.09" {...stroke} />
+      <path d="M516.31,440.53c1.17,0,2.12-.95,2.12-2.12s-.95-2.12-2.12-2.12" {...stroke} />
+      <line x1="513.79" y1="436.29" x2="516.31" y2="436.29" {...stroke} />
+      <line x1="516.31" y1="440.53" x2="513.79" y2="440.53" {...stroke} />
+      <line x1="497.79" y1="436.29" x2="497.79" y2="444.71" {...stroke} />
+      <line x1="497.79" y1="436.29" x2="502.32" y2="436.29" {...stroke} />
+      <line x1="497.79" y1="440.16" x2="501.32" y2="440.16" {...stroke} />
+    </svg>
+  );
+};
 export const FillIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="9" y="9" width="14" height="14" fill="currentColor" stroke="currentColor" strokeWidth="1" /></svg>);
 export const StrokeIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="10" y="10" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="3" /></svg>);
 export const SwapIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 12h14l-3.5-3.5M24 20H10l3.5 3.5" {...line} /></svg>);
-export const RecolourIcon = () => (
-  <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="12" r="4" fill="#e0624f" /><circle cx="20" cy="11" r="4" fill="#e8c34d" /><circle cx="16" cy="19" r="4" fill="#4f8fe0" /><path d="M8 24h16" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
-);
 export const AlignIcon = () => (<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 25.5h18" {...line} /><rect x="9.5" y="9" width="5" height="13.5" fill="currentColor" /><rect x="17.5" y="14" width="5" height="8.5" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>);
 
 /** Align panel icons: a line on the aligned edge or centre, two boxes. */
