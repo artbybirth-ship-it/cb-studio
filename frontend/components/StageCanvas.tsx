@@ -1017,6 +1017,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       colorReplacements: object.colorReplacements || [],
       // Tween eases edited inside the character (step inside → Ease).
       symbolEases: object.symbolEases || {},
+      symbolKeys: object.symbolKeys || {},
       strokeScale: object.strokeScale ?? 1,
       selectedPart: object.id === selectedObjectId ? (activeCharacterPart || "") : "",
       onlyParts: object.onlyParts || [],

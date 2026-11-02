@@ -1234,15 +1234,64 @@
     }
     return cbClipsByClass.found[name] || [];
   }
-  function applySymbolEases(edits) {
-    var key = JSON.stringify(edits || {}), root = cbRoot();
+  // ---- Moved and added keyframes (CHARACTER_EDITS.symbolKeys: { <class>: { <layer>: { props, anchors } } },
+  // anchors = every keyframe of the layer as [frame in the file, frame now], an added keyframe being one
+  // the file has none at). The tween steps of the layer's objects follow the anchors piecewise-linearly;
+  // inside a step with an added keyframe the ease is warped the same way, so the motion stays continuous.
+  var cbRetimedSteps = [];
+  function stepsOf(clip, props) {
+    var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean), out = [];
+    clip.timeline.tweens.forEach(function (tween) {
+      if (targets.indexOf(tween.target) < 0) return;
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) out.push(step);
+    });
+    return out;
+  }
+  function retimeSteps(clip, edit, touched) {
+    var anchors = edit.anchors || [], orig = anchors.map(function (a) { return a[0]; }), now = anchors.map(function (a) { return a[1]; });
+    if (anchors.length < 2) return;
+    function through(x, from, to) {
+      if (x <= from[0]) return to[0] + (x - from[0]);
+      for (var i = 0; i + 1 < from.length; i++) if (x <= from[i + 1]) return to[i] + (x - from[i]) * (to[i + 1] - to[i]) / ((from[i + 1] - from[i]) || 1);
+      return to[to.length - 1] + (x - from[from.length - 1]);
+    }
+    stepsOf(clip, edit.props).forEach(function (step) {
+      var t = step.t, d = step.d, start = through(t, orig, now), end = through(t + d, orig, now);
+      var inner = orig.some(function (o) { return o > t + 1e-6 && o < t + d - 1e-6; });
+      var was = step.ease;
+      cbRetimedSteps.push({ step: step, clip: clip, t: t, d: d, ease: was });
+      step.t = start; step.d = end - start;
+      touched.add(clip);
+      if (inner && d > 0) step.ease = function (x) {
+        var r = (through(start + x * (end - start), now, orig) - t) / d;
+        return was ? was(Math.max(0, Math.min(1, r)), 0, 1, 1) : r;
+      };
+    });
+  }
+  // Which layers' keyframes can be edited here: each of their keyframes is the start or end of a tween step.
+  function keyEditable(clip, props, frames) {
+    var steps = stepsOf(clip, props);
+    if (!steps.length) return false;
+    return frames.every(function (f) { return steps.some(function (st) { return st.t === f || st.t + st.d === f; }); });
+  }
+  function postKeyEditable(d) {
+    var found = {};
+    clipsOfClass(d.js).slice(0, 1).forEach(function (clip) {
+      (d.layers || []).forEach(function (l) { found[l.index] = keyEditable(clip, l.props, l.frames || []); });
+    });
+    cbPost('SYMBOL_KEYS_EDITABLE', { js: d.js, token: d.token, editable: found });
+  }
+  function applySymbolEdits(eases, keys) {
+    var key = JSON.stringify([eases || {}, keys || {}]), root = cbRoot();
     if (key === cbEasesKey || !root) return;
     cbEasesKey = key;
     var clips = new Set();
+    cbRetimedSteps.reverse().forEach(function (r) { r.step.t = r.t; r.step.d = r.d; r.step.ease = r.ease; clips.add(r.clip); });
+    cbRetimedSteps = [];
     cbEasedSteps.forEach(function (eased) { eased.step.ease = eased.ease; clips.add(eased.clip); });
     cbEasedSteps = [];
-    Object.keys(edits || {}).forEach(function (name) {
-      var entries = edits[name] || {};
+    Object.keys(eases || {}).forEach(function (name) {
+      var entries = eases[name] || {};
       clipsOfClass(name).forEach(function (clip) {
         Object.keys(entries).forEach(function (k) {
           var edit = entries[k], targets = (edit.props || []).map(function (prop) { return clip[prop]; });
@@ -1257,6 +1306,10 @@
           });
         });
       });
+    });
+    Object.keys(keys || {}).forEach(function (name) {
+      var layers = keys[name] || {};
+      clipsOfClass(name).forEach(function (clip) { Object.keys(layers).forEach(function (index) { retimeSteps(clip, layers[index], clips); }); });
     });
     // An independent clip only redoes its timeline when its position changes (synched ones do when drawn).
     clips.forEach(function (clip) {
@@ -1318,9 +1371,10 @@
       // loop: wrap past the last frame (Animate "Loop"); otherwise hold the last frame ("Play Once").
       // SEEK_DONE tells the video export (render harness) the frame is drawn and can be captured.
       if (d.type === 'SEEK') { if (root.gotoAndStop) root.gotoAndStop(seekPosition(root, d.seekMs, d.loop, Math.max(1, root.totalFrames || 1))); if (cbSymbolView) applySymbolView(); if (cbOnlyParts.length) applyOnly(); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
+      else if (d.type === 'SYMBOL_KEYS_QUERY') { postKeyEditable(d); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
-      else if (d.type === 'CHARACTER_EDITS') { applySymbolEases(d.symbolEases); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }
+      else if (d.type === 'CHARACTER_EDITS') { applySymbolEdits(d.symbolEases, d.symbolKeys); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }
       else if (d.type === 'SYMBOL_VIEW') { restoreSymbolView(); cbSymbolView = d.view || null; applySymbolView(); if (st && st.update) st.update(); scheduleBounds(); }
       else if (d.type === 'SYMBOL_HIT') { cbPost('SYMBOL_HIT', { prop: symbolHit(Number(d.normalizedX || 0), Number(d.normalizedY || 0)) }); }
       else if (d.type === 'HIT_TEST_PART') { selectAt(Number(d.normalizedX || 0), Number(d.normalizedY || 0)); }

@@ -3270,6 +3270,47 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       item.symbolEases = symbols;
     });
   }, [mutate, symbolView]);
+  // Keyframes moved or added inside the character: the layer's keyframes as [file frame, frame now], saved on this placed character.
+  const setSymbolKeys = useCallback((layerIndex: number, anchors: Array<[number, number]> | null) => {
+    if (!symbolView) return;
+    const level = symbolView.levels[symbolView.levels.length - 1];
+    const props = level.data.layers[layerIndex]?.props || [];
+    mutate((data) => {
+      const item = data.objects.find((object) => object.id === symbolView.objectId);
+      if (!item) return;
+      const symbols = { ...(item.symbolKeys || {}) }, layers = { ...(symbols[level.js] || {}) };
+      if (anchors) layers[String(layerIndex)] = { props, anchors }; else delete layers[String(layerIndex)];
+      if (Object.keys(layers).length) symbols[level.js] = layers; else delete symbols[level.js];
+      item.symbolKeys = symbols;
+    });
+  }, [mutate, symbolView]);
+  const previewSymbolKeys = useCallback((layerIndex: number, anchors: Array<[number, number]> | null) => {
+    if (!anchors) { window.setTimeout(() => { scrubHistoryRef.current = "idle"; }, 0); return; }
+    if (scrubHistoryRef.current === "idle") scrubHistoryRef.current = "armed";
+    setSymbolKeys(layerIndex, anchors);
+  }, [setSymbolKeys]);
+  // Which layers of the open symbol the player can move keyframes on (it knows how the pose was built).
+  const [keysEditable, setKeysEditable] = useState<{ js: string; editable: Record<number, boolean> } | null>(null);
+  const keysLevelJs = symbolView ? symbolView.levels[symbolView.levels.length - 1].js : null;
+  const keysLayers = symbolView ? symbolView.levels[symbolView.levels.length - 1].data.layers : null;
+  const keysObjectId = symbolView?.objectId;
+  useEffect(() => {
+    if (!keysObjectId || !keysLevelJs || !keysLayers) { setKeysEditable(null); return; }
+    const frame = frameAccessRef.current?.(keysObjectId);
+    const post = () => frame?.contentWindow?.postMessage({
+      source: "characterbazaarstudio-editor", type: "SYMBOL_KEYS_QUERY", js: keysLevelJs, token: keysLevelJs,
+      layers: keysLayers.map((layer, index) => ({ index, props: layer.props || [], frames: layer.frames.map((item) => item.i) })).filter((layer) => layer.props.length),
+    }, "*");
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (d?.source !== "characterbazaarstudio-animate" || d.type !== "SYMBOL_KEYS_EDITABLE" || d.js !== keysLevelJs) return;
+      setKeysEditable({ js: keysLevelJs, editable: Object.fromEntries(Object.entries(d.editable || {}).map(([key, value]) => [Number(key), Boolean(value)])) });
+    };
+    window.addEventListener("message", onMessage);
+    post();
+    const retry = window.setTimeout(post, 600);
+    return () => { window.removeEventListener("message", onMessage); window.clearTimeout(retry); };
+  }, [keysObjectId, keysLevelJs, keysLayers]);
   // A drag on the Ease box shows on the stage as it moves and is one undo step.
   const previewSymbolEase = useCallback((layerIndex: number, keyframe: { i: number; d: number }, value: number | null) => {
     if (value == null) { window.setTimeout(() => { scrubHistoryRef.current = "idle"; }, 0); return; }
@@ -4731,6 +4772,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 playing={symbolView.playing}
                 hidden={symbolView.hidden}
                 eases={object?.symbolEases?.[current.js]}
+                keys={object?.symbolKeys?.[current.js]}
+                editable={keysEditable?.js === current.js ? keysEditable.editable : undefined}
+                onSetKeys={setSymbolKeys}
+                onPreviewKeys={previewSymbolKeys}
                 onSeek={seekSymbol}
                 onSetEase={setSymbolEase}
                 onPreviewEase={previewSymbolEase}

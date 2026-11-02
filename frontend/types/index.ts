@@ -13,6 +13,9 @@ export type CharacterPartKey = string;
 /** One classic tween's ease edited inside a character: the objects its layer creates, its keyframe and length, and the ease (−100 ease in … 100 ease out). */
 export type SymbolEaseEdit = { props: string[]; frame: number; frames: number; value: number };
 
+/** A layer's keyframes inside a character after editing: [frame in the file, frame now] for each one (an added keyframe has no frame in the file: it takes the one it was added at). */
+export type SymbolKeyEdit = { props: string[]; anchors: Array<[number, number]> };
+
 export type ColorReplacement = {
   id: string;
   from: string;
@@ -267,6 +270,8 @@ export type EditorObject = {
   colorReplacements?: ColorReplacement[];
   /** Tween eases edited inside this character (step inside), by symbol class, then "<layer>:<frame>". */
   symbolEases?: Record<string, Record<string, SymbolEaseEdit>>;
+  /** Keyframes moved or added inside this character, by symbol class, then layer index. */
+  symbolKeys?: Record<string, Record<string, SymbolKeyEdit>>;
   /** Runtime-detected source body parts for Archive/CreateJS actions. */
   sourceParts?: CharacterPartDescriptor[];
   /** User-supplied image replacements for selected body parts. */
