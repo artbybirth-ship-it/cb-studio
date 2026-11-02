@@ -128,11 +128,14 @@
     timedLayers.push({el:el,object:object});
   }
 
-  // Layers draw only inside their time span (StageCanvas): from startTime for actionDurationMs.
+  // Layers draw only inside their time span, on the timeline's 30 fps frame grid: from the start
+  // frame to the frame before start + length (lib/layerRows.ts inLayerSpan, the same rule).
   function inTimeSpan(object, seconds){
     var start = Math.max(0, Number(object.startTime || 0));
-    var length = object.actionDurationMs ? Math.max(0.1, Number(object.actionDurationMs) / 1000) : null;
-    return seconds + 0.0001 >= start && (length == null || seconds <= start + length + 0.0001);
+    var frame = Math.floor(seconds * 30 + 1e-4), startFrame = Math.round(start * 30);
+    if (frame < startFrame) return false;
+    if (!object.actionDurationMs) return true;
+    return frame < Math.max(startFrame + 1, Math.round((start + object.actionDurationMs / 1000) * 30));
   }
   function updateVisibility(seconds){
     timedLayers.forEach(function(entry){

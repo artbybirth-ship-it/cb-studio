@@ -250,19 +250,66 @@ function parseBrush(brush: Brush): BrushArt | null {
     return parts.length ? { width, height, parts } : null;
   } catch { return null; }
 }
-/** The artwork along the straight line from (x0, y0) to (x1, y1), keeping its proportions. */
-function brushAlong(art: BrushArt, x0: number, y0: number, x1: number, y1: number): Array<{ style: Fill; paths: Path[] }> {
+/** The artwork along the straight line from (x0, y0) to (x1, y1): its length is the line's, its thickness the stroke's weight. */
+function brushAlong(art: BrushArt, x0: number, y0: number, x1: number, y1: number, weight: number): Array<{ style: Fill; paths: Path[] }> {
   const length = Math.hypot(x1 - x0, y1 - y0);
   if (length < 0.01) return [];
   const ux = (x1 - x0) / length, uy = (y1 - y0) / length;
-  const thick = length * (art.height / art.width);
-  const m: Matrix = [ux * (length / art.width), uy * (length / art.width), -uy * (thick / art.height), ux * (thick / art.height), 0, 0];
+  const m: Matrix = [ux * (length / art.width), uy * (length / art.width), -uy * (weight / art.height), ux * (weight / art.height), 0, 0];
   m[4] = x0 + m[2] * (-art.height / 2);
   m[5] = y0 + m[3] * (-art.height / 2);
   return art.parts.map((part) => ({ style: { t: "solid", color: part.color, alpha: part.alpha }, paths: part.paths.map((p) => transformPath(p, m)) }));
 }
-const firstPoint = (path: Path): Point => [path[0][1] as number, path[0][2] as number];
-const lastPoint = (path: Path): Point => { const c = path[path.length - 1]; return [c[c.length - 2] as number, c[c.length - 1] as number]; };
+/** How far along the stroke (px) the artwork turns through a knee, so the bend does not crack. */
+const BRUSH_BEND_SMOOTHING = 6;
+/** The artwork bent along a stroke: art x is the distance along it, art y the distance across it. */
+function brushOnPath(art: BrushArt, path: Path, weight: number): Array<{ style: Fill; paths: Path[] }> {
+  const line: Point[] = [[path[0][1], path[0][2]]];
+  for (const cmd of path.slice(1)) {
+    const from = line[line.length - 1];
+    if (cmd[0] === "L") line.push([cmd[1], cmd[2]]);
+    else if (cmd[0] === "Q") for (let k = 1; k <= 12; k += 1) { const t = k / 12, u = 1 - t; line.push([u * u * from[0] + 2 * u * t * cmd[1] + t * t * cmd[3], u * u * from[1] + 2 * u * t * cmd[2] + t * t * cmd[4]]); }
+  }
+  const points = line.filter((p, i) => !i || Math.hypot(p[0] - line[i - 1][0], p[1] - line[i - 1][1]) > 1e-6);
+  if (points.length < 2) return [];
+  if (points.length === 2) return brushAlong(art, ...points[0], ...points[1], weight);
+  const at = [0];
+  for (let i = 1; i < points.length; i += 1) at.push(at[i - 1] + Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]));
+  const length = at[at.length - 1];
+  const segmentAt = (s: number) => { let i = 0; while (i < points.length - 2 && at[i + 1] < s) i += 1; return i; };
+  const direction = (s: number): Point => {
+    let x = 0, y = 0;
+    for (let k = 0; k <= 8; k += 1) {
+      const i = segmentAt(Math.max(0, Math.min(length, s - BRUSH_BEND_SMOOTHING + (2 * BRUSH_BEND_SMOOTHING * k) / 8)));
+      const d = at[i + 1] - at[i];
+      x += (points[i + 1][0] - points[i][0]) / d; y += (points[i + 1][1] - points[i][1]) / d;
+    }
+    const n = Math.hypot(x, y) || 1;
+    return [x / n, y / n];
+  };
+  const place = (ax: number, ay: number): Point => {
+    const s = Math.max(0, Math.min(length, (ax / art.width) * length)), i = segmentAt(s);
+    const f = (s - at[i]) / (at[i + 1] - at[i]), d = direction(s), off = (ay - art.height / 2) * (weight / art.height);
+    return [points[i][0] + (points[i + 1][0] - points[i][0]) * f - d[1] * off, points[i][1] + (points[i + 1][1] - points[i][1]) * f + d[0] * off];
+  };
+  const step = art.width / 64;
+  const bend = (source: Path): Path => {
+    const out: Path = [];
+    let x = 0, y = 0;
+    for (const cmd of source) {
+      if (cmd[0] === "M") { x = cmd[1]; y = cmd[2]; out.push(["M", ...place(x, y)]); continue; }
+      const ex = cmd[0] === "L" ? cmd[1] : cmd[3], ey = cmd[0] === "L" ? cmd[2] : cmd[4];
+      const pieces = Math.max(1, Math.ceil(Math.hypot(ex - x, ey - y) / step));
+      for (let k = 1; k <= pieces; k += 1) {
+        const t = k / pieces, u = 1 - t;
+        out.push(["L", ...(cmd[0] === "L" ? place(x + (ex - x) * t, y + (ey - y) * t) : place(u * u * x + 2 * u * t * cmd[1] + t * t * ex, u * u * y + 2 * u * t * cmd[2] + t * t * ey))]);
+      }
+      x = ex; y = ey;
+    }
+    return out;
+  };
+  return art.parts.map((part) => ({ style: { t: "solid", color: part.color, alpha: part.alpha }, paths: part.paths.map(bend) }));
+}
 
 // ---------- eases (the same curves in the generated code and when baking shape tweens)
 function easeFunction(ease: Ease | undefined): (t: number) => number {
@@ -299,7 +346,8 @@ function easeArgument(ease: Ease | undefined): string {
 }
 
 // ---------- shape tweens (Animate's matched curves, drawn at t)
-type Group = { fill?: Fill; stroke?: Stroke; paths: Path[] };
+/** evenOdd: a shape tween's fill. Its outline can cross itself, and the loops are holes. */
+type Group = { fill?: Fill; stroke?: Stroke; paths: Path[]; evenOdd?: boolean };
 function frameStyles(elements: FlaElement[]) {
   const shapes = elements.filter((e): e is ShapeElement => e.k === "shape");
   const unique = <T,>(list: T[]) => { const seen = new Map<string, T>(); list.forEach((s) => { const k = JSON.stringify(s); if (!seen.has(k)) seen.set(k, s); }); return [...seen.values()]; };
@@ -327,11 +375,11 @@ function morphGroups(frame: Keyframe, next: Keyframe, t: number, brushes: Map<st
   const out: Group[] = [];
   for (const { seg, paths } of groups.values()) {
     const fa = A.fills[seg.f1], fb = B.fills[seg.f2] || fa;
-    if (fa) { out.push({ fill: mixFill(fa, fb, t), paths }); continue; }
+    if (fa) { out.push({ fill: mixFill(fa, fb, t), paths, evenOdd: true }); continue; }
     const sa = A.strokes[seg.s1], sb = B.strokes[seg.s2] || sa;
     if (!sa) continue;
     const art = sa.brush ? brushes.get(sa.brush) : null;
-    if (art) { for (const p of paths) for (const g of brushAlong(art, ...firstPoint(p), ...lastPoint(p))) out.push({ fill: g.style, paths: g.paths }); continue; }
+    if (art) { for (const p of paths) for (const g of brushOnPath(art, p, lerp(sa.w, sb.w))) out.push({ fill: g.style, paths: g.paths }); continue; }
     const fill = sa.fill.t === "solid" && sb.fill.t === "solid" ? mixFill(sa.fill, sb.fill, t) : sa.fill;
     out.push({ stroke: { ...sa, w: lerp(sa.w, sb.w), fill }, paths });
   }
@@ -474,6 +522,7 @@ export async function writeCreateJs(doc: FlaDocument, documentName: string, pose
       const paint = group.fill ? `${fillCommand(group.fill, cx, cy)}.s()` : strokeCommand(group.stroke!);
       emit.lines.push(`\tthis.${name} = new cjs.Shape();`);
       emit.lines.push(`\tthis.${name}.graphics.${paint}.p(${q(encoded)});`);
+      if (group.evenOdd) emit.lines.push(`\tcbEvenOdd(this.${name}.graphics);`);
       const placed = multiply(m, [1, 0, 0, 1, cx, cy]);
       emit.lines.push(`\tthis.${name}.setTransform(${transformArgs(decompose(placed))});`);
       if (maskVar) emit.lines.push(`\tthis.${name}.mask = ${maskVar};`);
@@ -486,7 +535,7 @@ export async function writeCreateJs(doc: FlaDocument, documentName: string, pose
     const groups: Group[] = el.fills.map((f) => ({ fill: f.style, paths: f.paths }));
     for (const s of el.strokes) {
       const art = s.style.brush ? brushes.get(s.style.brush) : null;
-      if (art) { for (const p of s.paths) for (const g of brushAlong(art, ...firstPoint(p), ...lastPoint(p))) groups.push({ fill: g.style, paths: g.paths }); }
+      if (art) { for (const p of s.paths) for (const g of brushOnPath(art, p, s.style.w)) groups.push({ fill: g.style, paths: g.paths }); }
       else groups.push({ stroke: s.style, paths: s.paths });
     }
     return groups;
@@ -544,56 +593,79 @@ export async function writeCreateJs(doc: FlaDocument, documentName: string, pose
   /** order: the order objects are created in (the library lists stage poses in that order); the
    *  stacking order stays the file's. */
   const emitLayer = (emit: Emit, layer: Layer, maskVar: string | null, tweenLines: string[], order?: (elements: FlaElement[]) => number[]) => {
-    // Classic tween runs: keyframes with one instance that tween into the next keyframe's instance.
+    // Runs of keyframes, one after another, that each hold just the same symbol (still, or classic
+    // tweening into the next): one object with its own tween, as Animate writes it.
     const frames = layer.frames;
     const single = (f: Keyframe | undefined) => (f && f.elements.length === 1 && f.elements[0].k === "instance" ? f.elements[0] as InstanceElement : null);
+    const same = (a: InstanceElement, b: InstanceElement) => a.item === b.item && a.symbolType === b.symbolType && a.loop === b.loop;
     const inTrack = new Set<number>();
     type Segment = { start: number; dur: number; el: InstanceElement; to?: { el: InstanceElement; ease?: Ease; rotate?: [string, number] } };
     const tracks: Segment[][] = [];
     for (let k = 0; k < frames.length; k += 1) {
       if (inTrack.has(k)) continue;
       const el = single(frames[k]);
-      if (!el || frames[k].tween !== "motion" || !classes.has(el.item)) continue;
+      if (!el || !classes.has(el.item)) continue;
       const track: Segment[] = [];
-      let j = k;
-      while (j < frames.length) {
+      for (let j = k; j < frames.length; j += 1) {
         const here = single(frames[j]);
-        if (!here || (track.length && here.item !== track[0].el.item)) break;
+        if (!here || (track.length && !same(here, track[0].el))) break;
         const next = frames[j + 1];
         const nextEl = next && next.i === frames[j].i + frames[j].d ? single(next) : null;
         const segment: Segment = { start: frames[j].i, dur: frames[j].d, el: here };
         if (frames[j].tween === "motion" && nextEl) segment.to = { el: nextEl, ease: frames[j].ease, rotate: frames[j].rotate };
         track.push(segment);
-        inTrack.add(j);
-        if (!nextEl || nextEl.item !== here.item) break;
-        j += 1;
+        if (!nextEl || !same(nextEl, here)) break;
       }
+      // A lone still keyframe is simpler as part of the layer's states.
+      if (track.length < 2 && !track[0]?.to) continue;
+      track.forEach((segment) => inTrack.add(frames.findIndex((f) => f.i === segment.start)));
       tracks.push(track);
     }
 
-    // Everything else is shown keyframe by keyframe (shape tweens frame by frame).
-    const states: Array<{ start: number; dur: number; names: string[] }> = [];
+    // Everything else is shown keyframe by keyframe (shape tweens frame by frame). Like Animate, a
+    // symbol that stays on the layer is one object across keyframes: each keyframe's state sets its
+    // place and first frame (p), instead of building another copy of the whole symbol.
+    type Entry = { name: string; props?: string };
+    const states: Array<{ start: number; dur: number; entries: Entry[] }> = [];
+    const pool = new Map<string, string[]>();
+    const uses = new Map<string, number>();
+    let previous = new Set<string>();
+    const reuse = (key: string, taken: Set<string>, create: () => string | null): string | null => {
+      const candidates = (pool.get(key) || []).filter((name) => !taken.has(name));
+      let name: string | null = candidates.find((n) => previous.has(n)) || candidates[0] || null;
+      if (!name) { name = create(); if (name) (pool.get(key) || pool.set(key, []).get(key)!).push(name); }
+      if (name) { taken.add(name); uses.set(name, (uses.get(name) || 0) + 1); }
+      return name;
+    };
     let end = 0;
     frames.forEach((frame, k) => {
-      if (frame.i > end) states.push({ start: end, dur: frame.i - end, names: [] });
+      if (frame.i > end) { states.push({ start: end, dur: frame.i - end, entries: [] }); previous = new Set(); }
       end = frame.i + frame.d;
-      if (inTrack.has(k)) { states.push({ start: frame.i, dur: frame.d, names: [] }); return; }
+      if (inTrack.has(k)) { states.push({ start: frame.i, dur: frame.d, entries: [] }); previous = new Set(); return; }
       const next = frames[k + 1];
       const morphing = frame.tween === "shape" && frame.morph && next && next.i === end;
-      const created: string[][] = frame.elements.map(() => []);
+      const created: Entry[][] = frame.elements.map(() => []);
+      const taken = new Set<string>();
       for (const index of order ? order(frame.elements) : frame.elements.map((_, i) => i)) {
         const el = frame.elements[index];
-        if (el.k === "shape") created[index] = emitShapes(emit, shapeGroups(el), el.m, maskVar);
-        else if (el.k === "instance") { const name = emitInstance(emit, el, maskVar); if (name) created[index] = [name]; }
-        else { const name = emitBitmap(emit, el.item, el.m, maskVar); if (name) created[index] = [name]; }
+        if (el.k === "shape") created[index] = emitShapes(emit, shapeGroups(el), el.m, maskVar).map((name) => ({ name }));
+        else if (el.k === "instance") {
+          const name = reuse(`${el.item}|${el.symbolType}|${el.symbolType === "graphic" ? el.loop : ""}`, taken, () => emitInstance(emit, el, maskVar, true));
+          if (name) created[index] = [{ name, props: propsLiteral(propsOf(el), el.symbolType === "graphic" ? { startPosition: el.first } : {}) }];
+        } else {
+          const name = reuse(`bitmap|${el.item}`, taken, () => emitBitmap(emit, el.item, el.m, maskVar));
+          if (name) created[index] = [{ name, props: propsLiteral({ ...decompose(el.m), alpha: 1 }) }];
+        }
       }
-      const names = created.flat();
-      if (!morphing) { states.push({ start: frame.i, dur: frame.d, names }); return; }
-      states.push({ start: frame.i, dur: 1, names });
+      const entries = created.flat();
+      previous = new Set(entries.map((entry) => entry.name));
+      if (!morphing) { states.push({ start: frame.i, dur: frame.d, entries }); return; }
+      states.push({ start: frame.i, dur: 1, entries });
       const ease = easeFunction(frame.ease);
       for (let f = 1; f < frame.d; f += 1) {
-        states.push({ start: frame.i + f, dur: 1, names: emitShapes(emit, morphGroups(frame, next!, ease(f / frame.d), brushes), IDENTITY, maskVar) });
+        states.push({ start: frame.i + f, dur: 1, entries: emitShapes(emit, morphGroups(frame, next!, ease(f / frame.d), brushes), IDENTITY, maskVar).map((name) => ({ name })) });
       }
+      previous = new Set();
     });
 
     // Tween chains for the classic-tween objects.
@@ -618,10 +690,11 @@ export async function writeCreateJs(doc: FlaDocument, documentName: string, pose
       tweenLines.push(`\tthis.timeline.addTween(${chain});`);
     }
 
-    if (states.some((s) => s.names.length)) {
-      const literal = (names: string[]) => `[${names.map((n) => `{t:this.${n}}`).join(",")}]`;
-      let chain = `cjs.Tween.get({}).to({state:${literal(states[0].names)}})`;
-      for (let i = 1; i < states.length; i += 1) chain += `.to({state:${literal(states[i].names)}},${states[i - 1].dur})`;
+    if (states.some((s) => s.entries.length)) {
+      // An object shown in more than one keyframe gets its props in every state it is in.
+      const literal = (entries: Entry[]) => `[${entries.map((e) => `{t:this.${e.name}${e.props && (uses.get(e.name) || 0) > 1 ? `,p:${e.props}` : ""}}`).join(",")}]`;
+      let chain = `cjs.Tween.get({}).to({state:${literal(states[0].entries)}})`;
+      for (let i = 1; i < states.length; i += 1) chain += `.to({state:${literal(states[i].entries)}},${states[i - 1].dur})`;
       chain += `.wait(${states[states.length - 1].dur})`;
       tweenLines.push(`\tthis.timeline.addTween(${chain});`);
     }
@@ -767,6 +840,18 @@ export async function writeCreateJs(doc: FlaDocument, documentName: string, pose
     "\t\t\treturn w*w*w*a[1] + 3*w*w*u*b[1] + 3*w*u*u*c[1] + u*u*u*d[1];",
     "\t\t}",
     "\t\treturn x;",
+    "\t};",
+    "}",
+    "",
+    "// Shape tween fills: the matched outline can cross itself, and its loops are holes (even-odd).",
+    "// Colour rules and the player's edge sealing still work: only the canvas fill call changes.",
+    "function cbEvenOdd(g) {",
+    "\tvar fill = g._fill;",
+    "\tfill.evenOdd = true;",
+    "\tfill.exec = function (ctx) {",
+    "\t\tvar paint = ctx.fill;",
+    "\t\tctx.fill = function () { paint.call(ctx, 'evenodd'); };",
+    "\t\ttry { Object.getPrototypeOf(fill).exec.call(fill, ctx); } finally { delete ctx.fill; }",
     "\t};",
     "}",
     "",

@@ -4,6 +4,7 @@ import type { ColorReplacement, EditorData, EditorObject } from "@/types";
 import type { Html5CharacterLibraryCharacter } from "@/lib/html5CharacterCatalog";
 import { exportSourceOf } from "@/lib/partVariants";
 import { DEFAULT_FONT } from "@/lib/fonts";
+import { inLayerSpan } from "@/lib/layerRows";
 
 /**
  * Find and Replace (Animate-style): colour, text or font across a context. Colour replaces the
@@ -53,9 +54,7 @@ export const addColorRule = (object: EditorObject, find: string, replace: string
 /** Layers shown at the playhead (Current Frame): not hidden, inside the layer's time span. */
 export const visibleAt = (object: EditorObject, seconds: number) => {
   if (object.hidden || object.type === "audio" || object.type === "empty") return false;
-  const start = Math.max(0, Number(object.startTime || 0));
-  const length = object.actionDurationMs ? Math.max(0.1, Number(object.actionDurationMs) / 1000) : null;
-  return seconds + 0.0001 >= start && (length == null || seconds <= start + length + 0.0001);
+  return inLayerSpan(object, seconds);
 };
 
 /**

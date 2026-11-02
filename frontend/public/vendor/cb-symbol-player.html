@@ -67,8 +67,10 @@
     window.addEventListener('message', function (event) {
       var d = event.data || {};
       if (d.source !== 'characterbazaarstudio-editor' || d.type !== 'REPLACEMENT_SEEK' || !root.gotoAndStop) return;
-      var total = Math.max(1, root.totalFrames || 1), f = Math.max(0, Math.round(Number(d.timeSeconds || 0) * fps));
-      root.gotoAndStop(total > 1 ? f % total : 0); stage.update();
+      // The same position as the character it replaces a part of (cb-animate-bridge.js seekPosition).
+      var total = Math.max(1, root.totalFrames || 1), exact = Math.max(0, Number(d.timeSeconds || 0) * fps), whole = Math.round(exact);
+      var at = fps === 30 || Math.abs(exact - whole) < 1e-3 ? whole : exact;
+      root.gotoAndStop(total > 1 ? at % total : 0); stage.update();
     });
     replacementPost('READY');
   }

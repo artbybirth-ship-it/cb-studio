@@ -10,6 +10,7 @@ import { type CharacterTransform } from "@/lib/keyframes";
 import { groupPivotAtTime, resolveObjectTransformAtTime } from "@/lib/groupMotion";
 import { resolvePartOverridesAtTime, resolvePartTransformAtTime, resolveSourceSeekMs, type PartTransform } from "@/lib/partKeyframes";
 import { isMultiPartKey, memberPatches, parentPartKey, partMembers } from "@/lib/partSelection";
+import { inLayerSpan } from "@/lib/layerRows";
 
 type Props = {
   data: EditorData;
@@ -3099,10 +3100,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           // Empty timeline layers draw nothing; hidden layers only disappear in the editor.
           if (object.type === "background" || object.type === "audio" || object.type === "empty" || (object.hidden && !renderMode)) return null;
           const lockClass = object.locked && !renderMode ? "cb-layer-locked" : "";
-          const layerStart = Math.max(0, Number(object.startTime || 0));
-          const layerDuration = object.actionDurationMs ? Math.max(0.1, Number(object.actionDurationMs) / 1000) : null;
-          if (playhead + 0.0001 < layerStart) return null;
-          if (layerDuration != null && playhead > layerStart + layerDuration + 0.0001) return null;
+          if (!inLayerSpan(object, playhead)) return null;
           const selected = selectedIds.includes(object.id);
           const resolvedTransform = resolveObjectTransformAtTime(object, playhead);
           const baseStyle = {

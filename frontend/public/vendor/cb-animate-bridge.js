@@ -30,6 +30,32 @@
   var W = Math.max(1, Number(ds.width) || 1080);
   var H = Math.max(1, Number(ds.height) || 1920);
   var FPS = Math.max(1, Number(ds.fps) || 30);
+  // The frames of a clip's own timeline where something changes at once: a layer starts or ends, or
+  // a still keyframe moves (not the tiny pivot adjustment Animate writes between tweened keyframes).
+  function cutFrames(clip) {
+    if (clip.__cbCuts) return clip.__cbCuts;
+    var cuts = {}, tweens = (clip.timeline && clip.timeline.tweens) || [];
+    tweens.forEach(function (tween) {
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var a = step.prev.props || {}, b = step.props || {};
+        var moved = !step.d && (Math.abs((b.x || 0) - (a.x || 0)) + Math.abs((b.y || 0) - (a.y || 0)) > 2);
+        if (a.state !== b.state || a._off !== b._off || moved) cuts[step.t + step.d] = true;
+      }
+    });
+    clip.__cbCuts = cuts;
+    return cuts;
+  }
+  // Where a time falls on the source timeline. A source at the stage's own 30 fps sits on whole
+  // frames. Any other rate (a 24 fps .fla) keeps the fraction, so tweens draw their true in-between
+  // instead of repeating every fifth stage frame. Next to a cut there is no in-between to draw, and
+  // holding back would stall and then jump further, so that takes the nearest whole frame.
+  function seekPosition(root, seekMs, loop, total) {
+    var exact = Math.max(0, Number(seekMs || 0) / 1000 * FPS), whole = Math.round(exact);
+    var at = FPS === 30 || Math.abs(exact - whole) < 1e-3 ? whole : exact;
+    at = loop && total > 1 ? at % total : Math.min(total - 1, at);
+    if (at % 1 && cutFrames(root)[Math.floor(at) + 1]) at = Math.min(total - 1, Math.round(at));
+    return at;
+  }
   // Backing-store limits for the visible-region canvas (per side and total pixels).
   var MAX_EDGE = 8192;
   var MAX_AREA = 40e6;
@@ -652,7 +678,7 @@
         else if (G.Ellipse && c instanceof G.Ellipse) { var rx = c.w / 2, ry = c.h / 2, cx = c.x + rx, cy = c.y + ry; d += 'M' + pt(c.x, cy) + 'A' + svgNumber(rx) + ' ' + svgNumber(ry) + ' 0 1 0 ' + pt(c.x + c.w, cy) + 'A' + svgNumber(rx) + ' ' + svgNumber(ry) + ' 0 1 0 ' + pt(c.x, cy) + 'Z'; grow(m, c.x, c.y); grow(m, c.x + c.w, c.y + c.h); has = true; }
         else if (c instanceof G.Arc) { arc(c.x, c.y, c.radius, c.startAngle, c.endAngle, c.anticlockwise); }
         else if (c instanceof G.StrokeStyle) { stroke = { width: Number(c.width) || 1, caps: typeof c.caps === 'number' ? caps[c.caps] : (c.caps || 'butt'), joins: typeof c.joints === 'number' ? joins[c.joints] : (c.joints || 'miter'), miter: Number(c.miterLimit) || 10, fixed: !!c.ignoreScale }; }
-        else if (c instanceof G.Fill) { if (c.style && d) out.push('<path' + tf + ' d="' + d + '" fill="' + paint(c.style, c.matrix) + '"/>'); }
+        else if (c instanceof G.Fill) { if (c.style && d) out.push('<path' + tf + ' d="' + d + '" fill="' + paint(c.style, c.matrix) + '"' + (c.evenOdd ? ' fill-rule="evenodd"' : '') + '/>'); }
         else if (c instanceof G.Stroke) {
           if (c.style && d) {
             out.push('<path' + tf + ' d="' + d + '" fill="none" stroke="' + paint(c.style, null) + '" stroke-width="' + svgNumber(stroke.width * (stroke.fixed ? 1 : Math.max(.02, Number(cbStrokeScale) || 1))) + '" stroke-linecap="' + stroke.caps + '" stroke-linejoin="' + stroke.joins + '" stroke-miterlimit="' + svgNumber(stroke.miter) + '"' + (stroke.fixed ? ' vector-effect="non-scaling-stroke"' : '') + '/>');
@@ -1053,8 +1079,7 @@
     var helpers = [cbFallbackLayer, cbTintLayer, cbDimLayer, cbFocusCopy].filter(Boolean).map(function (l) { var was = l.visible; l.visible = false; return [l, was]; });
     try {
       if (seekMs != null && root.gotoAndStop) {
-        var total = Math.max(1, root.totalFrames || 1), f = Math.max(0, Math.round(Number(seekMs) / 1000 * FPS));
-        root.gotoAndStop(loop && total > 1 ? f % total : Math.min(total - 1, f));
+        root.gotoAndStop(seekPosition(root, seekMs, loop, Math.max(1, root.totalFrames || 1)));
       }
       st.scaleX = w / W; st.scaleY = h / H; st.x = 0; st.y = 0;
       ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, w, h);
@@ -1240,7 +1265,7 @@
     try {
       // loop: wrap past the last frame (Animate "Loop"); otherwise hold the last frame ("Play Once").
       // SEEK_DONE tells the video export (render harness) the frame is drawn and can be captured.
-      if (d.type === 'SEEK') { var f = Math.max(0, Math.round(Number(d.seekMs || 0) / 1000 * FPS)), total = Math.max(1, root.totalFrames || 1); if (root.gotoAndStop) root.gotoAndStop(d.loop && total > 1 ? f % total : Math.min(total - 1, f)); if (cbSymbolView) applySymbolView(); if (cbOnlyParts.length) applyOnly(); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
+      if (d.type === 'SEEK') { if (root.gotoAndStop) root.gotoAndStop(seekPosition(root, d.seekMs, d.loop, Math.max(1, root.totalFrames || 1))); if (cbSymbolView) applySymbolView(); if (cbOnlyParts.length) applyOnly(); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
       else if (d.type === 'CHARACTER_EDITS') { cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }

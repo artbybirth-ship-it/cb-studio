@@ -592,6 +592,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     }
   }, [characterLibraryCharacters, referenceCharacterId]);
 
+  // The scene's last frame (frames 0 … length × 30 − 1): playback stops on it, not on the blank
+  // frame after it.
+  const lastFrameTime = Math.max(0, Math.round(duration * TIMELINE_FPS) - 1) / TIMELINE_FPS;
+  const atLastFrame = playhead >= lastFrameTime - 1e-6;
   useEffect(() => {
     if (!isPlaying) return;
     // Position keyframes are evaluated at ~30 FPS so whole-character motion stays
@@ -601,10 +605,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       const now = performance.now();
       const delta = Math.max(0, (now - playClockRef.current) / 1000);
       playClockRef.current = now;
-      setPlayhead((current) => Math.min(duration, current + delta));
+      setPlayhead((current) => Math.min(lastFrameTime, current + delta));
     }, 33);
     return () => window.clearInterval(timer);
-  }, [isPlaying, duration]);
+  }, [isPlaying, lastFrameTime]);
 
   // Scene length follows the content: it grows and shrinks with the clips, but waits until a
   // clip drag ends so the ruler never rescales under the mouse.
@@ -632,8 +636,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
 
   // Playback stops and holds on the last frame; pressing Play there starts again from frame 0.
   useEffect(() => {
-    if (isPlaying && playhead >= duration) setPlaying(false);
-  }, [isPlaying, playhead, duration, setPlaying]);
+    if (isPlaying && atLastFrame) setPlaying(false);
+  }, [isPlaying, atLastFrame, setPlaying]);
   useEffect(() => {
     // The former scene "Loop playback" toggle no longer exists; drop its stored setting.
     try { window.localStorage.removeItem("cb-loop-playback"); } catch { /* storage unavailable */ }
@@ -3496,7 +3500,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (event.key === "Enter") {
         event.preventDefault();
         setFrameSelection(null); // playback moves the playhead: the frame selection ends
-        if (!isPlaying && playhead >= duration) setPlayhead(0);
+        if (!isPlaying && atLastFrame) setPlayhead(0);
         setPlaying(!isPlaying);
         return;
       }
@@ -4733,7 +4737,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onSelectLayer={selectRow}
             onAdd={addScene}
             onSeek={(seconds) => setPlayhead(Math.max(0, Math.min(duration, seconds)))}
-            onPlay={() => { if (!isPlaying && playhead >= duration) setPlayhead(0); setPlaying(!isPlaying); }}
+            onPlay={() => { if (!isPlaying && atLastFrame) setPlayhead(0); setPlaying(!isPlaying); }}
             onAddKeyframe={(id, time) => addOrUpdateCharacterKeyframe(id, time)}
             onImportAudio={() => voiceUploadRef.current?.click()}
             onCreateMotion={(id) => createMotion(id)}
