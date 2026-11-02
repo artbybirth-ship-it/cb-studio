@@ -16,6 +16,7 @@ import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsert
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, fileAnchors, fileOf, shownFrames } from "@/lib/symbolKeys";
+import { canTransform, partBox, rotatePart, scalePart, type PartInfo, type Pt, type ScaleHandle } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
@@ -777,14 +778,19 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   }, []);
   const mutate = useCallback((fn: (data: EditorData) => void) => {
     setDirty(true);
+    // React may run an updater twice (development); the history is changed on the first run only.
+    let recorded = false;
     setDraft((current) => {
       if (!current) return current;
-      if (scrubHistoryRef.current !== "recorded") {
-        historyPastRef.current.push(clone(current));
-        if (historyPastRef.current.length > 60) historyPastRef.current.shift();
-        if (scrubHistoryRef.current === "armed") scrubHistoryRef.current = "recorded";
+      if (!recorded) {
+        recorded = true;
+        if (scrubHistoryRef.current !== "recorded") {
+          historyPastRef.current.push(clone(current));
+          if (historyPastRef.current.length > 60) historyPastRef.current.shift();
+          if (scrubHistoryRef.current === "armed") scrubHistoryRef.current = "recorded";
+        }
+        historyFutureRef.current = [];
       }
-      historyFutureRef.current = [];
       const next = clone(current);
       fn(next);
       return next;
@@ -1766,23 +1772,36 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     });
   }, [mutate, selectedObjectId]);
 
+  // Undo and redo take their step on the first run of the updater and give the same result if React runs it again (development).
   const undo = useCallback(() => {
+    let step: EditorData | null | undefined;
     setDraft((current) => {
-      if (!current || historyPastRef.current.length === 0) return current;
-      const previous = historyPastRef.current.pop()!;
-      historyFutureRef.current.push(clone(current));
-      setDirty(true);
-      return previous;
+      if (!current) return current;
+      if (step === undefined) {
+        if (historyPastRef.current.length === 0) step = null;
+        else {
+          step = historyPastRef.current.pop()!;
+          historyFutureRef.current.push(clone(current));
+          setDirty(true);
+        }
+      }
+      return step ?? current;
     });
   }, []);
 
   const redo = useCallback(() => {
+    let step: EditorData | null | undefined;
     setDraft((current) => {
-      if (!current || historyFutureRef.current.length === 0) return current;
-      const next = historyFutureRef.current.pop()!;
-      historyPastRef.current.push(clone(current));
-      setDirty(true);
-      return next;
+      if (!current) return current;
+      if (step === undefined) {
+        if (historyFutureRef.current.length === 0) step = null;
+        else {
+          step = historyFutureRef.current.pop()!;
+          historyPastRef.current.push(clone(current));
+          setDirty(true);
+        }
+      }
+      return step ?? current;
     });
   }, []);
 
@@ -3326,15 +3345,71 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       item.symbolValues = symbols;
     });
   }, [mutate, symbolView]);
-  // Drag a part on the stage inside the character: its X and Y at the playhead change. On a keyframe that keyframe moves; between
-  // keyframes of a tween one is added there first (holding the motion), as in Animate. One drag is one undo step.
-  const beginSymbolDrag = useCallback((normalizedX: number, normalizedY: number) => new Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void } | null>((resolve) => {
+  // Parts on the stage inside the character: press and drag to move, click to pick (then rotate / scale with handles). All of it edits
+  // the keyframe at the playhead: on a keyframe that keyframe, between keyframes of a tween one is added there first (holding the
+  // motion), as in Animate. One drag is one undo step.
+  type PartHandle = { move: (dx: number, dy: number, shift: boolean) => void; end: () => void; click?: () => void };
+  const [pickedPart, setPickedPart] = useState<{ objectId: string; prop: string } | null>(null);
+  const [partInfo, setPartInfo] = useState<PartInfo | null>(null);
+  const symbolLevelNow = symbolView ? symbolView.levels[symbolView.levels.length - 1] : null;
+  const symbolObjectNow = symbolView ? draft?.objects.find((item) => item.id === symbolView.objectId) : undefined;
+  /** Asks the player about a part (its transform and box); null when it has none to give. */
+  const askPart = useCallback((prop: string) => new Promise<PartInfo | null>((resolve) => {
+    const frame = symbolView && frameAccessRef.current?.(symbolView.objectId);
+    if (!frame?.contentWindow) { resolve(null); return; }
+    const token = `part${Date.now()}${Math.random()}`;
+    const done = (value: PartInfo | null) => { window.removeEventListener("message", onMessage); window.clearTimeout(timer); resolve(value); };
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (d?.source === "characterbazaarstudio-animate" && d.type === "SYMBOL_PART_INFO" && d.token === token) done(d.info || null);
+    };
+    const timer = window.setTimeout(() => done(null), 1500);
+    window.addEventListener("message", onMessage);
+    frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_PART_QUERY", prop, token }, "*");
+  }), [symbolView]);
+  /** Where an edit of this part at the playhead lands: its layer, the keyframe (a new one when between a tween's keyframes). */
+  const planPartEdit = useCallback((prop: string) => {
+    const level = symbolLevelNow, object = symbolObjectNow;
+    if (!level) return null;
+    const layers = level.data.layers, at = level.frame;
+    const anchorsOf = (index: number): Array<[number, number]> => object?.symbolKeys?.[level.js]?.[String(index)]?.anchors || fileAnchors(layers[index]);
+    let layer = -1, item: ReturnType<typeof shownFrames>[number] | undefined;
+    for (let index = 0; index < layers.length && layer < 0; index += 1) {
+      if (layers[index].type === "folder" || !(layers[index].props || []).includes(prop)) continue;
+      const found = shownFrames(layers[index], anchorsOf(index)).find((entry) => at >= entry.i && at < entry.i + entry.d && !entry.blank);
+      if (found) { layer = index; item = found; }
+    }
+    if (layer < 0 || !item) return null;
+    if (!(keysEditable?.js === level.js && keysEditable.editable[layer] && keysEditable.moves[layer])) {
+      showNotice("This part is drawn artwork, or built from frames, so it has no position keyframes to edit here.");
+      return null;
+    }
+    const anchors = anchorsOf(layer);
+    const inTween = item.i !== at && (item.tween === "classic" || item.tween === "motion");
+    const grown = inTween ? addAnchor(anchors, at) : null;
+    return { layer, grown, target: inTween && grown ? fileOf(anchors, at) : anchors[item.anchor][0] };
+  }, [keysEditable, showNotice, symbolLevelNow, symbolObjectNow]);
+  /** The edit the pointer makes: the first change adds the keyframe, every change sets values (one undo step). */
+  const partEditor = useCallback((plan: { layer: number; grown: Array<[number, number]> | null; target: number }) => {
+    let started = false;
+    return {
+      apply: (patch: Partial<Record<SymbolValueKey, number>>) => {
+        if (!started) {
+          started = true;
+          scrubHistoryRef.current = "armed";
+          if (plan.grown) setSymbolKeys(plan.layer, plan.grown);
+        }
+        setSymbolValue(plan.layer, plan.target, patch);
+      },
+      end: () => { window.setTimeout(() => { scrubHistoryRef.current = "idle"; }, 0); },
+    };
+  }, [setSymbolKeys, setSymbolValue]);
+  const beginSymbolDrag = useCallback((normalizedX: number, normalizedY: number) => new Promise<PartHandle | null>((resolve) => {
     const view = symbolView, frame = view && frameAccessRef.current?.(view.objectId);
     if (!view || !frame?.contentWindow) { resolve(null); return; }
-    const level = view.levels[view.levels.length - 1], token = `drag${Date.now()}${Math.random()}`;
-    const object = draft?.objects.find((item) => item.id === view.objectId);
+    const token = `drag${Date.now()}${Math.random()}`;
     let finished = false;
-    const finish = (value: { move: (dx: number, dy: number, shift: boolean) => void; end: () => void } | null) => {
+    const finish = (value: PartHandle | null) => {
       if (finished) return;
       finished = true;
       window.removeEventListener("message", onMessage);
@@ -3343,40 +3418,20 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     };
     const prepare = (info: { prop: string; ax: number; ay: number; bx: number; by: number; x: number; y: number; W: number; H: number } | null) => {
       if (!info) return null;
-      const layers = level.data.layers, at = level.frame;
-      const anchorsOf = (index: number): Array<[number, number]> => object?.symbolKeys?.[level.js]?.[String(index)]?.anchors || fileAnchors(layers[index]);
-      let layer = -1, item: ReturnType<typeof shownFrames>[number] | undefined;
-      for (let index = 0; index < layers.length && layer < 0; index += 1) {
-        if (layers[index].type === "folder" || !(layers[index].props || []).includes(info.prop)) continue;
-        const found = shownFrames(layers[index], anchorsOf(index)).find((entry) => at >= entry.i && at < entry.i + entry.d && !entry.blank);
-        if (found) { layer = index; item = found; }
-      }
-      if (layer < 0 || !item) return null;
-      if (!(keysEditable?.js === level.js && keysEditable.editable[layer] && keysEditable.moves[layer])) {
-        showNotice("This part is drawn artwork, or built from frames, so it has no position keyframes to drag here.");
-        return null;
-      }
-      const anchors = anchorsOf(layer);
-      const inTween = item.i !== at && (item.tween === "classic" || item.tween === "motion");
-      const grown = inTween ? addAnchor(anchors, at) : null;
-      const target = inTween && grown ? fileOf(anchors, at) : anchors[item.anchor][0];
-      const startX = info.x, startY = info.y;
-      let started = false;
+      const plan = planPartEdit(info.prop);
+      if (!plan) return null;
+      const edit = partEditor(plan);
       return {
         move: (dx: number, dy: number, shift: boolean) => {
           let stageX = dx * info.W, stageY = dy * info.H;
           if (shift) { if (Math.abs(stageX) >= Math.abs(stageY)) stageY = 0; else stageX = 0; }
           const det = info.ax * info.by - info.bx * info.ay;
           if (!det) return;
-          if (!started) {
-            started = true;
-            scrubHistoryRef.current = "armed";
-            if (grown) setSymbolKeys(layer, grown);
-          }
           const round = (value: number) => Math.round(value * 100) / 100;
-          setSymbolValue(layer, target, { x: round(startX + (stageX * info.by - info.bx * stageY) / det), y: round(startY + (info.ax * stageY - stageX * info.ay) / det) });
+          edit.apply({ x: round(info.x + (stageX * info.by - info.bx * stageY) / det), y: round(info.y + (info.ax * stageY - stageX * info.ay) / det) });
         },
-        end: () => { window.setTimeout(() => { scrubHistoryRef.current = "idle"; }, 0); },
+        end: edit.end,
+        click: () => setPickedPart({ objectId: view.objectId, prop: info.prop }),
       };
     };
     const onMessage = (event: MessageEvent) => {
@@ -3387,7 +3442,41 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const timer = window.setTimeout(() => finish(null), 1500);
     window.addEventListener("message", onMessage);
     frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_DRAG_BEGIN", normalizedX, normalizedY, token }, "*");
-  }), [draft?.objects, keysEditable, setSymbolKeys, setSymbolValue, showNotice, symbolView]);
+  }), [partEditor, planPartEdit, symbolView]);
+  // The picked part's box, read again after every change the stage makes.
+  const pickedProp = pickedPart && symbolView?.objectId === pickedPart.objectId ? pickedPart.prop : null;
+  const partVersion = JSON.stringify([symbolLevelNow?.frame, symbolLevelNow?.js, symbolObjectNow?.symbolValues, symbolObjectNow?.symbolKeys, symbolObjectNow?.symbolEases]);
+  useEffect(() => {
+    if (!pickedProp) { setPartInfo(null); return; }
+    let live = true;
+    const timer = window.setTimeout(() => { void askPart(pickedProp).then((info) => { if (live) setPartInfo(info && canTransform(info) ? info : null); }); }, 160);
+    return () => { live = false; window.clearTimeout(timer); };
+  }, [askPart, partVersion, pickedProp]);
+  useEffect(() => { if (!symbolView) setPickedPart(null); }, [symbolView]);
+  useEffect(() => { setPickedPart(null); }, [symbolLevelNow?.js]);
+  const symbolBox = useMemo(() => (partInfo ? partBox(partInfo) : null), [partInfo]);
+  // A handle of the picked part: turn it around its pivot or scale it from the opposite side.
+  const beginSymbolHandle = useCallback(async (handle: string, nx: number, ny: number): Promise<PartHandle | null> => {
+    if (!pickedProp) return null;
+    const info = await askPart(pickedProp);
+    if (!info || !canTransform(info)) return null;
+    const plan = planPartEdit(pickedProp);
+    if (!plan) return null;
+    const edit = partEditor(plan), start: Pt = [nx * info.W, ny * info.H];
+    return {
+      move: (dx: number, dy: number, shift: boolean) => {
+        const now: Pt = [(nx + dx) * info.W, (ny + dy) * info.H], round = (value: number, digits = 2) => Math.round(value * 10 ** digits) / 10 ** digits;
+        if (handle === "rotate") {
+          const turned = rotatePart(info, start, now, shift);
+          edit.apply({ skewX: round(turned.skewX), skewY: round(turned.skewY) });
+        } else {
+          const scaled = scalePart(info, handle as ScaleHandle, start, now, shift);
+          edit.apply({ scaleX: round(scaled.scaleX, 4), scaleY: round(scaled.scaleY, 4), x: round(scaled.x), y: round(scaled.y) });
+        }
+      },
+      end: edit.end,
+    };
+  }, [askPart, partEditor, pickedProp, planPartEdit]);
   // The picked keyframe's values as the file has them: the player reads them off its tween.
   const [keyValues, setKeyValues] = useState<{ layer: number; frame: number; values: Record<string, number> | null } | null>(null);
   const keyValuesAsk = useRef<{ layer: number; frame: number } | null>(null);
@@ -4845,6 +4934,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onTransformCharacterParts={transformCharacterParts}
               onSymbolDoubleClick={symbolDoubleClick}
               onSymbolDragStart={beginSymbolDrag}
+              onSymbolHandleStart={beginSymbolHandle}
+              onSymbolDeselect={() => setPickedPart(null)}
+              symbolBox={symbolBox}
               onEnterSymbol={(id) => void enterSymbol(id)}
               onDistributeParts={(mode) => void distributeRef.current(mode)}
               colorPickActive={stageColourTool || Boolean(frPicking) || boxPicking}

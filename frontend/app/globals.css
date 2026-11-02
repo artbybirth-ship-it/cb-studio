@@ -3403,6 +3403,14 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 /* a ⌘G group's registration point (white circle, as on a single object) */
 .cb-group-pivot{position:absolute;width:calc(13px / var(--cb-gz,1));height:calc(13px / var(--cb-gz,1));padding:0;transform:translate(-50%,-50%);box-sizing:border-box;border:calc(1.5px / var(--cb-gz,1)) solid #141414;border-radius:50%;background:#fff;pointer-events:auto;cursor:move;touch-action:none}
 .cb-symbol-viewing .cb-character-tight-hitbox,.cb-symbol-viewing .cb-selection-gizmo{display:none!important}
+.cb-symbol-handles{position:absolute;inset:0;z-index:2001;pointer-events:none}
+.cb-symbol-box{position:absolute;pointer-events:none}
+.cb-symbol-box-lines{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.cb-symbol-box-lines polygon{fill:none;stroke:#4d63ff;stroke-width:1.5}.cb-symbol-box-lines line{stroke:#4d63ff;stroke-width:1.2}
+.cb-symbol-handle{position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;box-sizing:border-box;background:#fff;border:1.5px solid #4d63ff;border-radius:2px;pointer-events:auto;cursor:nwse-resize;touch-action:none}
+.cb-symbol-handle.n,.cb-symbol-handle.s{cursor:ns-resize}.cb-symbol-handle.e,.cb-symbol-handle.w{cursor:ew-resize}.cb-symbol-handle.ne,.cb-symbol-handle.sw{cursor:nesw-resize}
+.cb-symbol-handle.rotate{width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;cursor:grab}
+.cb-symbol-pivot{position:absolute;width:9px;height:9px;margin:-4.5px 0 0 -4.5px;border:1.5px solid #ffd166;border-radius:50%;background:rgba(0,0,0,.35);pointer-events:none}
 .cb-symbol-overlay{position:absolute;inset:0;z-index:2000;cursor:default}
 .cb-symbol-menu{min-width:200px}
 

@@ -77,7 +77,13 @@ type Props = {
    *  rest of the scene is dimmed and the stage only answers double-clicks. */
   symbolView?: { objectId: string; levels: Array<{ props?: string[]; frame: number }>; hidden: string[] } | null;
   /** Inside a character: a press on a part starts dragging it; the handle moves it by the pointer's travel (fractions of the player) and ends. */
-  onSymbolDragStart?: (normalizedX: number, normalizedY: number) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void } | null>;
+  onSymbolDragStart?: (normalizedX: number, normalizedY: number) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void; click?: () => void } | null>;
+  /** A handle of the picked part (a scale handle's side or corner, or "rotate") was pressed, at a point of the player. */
+  onSymbolHandleStart?: (handle: string, normalizedX: number, normalizedY: number) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void } | null>;
+  /** A click on nothing inside a character: the picked part is dropped. */
+  onSymbolDeselect?: () => void;
+  /** The picked part's box (its four corners, top left first, and its pivot) as fractions of the player. */
+  symbolBox?: { corners: Array<[number, number]>; pivot: [number, number] } | null;
   /** Inside a character: a double-click on one of its objects (its property name), or elsewhere (null). */
   onSymbolDoubleClick?: (prop: string | null) => void;
   /** ⌥ Option + double-click a character, or right-click › Edit Symbol: step inside it. */
@@ -270,7 +276,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolHandleStart, onSymbolDeselect, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -1382,6 +1388,51 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     symbolViewObjectRef.current = symbolView?.objectId ?? null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbolView, postSymbolView]);
+  // Follows the pointer from a press inside a character: the handle made by begin gets its travel (fractions of the player) once
+  // it is ready; a press with no travel is a click on the part (or on nothing).
+  const trackSymbolPointer = (
+    event: { clientX: number; clientY: number },
+    begin: (normalizedX: number, normalizedY: number) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void; click?: () => void } | null>,
+    onEmptyClick?: () => void,
+  ) => {
+    if (!symbolView) return;
+    const frame = frameRefs.current.get(symbolView.objectId), rect = frame?.getBoundingClientRect();
+    if (!rect || event.clientX < rect.left - 40 || event.clientX > rect.right + 40 || event.clientY < rect.top - 40 || event.clientY > rect.bottom + 40) return;
+    const startX = event.clientX, startY = event.clientY;
+    let handle: Awaited<ReturnType<typeof begin>> = null, ready = false, ended = false, moved = false, latest = { x: startX, y: startY, shift: false };
+    const apply = () => { if (handle && moved) handle.move((latest.x - startX) / rect.width, (latest.y - startY) / rect.height, latest.shift); };
+    const finish = () => {
+      if (!ready || !ended) return;
+      if (moved) handle?.end();
+      else if (handle) { handle.click?.(); handle.end(); }
+      else onEmptyClick?.();
+    };
+    void begin((startX - rect.left) / rect.width, (startY - rect.top) / rect.height).then((created) => { handle = created; ready = true; apply(); finish(); });
+    const move = (moveEvent: PointerEvent) => {
+      latest = { x: moveEvent.clientX, y: moveEvent.clientY, shift: moveEvent.shiftKey };
+      if (!moved && Math.hypot(latest.x - startX, latest.y - startY) < 3) return;
+      moved = true;
+      apply();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      ended = true;
+      finish();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  // Where the player's frame lies inside the stage, for drawing the picked part's handles over it.
+  const handlesRef = useRef<HTMLDivElement>(null);
+  const [handleFrame, setHandleFrame] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const wrap = handlesRef.current, frame = symbolView && symbolBox ? frameRefs.current.get(symbolView.objectId) : null;
+    if (!wrap || !frame) { if (handleFrame) setHandleFrame(null); return; }
+    const w = wrap.getBoundingClientRect(), f = frame.getBoundingClientRect(), k = w.width / (wrap.offsetWidth || 1) || 1;
+    const next = { left: (f.left - w.left) / k, top: (f.top - w.top) / k, width: f.width / k, height: f.height / k };
+    if (!handleFrame || Math.abs(next.left - handleFrame.left) > 0.5 || Math.abs(next.top - handleFrame.top) > 0.5 || Math.abs(next.width - handleFrame.width) > 0.5 || Math.abs(next.height - handleFrame.height) > 0.5) setHandleFrame(next);
+  });
   const doubleClickInsideSymbol = (event: ReactMouseEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -3370,32 +3421,38 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={doubleClickInsideSymbol} onPointerDown={(event) => {
           if (spacePanning) return;
           event.stopPropagation();
-          // Press a part and drag: it moves (its keyframe's X and Y). A click or double-click without travel changes nothing.
-          const frame = frameRefs.current.get(symbolView.objectId), rect = frame?.getBoundingClientRect();
-          if (event.button !== 0 || !onSymbolDragStart || !rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return;
-          const startX = event.clientX, startY = event.clientY;
-          let handle: Awaited<ReturnType<NonNullable<typeof onSymbolDragStart>>> = null, ended = false, moved = false, latest = { x: startX, y: startY, shift: false };
-          const apply = () => { if (handle && moved) handle.move((latest.x - startX) / rect.width, (latest.y - startY) / rect.height, latest.shift); };
-          void onSymbolDragStart((startX - rect.left) / rect.width, (startY - rect.top) / rect.height).then((created) => {
-            handle = created;
-            apply();
-            if (ended) created?.end();
-          });
-          const move = (moveEvent: PointerEvent) => {
-            latest = { x: moveEvent.clientX, y: moveEvent.clientY, shift: moveEvent.shiftKey };
-            if (!moved && Math.hypot(latest.x - startX, latest.y - startY) < 3) return;
-            moved = true;
-            apply();
-          };
-          const up = () => {
-            window.removeEventListener("pointermove", move);
-            window.removeEventListener("pointerup", up);
-            ended = true;
-            handle?.end();
-          };
-          window.addEventListener("pointermove", move);
-          window.addEventListener("pointerup", up);
-        }} title="Drag a part to move it; double-click a part to step inside it; double-click elsewhere (or Esc) to step out" />}
+          // Press a part and drag: it moves. A click picks it (handles appear); a click on nothing drops it.
+          if (event.button === 0 && onSymbolDragStart) trackSymbolPointer(event, (nx, ny) => onSymbolDragStart(nx, ny), onSymbolDeselect);
+        }} title="Drag a part to move it, click it for handles; double-click a part to step inside it; double-click elsewhere (or Esc) to step out" />}
+      {symbolView && !renderMode && symbolBox && (
+        <div ref={handlesRef} className="cb-symbol-handles">
+          {handleFrame && (() => {
+            const [c0, c1, c2, c3] = symbolBox.corners;
+            const mid = (p: [number, number], q: [number, number]): [number, number] => [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+            const sides: Array<[string, [number, number]]> = [["nw", c0], ["n", mid(c0, c1)], ["ne", c1], ["e", mid(c1, c2)], ["se", c2], ["s", mid(c2, c3)], ["sw", c3], ["w", mid(c3, c0)]];
+            const centre: [number, number] = [(c0[0] + c2[0]) / 2, (c0[1] + c2[1]) / 2], top = sides[1][1];
+            const vx = (top[0] - centre[0]) * handleFrame.width, vy = (top[1] - centre[1]) * handleFrame.height, length = Math.hypot(vx, vy) || 1;
+            const rotate: [number, number] = [top[0] + (vx / length) * 26 / handleFrame.width, top[1] + (vy / length) * 26 / handleFrame.height];
+            const press = (name: string) => (event: ReactPointerEvent<HTMLElement>) => {
+              if (event.button !== 0 || !onSymbolHandleStart) return;
+              event.stopPropagation();
+              event.preventDefault();
+              trackSymbolPointer(event, (nx, ny) => onSymbolHandleStart(name, nx, ny));
+            };
+            return (
+              <div className="cb-symbol-box" style={{ left: handleFrame.left, top: handleFrame.top, width: handleFrame.width, height: handleFrame.height }}>
+                <svg className="cb-symbol-box-lines" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+                  <polygon points={symbolBox.corners.map((p) => p.join(",")).join(" ")} vectorEffect="non-scaling-stroke" />
+                  <line x1={top[0]} y1={top[1]} x2={rotate[0]} y2={rotate[1]} vectorEffect="non-scaling-stroke" />
+                </svg>
+                {sides.map(([name, point]) => <i key={name} className={`cb-symbol-handle ${name}`} style={{ left: `${point[0] * 100}%`, top: `${point[1] * 100}%` }} role="button" aria-label={`Scale ${name}`} onPointerDown={press(name)} />)}
+                <i className="cb-symbol-handle rotate" style={{ left: `${rotate[0] * 100}%`, top: `${rotate[1] * 100}%` }} role="button" aria-label="Rotate" title="Rotate (Shift: 15° steps)" onPointerDown={press("rotate")} />
+                <i className="cb-symbol-pivot" style={{ left: `${symbolBox.pivot[0] * 100}%`, top: `${symbolBox.pivot[1] * 100}%` }} aria-hidden="true" />
+              </div>
+            );
+          })()}
+        </div>
+      )}
       </div>
       {symbolMenu && (
         <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: symbolMenu.x, top: symbolMenu.y }} onPointerDown={(event) => event.stopPropagation()}>

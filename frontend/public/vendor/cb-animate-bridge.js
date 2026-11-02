@@ -1267,6 +1267,21 @@
     }
     cbPost('SYMBOL_DRAG_INFO', { token: d.token, info: info });
   }
+  // A part of the open symbol: its own transform, its box, and how its parent sits on the stage (for the handles).
+  function postPartInfo(d) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, prop = String(d.prop || ''), info = null;
+    var o = st && node && prop && prop.charAt(0) !== '#' ? node[prop] : null;
+    if (o && o.localToLocal) {
+      var b = rawBounds(o);
+      if (b && b.width > 0 && b.height > 0) {
+        var p0 = node.localToLocal(0, 0, st), px = node.localToLocal(1, 0, st), py = node.localToLocal(0, 1, st);
+        info = { prop: prop, ax: px.x - p0.x, ay: px.y - p0.y, bx: py.x - p0.x, by: py.y - p0.y, p0x: p0.x, p0y: p0.y,
+          x: o.x, y: o.y, sx: o.scaleX, sy: o.scaleY, skx: o.skewX, sky: o.skewY, rot: o.rotation, regX: o.regX, regY: o.regY,
+          bounds: { x: b.x, y: b.y, width: b.width, height: b.height }, W: W, H: H };
+      }
+    }
+    cbPost('SYMBOL_PART_INFO', { token: d.token, info: info });
+  }
   function postKeyValues(d) {
     var clip = clipsOfClass(d.js)[0], values = null;
     if (clip) {
@@ -1479,6 +1494,7 @@
       else if (d.type === 'SYMBOL_KEYS_QUERY') { postKeyEditable(d); }
       else if (d.type === 'SYMBOL_VALUES_QUERY') { postKeyValues(d); }
       else if (d.type === 'SYMBOL_DRAG_BEGIN') { postDragInfo(d); }
+      else if (d.type === 'SYMBOL_PART_QUERY') { postPartInfo(d); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
       else if (d.type === 'CHARACTER_EDITS') { applySymbolEdits(d.symbolEases, d.symbolKeys, d.symbolValues); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }
