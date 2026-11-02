@@ -1215,6 +1215,58 @@
     for (var i = cbSymbolSaved.length - 1; i >= 0; i--) { try { cbSymbolSaved[i].node[cbSymbolSaved[i].key] = cbSymbolSaved[i].value; } catch (e) {} }
     cbSymbolSaved = [];
   }
+  // ---- Edited tween eases (CHARACTER_EDITS.symbolEases: { <class>: { <layer:frame>: { props, frame,
+  // frames, value } } }, value −100 ease in … 100 ease out). Every copy of a symbol in this player
+  // takes the edit; the export's own ease comes back when an edit is removed.
+  var cbEasesKey = '{}', cbEasedSteps = [], cbClipsByClass = null;
+  function clipsOfClass(name) {
+    var root = cbRoot();
+    if (!cbClipsByClass || cbClipsByClass.root !== root) {
+      var names = protoNames(), found = {}, seen = new Set();
+      (function walk(node) {
+        if (seen.has(node)) return;
+        seen.add(node);
+        var own = names.get(Object.getPrototypeOf(node));
+        if (own) (found[own] = found[own] || []).push(node);
+        Object.keys(node).forEach(function (k) { var v = k !== 'parent' && node[k]; if (v && typeof v === 'object' && v.timeline && v.gotoAndStop) walk(v); });
+      })(root);
+      cbClipsByClass = { root: root, found: found };
+    }
+    return cbClipsByClass.found[name] || [];
+  }
+  function applySymbolEases(edits) {
+    var key = JSON.stringify(edits || {}), root = cbRoot();
+    if (key === cbEasesKey || !root) return;
+    cbEasesKey = key;
+    var clips = new Set();
+    cbEasedSteps.forEach(function (eased) { eased.step.ease = eased.ease; clips.add(eased.clip); });
+    cbEasedSteps = [];
+    Object.keys(edits || {}).forEach(function (name) {
+      var entries = edits[name] || {};
+      clipsOfClass(name).forEach(function (clip) {
+        Object.keys(entries).forEach(function (k) {
+          var edit = entries[k], targets = (edit.props || []).map(function (prop) { return clip[prop]; });
+          clip.timeline.tweens.forEach(function (tween) {
+            if (targets.indexOf(tween.target) < 0) return;
+            for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+              if (step.t !== edit.frame || step.d !== edit.frames) continue;
+              cbEasedSteps.push({ step: step, clip: clip, ease: step.ease });
+              step.ease = edit.value ? createjs.Ease.get(edit.value / 100) : null;
+              clips.add(clip);
+            }
+          });
+        });
+      });
+    });
+    // An independent clip only redoes its timeline when its position changes (synched ones do when drawn).
+    clips.forEach(function (clip) {
+      if (clip.mode !== 'independent' || !(clip._rawPosition >= 0)) return;
+      var at = clip._rawPosition;
+      clip._rawPosition = NaN;
+      clip._updateTimeline(at, true);
+    });
+    if (cbSymbolView) applySymbolView();
+  }
   function applySymbolView() {
     var root = cbRoot(); if (!cbSymbolView || !root) return;
     var levels = cbSymbolView.levels || [], node = root;
@@ -1268,7 +1320,7 @@
       if (d.type === 'SEEK') { if (root.gotoAndStop) root.gotoAndStop(seekPosition(root, d.seekMs, d.loop, Math.max(1, root.totalFrames || 1))); if (cbSymbolView) applySymbolView(); if (cbOnlyParts.length) applyOnly(); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
-      else if (d.type === 'CHARACTER_EDITS') { cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }
+      else if (d.type === 'CHARACTER_EDITS') { applySymbolEases(d.symbolEases); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }
       else if (d.type === 'SYMBOL_VIEW') { restoreSymbolView(); cbSymbolView = d.view || null; applySymbolView(); if (st && st.update) st.update(); scheduleBounds(); }
       else if (d.type === 'SYMBOL_HIT') { cbPost('SYMBOL_HIT', { prop: symbolHit(Number(d.normalizedX || 0), Number(d.normalizedY || 0)) }); }
       else if (d.type === 'HIT_TEST_PART') { selectAt(Number(d.normalizedX || 0), Number(d.normalizedY || 0)); }

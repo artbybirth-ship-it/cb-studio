@@ -3255,6 +3255,27 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       return { ...state, playing: false, levels: [...state.levels.slice(0, -1), { ...last, frame: next }] };
     });
   }, []);
+  // A tween ease edited inside the character: saved on this placed character, for every copy of the symbol in it.
+  const setSymbolEase = useCallback((layerIndex: number, keyframe: { i: number; d: number }, value: number | null) => {
+    if (!symbolView) return;
+    const level = symbolView.levels[symbolView.levels.length - 1];
+    const props = level.data.layers[layerIndex]?.props || [];
+    mutate((data) => {
+      const item = data.objects.find((object) => object.id === symbolView.objectId);
+      if (!item) return;
+      const symbols = { ...(item.symbolEases || {}) }, entries = { ...(symbols[level.js] || {}) }, key = `${layerIndex}:${keyframe.i}`;
+      if (value == null) delete entries[key];
+      else entries[key] = { props, frame: keyframe.i, frames: keyframe.d, value };
+      if (Object.keys(entries).length) symbols[level.js] = entries; else delete symbols[level.js];
+      item.symbolEases = symbols;
+    });
+  }, [mutate, symbolView]);
+  // A drag on the Ease box shows on the stage as it moves and is one undo step.
+  const previewSymbolEase = useCallback((layerIndex: number, keyframe: { i: number; d: number }, value: number | null) => {
+    if (value == null) { window.setTimeout(() => { scrubHistoryRef.current = "idle"; }, 0); return; }
+    if (scrubHistoryRef.current === "idle") scrubHistoryRef.current = "armed";
+    setSymbolEase(layerIndex, keyframe, value);
+  }, [setSymbolEase]);
   // What the player gets: each level's frame (and how to reach it), and the hidden layers' objects
   // (a closed eye on a folder hides everything in it).
   const stageSymbolView = useMemo(() => {
@@ -4709,7 +4730,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 frame={current.frame}
                 playing={symbolView.playing}
                 hidden={symbolView.hidden}
+                eases={object?.symbolEases?.[current.js]}
                 onSeek={seekSymbol}
+                onSetEase={setSymbolEase}
+                onPreviewEase={previewSymbolEase}
                 onPlay={() => setSymbolView((state) => (state ? { ...state, playing: !state.playing } : state))}
                 onToggleLayer={(index) => setSymbolView((state) => {
                   if (!state) return state;

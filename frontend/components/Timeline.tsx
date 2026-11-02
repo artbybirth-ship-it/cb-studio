@@ -151,8 +151,8 @@ const tweenSegments = (layer: EditorObject) => {
 
 /** One ease control per tween (Animate's single ease value): drag left for ease in (shown as
  *  −1…−100, starts slowly), right for ease out (1…100, ends slowly); 0 = no easing.
- *  Double-click to type a value from −100 to 100. */
-const EaseControl = ({ value, onCommit }: { value: number; onCommit: (next: number) => void }) => {
+ *  Double-click to type a value from −100 to 100. onPreview gets the value during a drag, then null. */
+export const EaseControl = ({ value, onCommit, onPreview }: { value: number; onCommit: (next: number) => void; onPreview?: (next: number | null) => void }) => {
   const [preview, setPreview] = useState<number | null>(null);
   const [editing, setEditing] = useState(false);
   const shown = preview ?? value;
@@ -174,6 +174,7 @@ const EaseControl = ({ value, onCommit }: { value: number; onCommit: (next: numb
       if (Math.abs(dx) > 2) moved = true;
       latest = Math.max(-100, Math.min(100, Math.round(value + dx / 2)));
       setPreview(latest);
+      onPreview?.(latest);
     };
     const up = () => {
       release();
@@ -181,6 +182,7 @@ const EaseControl = ({ value, onCommit }: { value: number; onCommit: (next: numb
       window.removeEventListener("pointerup", up);
       setPreview(null);
       if (moved && latest !== value) onCommit(latest);
+      if (moved) onPreview?.(null);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);

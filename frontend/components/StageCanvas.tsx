@@ -1015,6 +1015,8 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       colorOverrides: object.colorOverrides || {},
       // Colour rules (Fill/Stroke, Light/Dark, Find/Replace, Adjust colour).
       colorReplacements: object.colorReplacements || [],
+      // Tween eases edited inside the character (step inside → Ease).
+      symbolEases: object.symbolEases || {},
       strokeScale: object.strokeScale ?? 1,
       selectedPart: object.id === selectedObjectId ? (activeCharacterPart || "") : "",
       onlyParts: object.onlyParts || [],

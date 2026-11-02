@@ -10,6 +10,9 @@ export type CharacterPartKey = string;
  * rules never chain; for a colour the last matching rule wins, and part rules beat whole-character ones.
  * "shades" moves the whole colour family (its lighter/darker shades keep their offset).
  */
+/** One classic tween's ease edited inside a character: the objects its layer creates, its keyframe and length, and the ease (−100 ease in … 100 ease out). */
+export type SymbolEaseEdit = { props: string[]; frame: number; frames: number; value: number };
+
 export type ColorReplacement = {
   id: string;
   from: string;
@@ -262,6 +265,8 @@ export type EditorObject = {
   colorOverrides?: CharacterColorOverrides;
   /** Vector recolour rules (Recolour panel: palette + find & replace), applied in order by the player. */
   colorReplacements?: ColorReplacement[];
+  /** Tween eases edited inside this character (step inside), by symbol class, then "<layer>:<frame>". */
+  symbolEases?: Record<string, Record<string, SymbolEaseEdit>>;
   /** Runtime-detected source body parts for Archive/CreateJS actions. */
   sourceParts?: CharacterPartDescriptor[];
   /** User-supplied image replacements for selected body parts. */

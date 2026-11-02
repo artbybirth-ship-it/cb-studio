@@ -2,9 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { EaseControl } from "@/components/Timeline";
+import type { SymbolEaseEdit } from "@/types";
 
 /**
- * A character's own Animate timeline (step inside a character; view only). Shown in place of the
+ * A character's own Animate timeline (step inside a character; only classic tween eases can be
+ * edited: click a purple span, saved on the placed character). Shown in place of the
  * scene's timeline: the symbol's layers as Animate lists them (folders, mask and guide layers,
  * nesting), its keyframes and blank keyframes, classic (purple) and shape (green) tweens, labels
  * and sounds, numbered in the symbol's own frames and fps. The playhead and Play run just this
@@ -26,8 +29,11 @@ const ROW = 26;
 const LAYER_PANEL = 230;
 const short = (name: string) => name.split("/").pop() || name;
 
+/** The file's ease as the Ease box shows it: the .fla stores −100 for a tween that ends slowly (ease out 100). */
+const easeValue = (ease: FlaFrame["ease"]) => (typeof ease === "number" ? -ease : 0);
+const valueText = (value: number) => (value < 0 ? `ease in ${-value}` : `ease out ${value}`);
 const easeText = (ease: FlaFrame["ease"]) =>
-  ease == null ? "" : ease === "custom" ? "custom ease" : typeof ease === "number" ? (ease < 0 ? `ease in ${-ease}` : `ease out ${ease}`) : `ease ${ease}`;
+  ease == null ? "" : ease === "custom" ? "custom ease" : typeof ease === "number" ? valueText(easeValue(ease)) : `ease ${ease}`;
 const holds = (frame: FlaFrame) => [
   ...(frame.symbols || []).map((symbol) => short(symbol.name)),
   ...(frame.shapes ? [`${frame.shapes} shape${frame.shapes > 1 ? "s" : ""}`] : []),
@@ -60,7 +66,7 @@ const TransportIcon = ({ kind }: { kind: "first" | "prev" | "play" | "pause" | "
   </g></svg>
 );
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden, onSeek, onPlay, onToggleLayer, onCrumb, onStepInto }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden, eases, onSeek, onPlay, onToggleLayer, onCrumb, onStepInto, onSetEase, onPreviewEase }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -68,13 +74,24 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   playing: boolean;
   /** Layers hidden with the eye (indexes into symbol.layers). */
   hidden: Set<number>;
+  /** This symbol's edited eases, by "<layer index>:<keyframe>". */
+  eases?: Record<string, SymbolEaseEdit>;
   onSeek: (frame: number) => void;
   onPlay: () => void;
   onToggleLayer: (index: number) => void;
   onCrumb: (index: number) => void;
   onStepInto: (layerIndex: number, frame: number, js: string) => void;
+  /** A new ease for a keyframe's tween; null goes back to the .fla's. */
+  onSetEase: (layerIndex: number, keyframe: FlaFrame, value: number | null) => void;
+  /** The ease during a drag on the Ease box, then null when the drag ends. */
+  onPreviewEase: (layerIndex: number, keyframe: FlaFrame, value: number | null) => void;
 }) {
   const [closed, setClosed] = useState<Set<number>>(new Set());
+  const [picked, setPicked] = useState<{ layer: number; i: number } | null>(null);
+  const pickedLayer = picked ? symbol.layers[picked.layer] : undefined;
+  const pickedFrame = pickedLayer?.frames.find((item) => item.i === picked?.i);
+  const pickedEdit = picked ? eases?.[`${picked.layer}:${picked.i}`] : undefined;
+  const pickedClassic = (pickedFrame?.tween === "classic" || pickedFrame?.tween === "motion") && Boolean(pickedLayer?.props?.length);
   const scrollRef = useRef<HTMLDivElement>(null);
   const last = Math.max(0, symbol.frames - 1);
   const cells = symbol.frames + 12;
@@ -129,7 +146,21 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
             </span>
           ))}
         </nav>
-        <span className="cb-symbol-note" title="Inside a character you can look at its layers and keyframes; editing them comes later">View only</span>
+        {picked && pickedLayer && pickedFrame && pickedClassic ? (
+          <div className="cb-symbol-ease">
+            <span className="cb-symbol-ease-where" title={pickedLayer.name}>{pickedLayer.name} · {pickedFrame.i + 1}–{pickedFrame.i + pickedFrame.d}</span>
+            <span className="cb-symbol-ease-label">Ease</span>
+            <EaseControl key={`${picked.layer}:${picked.i}`} value={pickedEdit?.value ?? easeValue(pickedFrame.ease)}
+              onCommit={(value) => onSetEase(picked.layer, pickedFrame, value)}
+              onPreview={(value) => onPreviewEase(picked.layer, pickedFrame, value)} />
+            {!pickedEdit && typeof pickedFrame.ease === "string" && <span className="cb-symbol-ease-custom">{easeText(pickedFrame.ease)}</span>}
+            {pickedEdit && <button type="button" className="cb-symbol-ease-reset" onClick={() => onSetEase(picked.layer, pickedFrame, null)} title={`Back to the file's ${easeText(pickedFrame.ease) || "no easing"}`}>Reset</button>}
+          </div>
+        ) : (
+          <span className="cb-symbol-note" title="Inside a character you can edit classic tween eases; layers, keyframes and shape tweens are view only for now">
+            {pickedFrame?.tween === "shape" ? "Shape tween: view only" : "Click a purple tween to edit its ease"}
+          </span>
+        )}
         <span className="cb-symbol-fps">{symbol.fps.toFixed(2)} FPS</span>
         <div className="cb-symbol-transport">
           <button type="button" onClick={() => onSeek(0)} aria-label="First frame" title="First frame"><TransportIcon kind="first" /></button>
@@ -162,7 +193,13 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
                 <button type="button" className={`cb-symbol-eye ${shown ? "" : "off"}`} onClick={() => onToggleLayer(index)} aria-pressed={!shown}
                   aria-label={`${shown ? "Hide" : "Show"} ${layer.name}`} title={`${shown ? "Hide" : "Show"} this layer on the stage (not saved)`}><EyeIcon shown={shown} /></button>
               </div>
-              <div className="cb-symbol-lane" style={{ width: cells * CELL }} onPointerDown={scrub}
+              <div className="cb-symbol-lane" style={{ width: cells * CELL }}
+                onPointerDown={(event) => {
+                  const at = frameAt(event.clientX, event.currentTarget);
+                  const keyframe = layer.frames.find((item) => at >= item.i && at < item.i + item.d);
+                  setPicked(keyframe && layer.type !== "folder" ? { layer: index, i: keyframe.i } : null);
+                  scrub(event);
+                }}
                 onDoubleClick={(event) => {
                   const at = frameAt(event.clientX, event.currentTarget);
                   const keyframe = layer.frames.find((item) => at >= item.i && at < item.i + item.d);
@@ -171,9 +208,10 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
                 }}>
                 {layer.type !== "folder" && layer.frames.map((item) => {
                   const kind = item.tween === "classic" || item.tween === "motion" ? "classic" : item.tween === "shape" ? "shape" : item.blank ? "blank" : "frames";
-                  const info = `Frame ${item.i + 1}${item.d > 1 ? `–${item.i + item.d}` : ""}${item.tween ? ` · ${item.tween} tween${item.ease != null ? `, ${easeText(item.ease)}` : ""}` : ""}${item.blank ? " · blank keyframe" : holds(item) ? ` · ${holds(item)}` : ""}${item.symbols?.some((symbolItem) => symbolItem.js) ? " · double-click to step inside" : ""}`;
+                  const edit = eases?.[`${index}:${item.i}`];
+                  const info = `Frame ${item.i + 1}${item.d > 1 ? `–${item.i + item.d}` : ""}${item.tween ? ` · ${item.tween} tween${edit ? `, ${edit.value ? valueText(edit.value) : "no easing"} (edited)` : item.ease != null ? `, ${easeText(item.ease)}` : ""}` : ""}${item.blank ? " · blank keyframe" : holds(item) ? ` · ${holds(item)}` : ""}${item.symbols?.some((symbolItem) => symbolItem.js) ? " · double-click to step inside" : ""}`;
                   return (
-                    <span key={item.i} className={`cb-symbol-span ${kind}`} style={{ left: item.i * CELL, width: item.d * CELL }} title={info}>
+                    <span key={item.i} className={`cb-symbol-span ${kind} ${edit ? "is-edited" : ""} ${picked?.layer === index && picked.i === item.i ? "is-picked" : ""}`} style={{ left: item.i * CELL, width: item.d * CELL }} title={info}>
                       <i className={`cb-symbol-key ${item.blank ? "blank" : ""}`} aria-hidden="true" />
                       {item.tween && item.d > 2 && <em className="cb-symbol-arrow" aria-hidden="true" />}
                       {!item.tween && item.d > 1 && <u className="cb-symbol-hold" aria-hidden="true" />}
