@@ -83,11 +83,13 @@ type Props = {
   /** A click on nothing inside a character: the picked part is dropped. */
   onSymbolDeselect?: () => void;
   /** The picked part's box (its four corners, top left first, and its pivot) as fractions of the player. */
-  symbolBox?: { corners: Array<[number, number]>; pivot: [number, number] } | null;
+  symbolBox?: { corners: Array<[number, number]>; pivot: [number, number]; editable: boolean } | null;
   /** Inside a character: a double-click on one of its objects (its property name), or elsewhere (null). */
   onSymbolDoubleClick?: (prop: string | null) => void;
-  /** ⌥ Option + double-click a character, or right-click › Edit Symbol: step inside it. */
+  /** Double-click a character with an Animate timeline, or right-click › Edit Symbol: step inside it. */
   onEnterSymbol?: (objectId: string) => void;
+  /** Does this character have an Animate timeline to step inside (imported from an .fla)? Then a plain double-click steps inside. */
+  canEnterSymbol?: (objectId: string) => boolean;
   /** Right-click › Distribute to Layers (animated part layers) / Distribute as Still (vector pictures). */
   onDistributeParts?: (mode: "animated" | "still") => void;
   /** Inside the selected character with no part selected (Illustrator's isolation mode). */
@@ -276,7 +278,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolHandleStart, onSymbolDeselect, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -2528,13 +2530,13 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           if (!isCharacterPixelOpaque(object, event.clientX, event.clientY)) return;
           event.preventDefault();
           event.stopPropagation();
-          // ⌥ Option + double-click steps inside its Animate timeline (plain double-click edits a body part).
-          if (event.altKey && onEnterSymbol) { onEnterSymbol(object.id); return; }
+          // A character with an Animate timeline: a double-click steps inside it (⌥ Option + double-click edits a body part instead).
+          if (!event.altKey && !partMode && onEnterSymbol && canEnterSymbol?.(object.id)) { onEnterSymbol(object.id); return; }
           if (partMode && doubleClickSubPart(object, event.clientX, event.clientY)) return;
           onSelect(object.id);
           requestCharacterPartAtPoint(object, event.clientX, event.clientY, true);
         }}
-        title={selected ? "Drag to move. Double-click a body part to edit just that part." : "Click to select the character. Double-click to edit a body part."}
+        title={canEnterSymbol?.(object.id) ? "Drag to move. Double-click to step inside it (⌥ double-click edits a body part)." : selected ? "Drag to move. Double-click a body part to edit just that part." : "Click to select the character. Double-click to edit a body part."}
       />
     );
   };
@@ -3445,8 +3447,15 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                   <polygon points={symbolBox.corners.map((p) => p.join(",")).join(" ")} vectorEffect="non-scaling-stroke" />
                   <line x1={top[0]} y1={top[1]} x2={rotate[0]} y2={rotate[1]} vectorEffect="non-scaling-stroke" />
                 </svg>
-                {sides.map(([name, point]) => <i key={name} className={`cb-symbol-handle ${name}`} style={{ left: `${point[0] * 100}%`, top: `${point[1] * 100}%` }} role="button" aria-label={`Scale ${name}`} onPointerDown={press(name)} />)}
-                <i className="cb-symbol-handle rotate" style={{ left: `${rotate[0] * 100}%`, top: `${rotate[1] * 100}%` }} role="button" aria-label="Rotate" title="Rotate (Shift: 15° steps)" onPointerDown={press("rotate")} />
+                {symbolBox.editable && ([["skew-n", c0, c1], ["skew-e", c1, c2], ["skew-s", c2, c3], ["skew-w", c3, c0]] as Array<[string, [number, number], [number, number]]>).map(([name, from, to]) => {
+                  const centre = mid(from, to), dx = (to[0] - from[0]) * handleFrame.width, dy = (to[1] - from[1]) * handleFrame.height;
+                  return <i key={name} className={`cb-symbol-edge ${name}`} role="button" aria-label="Skew along this edge" title="Skew: drag along this edge"
+                    style={{ left: `${centre[0] * 100}%`, top: `${centre[1] * 100}%`, width: Math.hypot(dx, dy), transform: `translate(-50%, -50%) rotate(${Math.atan2(dy, dx)}rad)`, cursor: name === "skew-n" || name === "skew-s" ? "ew-resize" : "ns-resize" }}
+                    onPointerDown={press(name)} />;
+                })}
+                {symbolBox.editable && sides.map(([name, point]) => <i key={name} className={`cb-symbol-handle ${name}`} style={{ left: `${point[0] * 100}%`, top: `${point[1] * 100}%` }} role="button" aria-label={`Scale ${name}`} onPointerDown={press(name)} />)}
+                {!symbolBox.editable && <b className="cb-symbol-box-note" style={{ left: `${c0[0] * 100}%`, top: `${c0[1] * 100}%` }}>View only</b>}
+                {symbolBox.editable && <i className="cb-symbol-handle rotate" style={{ left: `${rotate[0] * 100}%`, top: `${rotate[1] * 100}%` }} role="button" aria-label="Rotate" title="Rotate (Shift: 15° steps)" onPointerDown={press("rotate")} />}
                 <i className="cb-symbol-pivot" style={{ left: `${symbolBox.pivot[0] * 100}%`, top: `${symbolBox.pivot[1] * 100}%` }} aria-hidden="true" />
               </div>
             );
@@ -3456,7 +3465,11 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       </div>
       {symbolMenu && (
         <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: symbolMenu.x, top: symbolMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
-          {onEnterSymbol && <button type="button" role="menuitem" onClick={() => { const id = symbolMenu.objectId; setSymbolMenu(null); onEnterSymbol(id); }}>Edit Symbol<kbd>⌥ double-click</kbd></button>}
+          {onEnterSymbol && <button type="button" role="menuitem" onClick={() => { const id = symbolMenu.objectId; setSymbolMenu(null); onEnterSymbol(id); }}>Edit Symbol<kbd>{canEnterSymbol?.(symbolMenu.objectId) ? "double-click" : ""}</kbd></button>}
+          {onEnterSymbol && canEnterSymbol?.(symbolMenu.objectId) && (() => {
+            const object = objects.find((item) => item.id === symbolMenu.objectId);
+            return object ? <button type="button" role="menuitem" onClick={() => { const at = symbolMenu; setSymbolMenu(null); onSelect(object.id); requestCharacterPartAtPoint(object, at.x, at.y, true); }}>Select Parts<kbd>⌥ double-click</kbd></button> : null;
+          })()}
           {onDistributeParts && <>
             <span className="cb-frame-menu-sep" aria-hidden="true" />
             <button type="button" role="menuitem" onClick={() => { setSymbolMenu(null); onDistributeParts("animated"); }}

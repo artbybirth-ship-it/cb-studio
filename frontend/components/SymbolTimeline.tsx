@@ -88,7 +88,7 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden, eases, keys, editable, values, keyValues, onSelectKey, onSetValue, onSeek, onPlay, onToggleLayer, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden, eases, keys, editable, values, keyValues, pickedProp, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onToggleLayer, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -106,6 +106,10 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   values?: Record<string, SymbolValueEdit>;
   /** The picked keyframe's values as the file has them (null: the player could not read them). */
   keyValues?: { layer: number; frame: number; values: Record<string, number> | null } | null;
+  /** The part picked on the stage (its property name in this symbol): the layers that show it are highlighted. */
+  pickedProp?: string | null;
+  /** A layer was picked by its name (null: none): its part is picked on the stage. */
+  onSelectLayer: (layerIndex: number | null) => void;
   /** A keyframe was picked (file frame), or none. */
   onSelectKey: (layerIndex: number, frame: number | null) => void;
   /** Change values of a keyframe; null puts them back. */
@@ -127,6 +131,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   const [closed, setClosed] = useState<Set<number>>(new Set());
   const [keySel, setKeySel] = useState<{ layer: number; frame: number } | null>(null);
   const selectKey = (sel: { layer: number; frame: number } | null) => { setKeySel(sel); onSelectKey(sel?.layer ?? 0, sel ? sel.frame : null); };
+  const [layerSel, setLayerSel] = useState<number | null>(null);
   const [picked, setPicked] = useState<{ layer: number; i: number } | null>(null);
   const anchorsOf = (index: number): Anchor[] => keys?.[index]?.anchors || fileAnchors(symbol.layers[index]);
   const pickedLayer = picked ? symbol.layers[picked.layer] : undefined;
@@ -262,7 +267,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
         return (
           <div className="cb-symbol-values">
             <span className="cb-symbol-values-where" title={layer.name}>{layer.name} · keyframe {keySel.frame + 1}</span>
-            {!now ? <span className="cb-symbol-ease-custom">Drawn artwork: no position values to edit here</span> : <>
+            {!now ? <span className="cb-symbol-ease-custom">{editable?.[keySel.layer] === false ? "This layer's keyframes can't be edited here" : "No position values on this keyframe (empty, or a shape tween)"}</span> : <>
               <ValueField label="X" value={now.x} decimals={1} onChange={(v) => set({ x: v })} />
               <ValueField label="Y" value={now.y} decimals={1} onChange={(v) => set({ y: v })} />
               {turn
@@ -290,8 +295,8 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
         {rows.map(({ layer, index, depth }) => {
           const shown = !hidden.has(index) && !hiddenByFolder(index);
           return (
-            <div key={index} className={`cb-symbol-row ${shown ? "" : "is-hidden"} ${layer.type === "folder" ? "is-folder" : ""}`}>
-              <div className="cb-symbol-layer" style={{ paddingLeft: 6 + depth * 14 }} title={`${layer.name}${layer.type !== "normal" ? ` (${layer.type} layer)` : ""}${layer.hidden ? " · hidden in Animate" : ""}${layer.locked ? " · locked in Animate" : ""}`}>
+            <div key={index} className={`cb-symbol-row ${shown ? "" : "is-hidden"} ${layer.type === "folder" ? "is-folder" : ""} ${layerSel === index || (pickedProp && layer.props?.includes(pickedProp)) ? "is-selected" : ""}`}>
+              <div className="cb-symbol-layer" style={{ paddingLeft: 6 + depth * 14 }} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) return; setLayerSel(index); onSelectLayer(index); }} title={`${layer.name}${layer.type !== "normal" ? ` (${layer.type} layer)` : ""}${layer.hidden ? " · hidden in Animate" : ""}${layer.locked ? " · locked in Animate" : ""}`}>
                 {layer.type === "folder"
                   ? <button type="button" className="cb-symbol-fold" onClick={() => setClosed((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} aria-label={closed.has(index) ? `Open ${layer.name}` : `Close ${layer.name}`} aria-expanded={!closed.has(index)}><LayerIcon type="folder" open={!closed.has(index)} /></button>
                   : <span className="cb-symbol-type"><LayerIcon type={layer.type} open /></span>}
@@ -305,6 +310,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
                   const at = frameAt(event.clientX, event.currentTarget);
                   const keyframe = shownFrames(layer, anchorsOf(index)).find((item) => at >= item.i && at < item.i + item.d);
                   setPicked(keyframe && layer.type !== "folder" ? { layer: index, i: keyframe.i } : null);
+                  if (keyframe && layer.type !== "folder" && !keyframe.added) { setLayerSel(index); selectKey({ layer: index, frame: keyframe.source.i }); }
                   scrub(event);
                 }}
                 onDoubleClick={(event) => {

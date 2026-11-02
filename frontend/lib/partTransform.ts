@@ -46,15 +46,35 @@ export function partBox(info: PartInfo) {
 /** A part with a turn already in its `rotation` (not Animate's usual skews) is left alone. */
 export const canTransform = (info: PartInfo) => Math.abs(info.rot) < 1e-6 && info.bounds.width > 0 && info.bounds.height > 0;
 
-/** Turning the part around its pivot by the pointer: the skews both gain the angle, so a skewed part turns whole. */
+type Mat = [number, number, number, number]; // [a, b, c, d]: x → (a, b), y → (c, d)
+const matrixOf = (info: PartInfo): Mat => { const m = linear(info); return [m.a, m.b, m.c, m.d]; };
+const mul = (p: Mat, q: Mat): Mat => [p[0] * q[0] + p[2] * q[1], p[1] * q[0] + p[3] * q[1], p[0] * q[2] + p[2] * q[3], p[1] * q[2] + p[3] * q[3]];
+const inverse = (m: Mat): Mat => { const det = m[0] * m[3] - m[1] * m[2]; return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det]; };
+/** How the parent lays out the stage: its x axis goes to (ax, ay), its y axis to (bx, by). */
+const basisOf = (info: PartInfo): Mat => [info.ax, info.ay, info.bx, info.by];
+
+/** A matrix back as Animate's scale and skews (keeping a flip's sign): a = sx·cos(skewY), b = sx·sin(skewY), c = −sy·sin(skewX), d = sy·cos(skewX). */
+function toScaleSkew(m: Mat, like: Pick<PartInfo, "sx" | "sy">) {
+  const flipX = like.sx < 0 ? -1 : 1, flipY = like.sy < 0 ? -1 : 1;
+  return {
+    scaleX: flipX * Math.hypot(m[0], m[1]), scaleY: flipY * Math.hypot(m[2], m[3]),
+    skewY: Math.atan2(m[1] * flipX, m[0] * flipX) / RAD, skewX: Math.atan2(-m[2] * flipY, m[3] * flipY) / RAD,
+  };
+}
+/** The part's position after its matrix changes while the point q (local) stays where it is. */
+const keepPoint = (info: PartInfo, next: Mat, q: Pt) => {
+  const m = matrixOf(info), rx = q[0] - info.regX, ry = q[1] - info.regY;
+  return { x: info.x + (m[0] - next[0]) * rx + (m[2] - next[2]) * ry, y: info.y + (m[1] - next[1]) * rx + (m[3] - next[3]) * ry };
+};
+
+/** Turning the part around its pivot by the pointer, exactly as it looks on the stage (even inside a scaled or skewed parent). */
 export function rotatePart(info: PartInfo, start: Pt, now: Pt, snap: boolean) {
   const pivot = parentToStage(info, [info.x, info.y]);
-  let turn = Math.atan2(now[1] - pivot[1], now[0] - pivot[0]) - Math.atan2(start[1] - pivot[1], start[0] - pivot[0]);
-  if (info.ax * info.by - info.bx * info.ay < 0) turn = -turn;
-  let degrees = turn / RAD;
-  degrees = ((degrees + 540) % 360) - 180;
-  if (snap) degrees = Math.round(degrees / 15) * 15;
-  return { skewX: info.skx + degrees, skewY: info.sky + degrees };
+  let turn = (Math.atan2(now[1] - pivot[1], now[0] - pivot[0]) - Math.atan2(start[1] - pivot[1], start[0] - pivot[0])) / RAD;
+  turn = ((turn + 540) % 360) - 180;
+  if (snap) turn = Math.round(turn / 15) * 15;
+  const r = turn * RAD, spin: Mat = [Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r)], parent = basisOf(info);
+  return toScaleSkew(mul(inverse(parent), mul(spin, mul(parent, matrixOf(info)))), info);
 }
 
 /** Scaling along the part's own axes with the opposite side fixed; a corner with Shift keeps the proportions. */
@@ -67,7 +87,20 @@ export function scalePart(info: PartInfo, handle: ScaleHandle, start: Pt, now: P
   const clamp = (f: number) => (Math.abs(f) < 0.01 ? (f < 0 ? -0.01 : 0.01) : f);
   let fx = moveX ? clamp(ratio(u0[0], u1[0], anchor[0])) : 1, fy = moveY ? clamp(ratio(u0[1], u1[1], anchor[1])) : 1;
   if (keepShape && moveX && moveY) { const f = Math.abs(fx) >= Math.abs(fy) ? fx : fy; fx = f; fy = f; }
-  const m = linear(info), a2 = m.a * fx, b2 = m.b * fx, c2 = m.c * fy, d2 = m.d * fy;
-  const rx = anchor[0] - info.regX, ry = anchor[1] - info.regY;
-  return { scaleX: info.sx * fx, scaleY: info.sy * fy, x: info.x + (m.a - a2) * rx + (m.c - c2) * ry, y: info.y + (m.b - b2) * rx + (m.d - d2) * ry };
+  const m = matrixOf(info), next: Mat = [m[0] * fx, m[1] * fx, m[2] * fy, m[3] * fy];
+  return { scaleX: info.sx * fx, scaleY: info.sy * fy, ...keepPoint(info, next, anchor) };
+}
+
+export type SkewEdge = "skew-n" | "skew-s" | "skew-e" | "skew-w";
+/** Skewing along an edge of the part's box: the opposite edge stays where it is. */
+export function skewPart(info: PartInfo, edge: SkewEdge, start: Pt, now: Pt) {
+  const { x, y, width, height } = info.bounds;
+  const u0 = stageToLocal(info, start), u1 = stageToLocal(info, now), m = matrixOf(info);
+  const horizontal = edge === "skew-n" || edge === "skew-s";
+  const edgeAt = horizontal ? (edge === "skew-n" ? y : y + height) : (edge === "skew-w" ? x : x + width);
+  const anchorAt = horizontal ? (edge === "skew-n" ? y + height : y) : (edge === "skew-w" ? x + width : x);
+  const lever = edgeAt - anchorAt, k = Math.abs(lever) < 1e-6 ? 0 : ((horizontal ? u1[0] - u0[0] : u1[1] - u0[1]) / lever);
+  const next: Mat = horizontal ? [m[0], m[1], m[0] * k + m[2], m[1] * k + m[3]] : [m[0] + m[2] * k, m[1] + m[3] * k, m[2], m[3]];
+  const q: Pt = horizontal ? [x + width / 2, anchorAt] : [anchorAt, y + height / 2];
+  return { ...toScaleSkew(next, info), ...keepPoint(info, next, q) };
 }

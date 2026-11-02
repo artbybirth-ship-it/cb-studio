@@ -1268,11 +1268,21 @@
     cbPost('SYMBOL_DRAG_INFO', { token: d.token, info: info });
   }
   // A part of the open symbol: its own transform, its box, and how its parent sits on the stage (for the handles).
+  // A drawn shape has no bounds of its own: take the extent of its path (control points included).
+  function shapeBounds(o) {
+    if (!o.graphics || !o.graphics.draw) return null;
+    var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    function add(x, y) { if (isFinite(x) && isFinite(y)) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } }
+    var path = { moveTo: add, lineTo: add, quadraticCurveTo: function (a, b, c, e) { add(a, b); add(c, e); }, bezierCurveTo: function (a, b, c, e, f, g) { add(a, b); add(c, e); add(f, g); }, rect: function (x, y, w, h) { add(x, y); add(x + w, y + h); }, arc: function (x, y, r) { add(x - r, y - r); add(x + r, y + r); } };
+    var ctx = new Proxy({}, { get: function (t, k) { return path[k] || function () {}; }, set: function () { return true; } });
+    try { o.graphics.draw(ctx); } catch (e) { return null; }
+    return x1 > x0 && y1 > y0 ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
+  }
   function postPartInfo(d) {
     var st = cbStage(), node = cbSymbolView && cbSymbolView.node, prop = String(d.prop || ''), info = null;
     var o = st && node && prop && prop.charAt(0) !== '#' ? node[prop] : null;
     if (o && o.localToLocal) {
-      var b = rawBounds(o);
+      var b = rawBounds(o) || shapeBounds(o);
       if (b && b.width > 0 && b.height > 0) {
         var p0 = node.localToLocal(0, 0, st), px = node.localToLocal(1, 0, st), py = node.localToLocal(0, 1, st);
         info = { prop: prop, ax: px.x - p0.x, ay: px.y - p0.y, bx: py.x - p0.x, by: py.y - p0.y, p0x: p0.x, p0y: p0.y,
@@ -1285,12 +1295,14 @@
   function postKeyValues(d) {
     var clip = clipsOfClass(d.js)[0], values = null;
     if (clip) {
-      var steps = valueStepsAt(clip, d.props, d.frame);
-      if (steps.length) {
+      var steps = valueStepsAt(clip, d.props, d.frame), items = steps.length ? [] : stateItemsAt(clip, d.props, d.frame);
+      if (steps.length || items.length) {
         values = {};
         VALUE_KEYS.forEach(function (k) {
-          var held = cbValueSteps.filter(function (v) { return v.k === k && steps.indexOf(v.step) >= 0; })[0];
-          var v = held ? held.old : steps[0].props[k];
+          var held = cbValueSteps.filter(function (v) { return v.k === k && (v.item ? items.indexOf(v.item) >= 0 : steps.indexOf(v.step) >= 0); })[0], v;
+          if (held) v = held.item ? (held.old !== undefined ? held.old : held.objOld) : held.old;
+          else if (items.length) v = items[0].p && typeof items[0].p[k] === 'number' ? items[0].p[k] : items[0].t[k];
+          else v = steps[0].props[k];
           if (typeof v === 'number') values[k] = v;
         });
       }
@@ -1314,10 +1326,33 @@
     tweensFor(clip, props).forEach(function (tween) { for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) out.push(step); });
     return out;
   }
-  // Does a tween move this layer's object (so its x, y, scale, rotation and opacity are keyframe values)?
+  // The drawn parts a frame-by-frame layer shows at a keyframe: its state tween's items for those objects (item.t, and item.p the
+  // values the state sets on it). Editing p edits that keyframe only; an object in several keyframes has p in each of them.
+  function stateItemsAt(clip, props, frame) {
+    var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean), out = [];
+    clip.timeline.tweens.forEach(function (tween) {
+      if (tween.target && tween.target.localToGlobal) return;
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var list = step.props && step.props.state;
+        if (!list || !list.forEach) continue;
+        var t = step.__ot != null ? step.__ot : step.t, d = step.__od != null ? step.__od : step.d;
+        if (!((d === 0 && Math.abs(t - frame) < 1e-6) || (d > 0 && Math.abs(t + d - frame) < 1e-6))) continue;
+        list.forEach(function (item) { if (item && targets.indexOf(item.t) >= 0) out.push(item); });
+      }
+    });
+    return out;
+  }
+  // Does a tween move this layer's object, or does a state show it (so its x, y, scale, rotation and opacity are keyframe values)?
   function movesObject(clip, props) {
     var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean);
-    return clip.timeline.tweens.some(function (tween) { return targets.indexOf(tween.target) >= 0; });
+    return clip.timeline.tweens.some(function (tween) {
+      if (targets.indexOf(tween.target) >= 0) return true;
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var list = step.props && step.props.state;
+        if (list && list.some && list.some(function (item) { return item && targets.indexOf(item.t) >= 0; })) return true;
+      }
+      return false;
+    });
   }
   // An added keyframe inside a tween: the step is cut in two there, holding the motion exactly (the ease is cut with it).
   var cbSplitSteps = [];
@@ -1379,7 +1414,13 @@
     cbEasesKey = key;
     var clips = new Set();
     cbRetimedSteps.reverse().forEach(function (r) { r.step.t = r.t; r.step.d = r.d; r.step.ease = r.ease; delete r.step.__ot; delete r.step.__od; clips.add(r.clip); });
-    cbValueSteps.reverse().forEach(function (v) { v.step.props[v.k] = v.old; clips.add(v.clip); });
+    cbValueSteps.reverse().forEach(function (v) {
+      if (v.item) {
+        if (!v.hadP) delete v.item.p; else if (v.old === undefined) delete v.item.p[v.k]; else v.item.p[v.k] = v.old;
+        if (v.objOld !== undefined) v.item.t[v.k] = v.objOld;
+      } else v.step.props[v.k] = v.old;
+      clips.add(v.clip);
+    });
     cbValueSteps = [];
     cbSplitSteps.reverse().forEach(function (sp) {
       var step = sp.step; step.d = sp.d; step.props = sp.props; step.ease = sp.ease;
@@ -1416,6 +1457,15 @@
       clipsOfClass(name).forEach(function (clip) {
         Object.keys(entries).forEach(function (k) {
           var edit = entries[k];
+          stateItemsAt(clip, edit.props, edit.frame).forEach(function (item) {
+            Object.keys(edit.v || {}).forEach(function (prop) {
+              if (VALUE_KEYS.indexOf(prop) < 0 || typeof edit.v[prop] !== 'number') return;
+              cbValueSteps.push({ item: item, clip: clip, k: prop, hadP: !!item.p, old: item.p ? item.p[prop] : undefined, objOld: item.t[prop] });
+              if (!item.p) item.p = {};
+              item.p[prop] = edit.v[prop];
+              clips.add(clip);
+            });
+          });
           valueStepsAt(clip, edit.props, edit.frame).forEach(function (step) {
             Object.keys(edit.v || {}).forEach(function (prop) {
               if (VALUE_KEYS.indexOf(prop) < 0 || typeof edit.v[prop] !== 'number') return;
@@ -1433,6 +1483,8 @@
     });
     // An independent clip only redoes its timeline when its position changes (synched ones do when drawn).
     clips.forEach(function (clip) {
+      // A timeline asked for the position it already holds does nothing: make it run again for the changed values.
+      try { clip.timeline.rawPosition = -1; } catch (e) {}
       if (clip.mode !== 'independent' || !(clip._rawPosition >= 0)) return;
       var at = clip._rawPosition;
       clip._rawPosition = NaN;

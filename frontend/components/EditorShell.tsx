@@ -16,7 +16,7 @@ import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsert
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, fileAnchors, fileOf, shownFrames } from "@/lib/symbolKeys";
-import { canTransform, partBox, rotatePart, scalePart, type PartInfo, type Pt, type ScaleHandle } from "@/lib/partTransform";
+import { canTransform, partBox, rotatePart, scalePart, skewPart, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
@@ -3332,14 +3332,17 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return () => { window.removeEventListener("message", onMessage); window.clearTimeout(retry); };
   }, [keysObjectId, keysLevelJs, keysLayers]);
   // Values edited on one keyframe inside the character (X, Y, scale, rotation, opacity): saved on this placed character.
-  const setSymbolValue = useCallback((layerIndex: number, frame: number, patch: Partial<Record<SymbolValueKey, number>> | null) => {
+  const setSymbolValue = useCallback((layerIndex: number, frame: number, patch: Partial<Record<SymbolValueKey, number>> | null, part?: string) => {
     if (!symbolView) return;
     const level = symbolView.levels[symbolView.levels.length - 1];
-    const props = level.data.layers[layerIndex]?.props || [];
+    const layerProps = level.data.layers[layerIndex]?.props || [];
+    // A layer that shows several drawn parts is edited one part at a time.
+    const single = part && layerProps.length > 1 ? part : null;
+    const props = single ? [single] : layerProps;
     mutate((data) => {
       const item = data.objects.find((object) => object.id === symbolView.objectId);
       if (!item) return;
-      const symbols = { ...(item.symbolValues || {}) }, entries = { ...(symbols[level.js] || {}) }, key = `${layerIndex}:${frame}`;
+      const symbols = { ...(item.symbolValues || {}) }, entries = { ...(symbols[level.js] || {}) }, key = single ? `${layerIndex}:${frame}:${single}` : `${layerIndex}:${frame}`;
       if (patch) entries[key] = { props, frame, v: { ...(entries[key]?.v || {}), ...patch } }; else delete entries[key];
       if (Object.keys(entries).length) symbols[level.js] = entries; else delete symbols[level.js];
       item.symbolValues = symbols;
@@ -3368,7 +3371,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_PART_QUERY", prop, token }, "*");
   }), [symbolView]);
   /** Where an edit of this part at the playhead lands: its layer, the keyframe (a new one when between a tween's keyframes). */
-  const planPartEdit = useCallback((prop: string) => {
+  const planPartEdit = useCallback((prop: string, quiet = false) => {
     const level = symbolLevelNow, object = symbolObjectNow;
     if (!level) return null;
     const layers = level.data.layers, at = level.frame;
@@ -3380,17 +3383,21 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (found) { layer = index; item = found; }
     }
     if (layer < 0 || !item) return null;
+    if (item.tween === "shape") {
+      if (!quiet) showNotice("This part is in a shape tween: it can be looked at here, not moved yet.");
+      return null;
+    }
     if (!(keysEditable?.js === level.js && keysEditable.editable[layer] && keysEditable.moves[layer])) {
-      showNotice("This part is drawn artwork, or built from frames, so it has no position keyframes to edit here.");
+      if (!quiet) showNotice("This part has no position keyframes to edit here.");
       return null;
     }
     const anchors = anchorsOf(layer);
     const inTween = item.i !== at && (item.tween === "classic" || item.tween === "motion");
     const grown = inTween ? addAnchor(anchors, at) : null;
-    return { layer, grown, target: inTween && grown ? fileOf(anchors, at) : anchors[item.anchor][0] };
+    return { layer, prop, grown, target: inTween && grown ? fileOf(anchors, at) : anchors[item.anchor][0] };
   }, [keysEditable, showNotice, symbolLevelNow, symbolObjectNow]);
   /** The edit the pointer makes: the first change adds the keyframe, every change sets values (one undo step). */
-  const partEditor = useCallback((plan: { layer: number; grown: Array<[number, number]> | null; target: number }) => {
+  const partEditor = useCallback((plan: { layer: number; prop: string; grown: Array<[number, number]> | null; target: number }) => {
     let started = false;
     return {
       apply: (patch: Partial<Record<SymbolValueKey, number>>) => {
@@ -3399,7 +3406,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
           scrubHistoryRef.current = "armed";
           if (plan.grown) setSymbolKeys(plan.layer, plan.grown);
         }
-        setSymbolValue(plan.layer, plan.target, patch);
+        setSymbolValue(plan.layer, plan.target, patch, plan.prop);
       },
       end: () => { window.setTimeout(() => { scrubHistoryRef.current = "idle"; }, 0); },
     };
@@ -3418,11 +3425,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     };
     const prepare = (info: { prop: string; ax: number; ay: number; bx: number; by: number; x: number; y: number; W: number; H: number } | null) => {
       if (!info) return null;
-      const plan = planPartEdit(info.prop);
-      if (!plan) return null;
-      const edit = partEditor(plan);
+      const quietPlan = planPartEdit(info.prop, true);
+      let noticed = false;
+      const edit = partEditor(quietPlan || { layer: -1, prop: info.prop, grown: null, target: 0 });
       return {
         move: (dx: number, dy: number, shift: boolean) => {
+          if (!quietPlan) { if (!noticed) { noticed = true; planPartEdit(info.prop); } return; }
           let stageX = dx * info.W, stageY = dy * info.H;
           if (shift) { if (Math.abs(stageX) >= Math.abs(stageY)) stageY = 0; else stageX = 0; }
           const det = info.ax * info.by - info.bx * info.ay;
@@ -3454,7 +3462,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   }, [askPart, partVersion, pickedProp]);
   useEffect(() => { if (!symbolView) setPickedPart(null); }, [symbolView]);
   useEffect(() => { setPickedPart(null); }, [symbolLevelNow?.js]);
-  const symbolBox = useMemo(() => (partInfo ? partBox(partInfo) : null), [partInfo]);
+  const partEditable = Boolean(pickedProp && partInfo && planPartEdit(pickedProp, true));
+  const symbolBox = useMemo(() => (partInfo ? { ...partBox(partInfo), editable: partEditable } : null), [partInfo, partEditable]);
   // A handle of the picked part: turn it around its pivot or scale it from the opposite side.
   const beginSymbolHandle = useCallback(async (handle: string, nx: number, ny: number): Promise<PartHandle | null> => {
     if (!pickedProp) return null;
@@ -3463,12 +3472,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const plan = planPartEdit(pickedProp);
     if (!plan) return null;
     const edit = partEditor(plan), start: Pt = [nx * info.W, ny * info.H];
+    const round = (value: number, digits = 2) => Math.round(value * 10 ** digits) / 10 ** digits;
     return {
       move: (dx: number, dy: number, shift: boolean) => {
-        const now: Pt = [(nx + dx) * info.W, (ny + dy) * info.H], round = (value: number, digits = 2) => Math.round(value * 10 ** digits) / 10 ** digits;
+        const now: Pt = [(nx + dx) * info.W, (ny + dy) * info.H];
         if (handle === "rotate") {
           const turned = rotatePart(info, start, now, shift);
-          edit.apply({ skewX: round(turned.skewX), skewY: round(turned.skewY) });
+          edit.apply({ scaleX: round(turned.scaleX, 4), scaleY: round(turned.scaleY, 4), skewX: round(turned.skewX), skewY: round(turned.skewY) });
+        } else if (handle.startsWith("skew-")) {
+          const skewed = skewPart(info, handle as SkewEdge, start, now);
+          edit.apply({ scaleX: round(skewed.scaleX, 4), scaleY: round(skewed.scaleY, 4), skewX: round(skewed.skewX), skewY: round(skewed.skewY), x: round(skewed.x), y: round(skewed.y) });
         } else {
           const scaled = scalePart(info, handle as ScaleHandle, start, now, shift);
           edit.apply({ scaleX: round(scaled.scaleX, 4), scaleY: round(scaled.scaleY, 4), x: round(scaled.x), y: round(scaled.y) });
@@ -4938,6 +4951,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onSymbolDeselect={() => setPickedPart(null)}
               symbolBox={symbolBox}
               onEnterSymbol={(id) => void enterSymbol(id)}
+              canEnterSymbol={(id) => {
+                const object = draft?.objects.find((item) => item.id === id);
+                const action = object?.type === "character" ? characterLibraryActions.find((item) => item.assetUrl === object.assetUrl) : null;
+                return Boolean(action?.flaTimeline && action.flaSymbol);
+              }}
               onDistributeParts={(mode) => void distributeRef.current(mode)}
               colorPickActive={stageColourTool || Boolean(frPicking) || boxPicking}
               colorPickCursor={frPicking || boxPicking || activeTool === "eyedropper" ? "pick" : toneDarkNow ? "darken" : "lighten"}
@@ -4968,6 +4986,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 editable={keysEditable?.js === current.js ? keysEditable.editable : undefined}
                 values={object?.symbolValues?.[current.js]}
                 keyValues={keyValues}
+                pickedProp={pickedProp}
+                onSelectLayer={(index) => {
+                  const level = symbolView ? symbolView.levels[symbolView.levels.length - 1] : null;
+                  const prop = index != null ? level?.data.layers[index]?.props?.[0] : null;
+                  setPickedPart(prop && symbolView ? { objectId: symbolView.objectId, prop } : null);
+                }}
                 onSelectKey={askKeyValues}
                 onSetValue={setSymbolValue}
                 onSetKeys={setSymbolKeys}
