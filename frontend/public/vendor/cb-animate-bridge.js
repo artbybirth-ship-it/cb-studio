@@ -1483,8 +1483,8 @@
     });
     // An independent clip only redoes its timeline when its position changes (synched ones do when drawn).
     clips.forEach(function (clip) {
-      // A timeline asked for the position it already holds does nothing: make it run again for the changed values.
-      try { clip.timeline.rawPosition = -1; } catch (e) {}
+      // A timeline, and each of its tweens, asked for the position it already holds does nothing: make them run again for the changed values.
+      try { clip.timeline.rawPosition = -1; clip.timeline.tweens.forEach(function (tween) { tween.rawPosition = -1; }); } catch (e) {}
       if (clip.mode !== 'independent' || !(clip._rawPosition >= 0)) return;
       var at = clip._rawPosition;
       clip._rawPosition = NaN;
