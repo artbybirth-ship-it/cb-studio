@@ -1358,21 +1358,44 @@
   var cbSplitSteps = [];
   function splitSteps(clip, edit) {
     var orig = (edit.anchors || []).map(function (a) { return a[0]; });
+    function copyItem(item) { return { t: item.t, p: item.p ? Object.assign({}, item.p) : undefined }; }
     tweensFor(clip, edit.props).forEach(function (tween) {
       orig.forEach(function (m) {
         for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
           var t = step.t, d = step.d;
-          if (!(d > 0 && m > t + 1e-6 && m < t + d - 1e-6) || !step.props || step.props === step.prev.props || step.props.state) continue;
-          var a = (m - t) / d, e = step.ease, p0 = step.prev.props, p1 = step.props, ea = e ? e(a, 0, 1, 1) : a, mid = {}, k;
-          for (k in p1) mid[k] = p1[k];
-          for (k in p0) mid[k] = (typeof p0[k] === 'number' && typeof p1[k] === 'number' && p0[k] !== p1[k]) ? p0[k] + (p1[k] - p0[k]) * ea : p0[k];
-          var flat = Math.abs(ea) < 1e-9 || Math.abs(1 - ea) < 1e-9;
-          var e1 = e && !flat ? function (x) { return e(x * a, 0, 1, 1) / ea; } : null;
-          var e2 = e && !flat ? function (x) { return (e(a + x * (1 - a), 0, 1, 1) - ea) / (1 - ea); } : null;
-          var second = new step.constructor(step, m, t + d - m, p1, e2, step.passive);
-          second.next = step.next; if (step.next) step.next.prev = second;
-          cbSplitSteps.push({ step: step, second: second, tween: tween, d: d, props: p1, ease: e });
-          step.next = second; step.d = m - t; step.props = mid; step.ease = e1;
+          if (!(d > 0 && m > t + 1e-6 && m < t + d - 1e-6) || !step.props) continue;
+          var second;
+          if (step.props.state) {
+            // Drawn parts: the state that holds from here on is a copy of the one showing now, so it can be edited on its own.
+            var showing = step.prev.props && step.prev.props.state;
+            if (!showing) continue;
+            // A shape now in two states needs its values stated in both, or the edited one lingers in the other.
+            var gave = [];
+            showing.forEach(function (item) { if (!item.p) { item.p = {}; VALUE_KEYS.forEach(function (k) { item.p[k] = item.t[k]; }); gave.push(item); } });
+            second = new step.constructor(step, m, t + d - m, step.props, step.ease, step.passive);
+            second.next = step.next; if (step.next) step.next.prev = second;
+            cbSplitSteps.push({ step: step, second: second, tween: tween, d: d, props: step.props, ease: step.ease, gave: gave });
+            step.next = second; step.d = m - t; step.props = { state: showing.map(copyItem) }; step.ease = null;
+          } else if (step.props === step.prev.props) {
+            // A hold: a keyframe in it sets a copy of the values, which the rest of the hold then shares.
+            var values = Object.assign({}, step.props), zero = new step.constructor(step, m, 0, values, null, step.passive);
+            second = new step.constructor(zero, m, t + d - m, values, null, step.passive);
+            second.next = step.next; if (step.next) step.next.prev = second;
+            zero.next = second;
+            cbSplitSteps.push({ step: step, second: second, tween: tween, d: d, props: step.props, ease: step.ease });
+            step.next = zero; step.d = m - t;
+          } else {
+            var a = (m - t) / d, e = step.ease, p0 = step.prev.props, p1 = step.props, ea = e ? e(a, 0, 1, 1) : a, mid = {}, k;
+            for (k in p1) mid[k] = p1[k];
+            for (k in p0) mid[k] = (typeof p0[k] === 'number' && typeof p1[k] === 'number' && p0[k] !== p1[k]) ? p0[k] + (p1[k] - p0[k]) * ea : p0[k];
+            var flat = Math.abs(ea) < 1e-9 || Math.abs(1 - ea) < 1e-9;
+            var e1 = e && !flat ? function (x) { return e(x * a, 0, 1, 1) / ea; } : null;
+            var e2 = e && !flat ? function (x) { return (e(a + x * (1 - a), 0, 1, 1) - ea) / (1 - ea); } : null;
+            second = new step.constructor(step, m, t + d - m, p1, e2, step.passive);
+            second.next = step.next; if (step.next) step.next.prev = second;
+            cbSplitSteps.push({ step: step, second: second, tween: tween, d: d, props: p1, ease: e });
+            step.next = second; step.d = m - t; step.props = mid; step.ease = e1;
+          }
           if (tween._stepTail === step) tween._stepTail = second;
           break;
         }
@@ -1402,11 +1425,11 @@
     return frames.every(function (f) { return steps.some(function (st) { return st.t === f || st.t + st.d === f; }); });
   }
   function postKeyEditable(d) {
-    var found = {}, moves = {};
+    var found = {}, moves = {}, drawn = {};
     clipsOfClass(d.js).slice(0, 1).forEach(function (clip) {
-      (d.layers || []).forEach(function (l) { found[l.index] = keyEditable(clip, l.props, l.frames || []); moves[l.index] = movesObject(clip, l.props); });
+      (d.layers || []).forEach(function (l) { found[l.index] = keyEditable(clip, l.props, l.frames || []); moves[l.index] = movesObject(clip, l.props); drawn[l.index] = !clip.timeline.tweens.some(function (tween) { return (l.props || []).some(function (prop) { return clip[prop] && tween.target === clip[prop]; }); }); });
     });
-    cbPost('SYMBOL_KEYS_EDITABLE', { js: d.js, token: d.token, editable: found, moves: moves });
+    cbPost('SYMBOL_KEYS_EDITABLE', { js: d.js, token: d.token, editable: found, moves: moves, drawn: drawn });
   }
   function applySymbolEdits(eases, keys, values) {
     var key = JSON.stringify([eases || {}, keys || {}, values || {}]), root = cbRoot();
@@ -1424,6 +1447,7 @@
     cbValueSteps = [];
     cbSplitSteps.reverse().forEach(function (sp) {
       var step = sp.step; step.d = sp.d; step.props = sp.props; step.ease = sp.ease;
+      (sp.gave || []).forEach(function (item) { delete item.p; });
       step.next = sp.second.next; if (sp.second.next) sp.second.next.prev = step;
       if (sp.tween._stepTail === sp.second) sp.tween._stepTail = step;
     });

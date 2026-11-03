@@ -36,6 +36,7 @@ export type ShownFrame = FlaFrame & { source: FlaFrame; added: boolean; anchor: 
 export function shownFrames(layer: FlaLayer, anchors: Anchor[]): ShownFrame[] {
   const out: ShownFrame[] = [];
   for (let k = 0; k + 1 < anchors.length; k += 1) {
+    if (anchors[k + 1][1] <= anchors[k][1]) continue; // a keyframe that was cleared or removed has no frames left
     const source = [...layer.frames].reverse().find((frame) => frame.i <= anchors[k][0]) || layer.frames[0];
     const added = anchors[k][0] !== source.i;
     const base: FlaFrame = added ? { i: 0, d: 0, tween: source.tween, ease: source.ease, symbols: source.symbols } : { ...source };
@@ -69,3 +70,46 @@ export const isUnchanged = (layer: FlaLayer, anchors: Anchor[]) => {
   const file = fileAnchors(layer);
   return anchors.length === file.length && anchors.every((anchor, index) => anchor[0] === file[index][0] && anchor[1] === file[index][1]);
 };
+
+/**
+ * Frame operations of Animate on a layer's anchors. The layer keeps its length (the pose's timeline cannot grow), so what
+ * follows a change slides and the last span takes the difference. A keyframe whose frames are gone is kept as an anchor with
+ * no frames, so the player drops its content; null when there is no room.
+ */
+
+/** Insert Frame (F5): n frames at `at`; the keyframes after it slide right, the last span gets shorter. */
+export function insertFrames(anchors: Anchor[], at: number, n = 1): Anchor[] | null {
+  const last = anchors.length - 1;
+  const next = anchors.map((anchor, index) => (index < last && anchor[1] > at ? ([anchor[0], anchor[1] + n] as Anchor) : anchor));
+  for (let i = 0; i < last; i += 1) if (next[i][1] >= next[last][1]) return null;
+  return next;
+}
+
+/** Remove Frames (⇧F5): frames from..to leave; the keyframes in them go, the ones after slide left and the last span grows. */
+export function removeFrames(anchors: Anchor[], from: number, to: number): Anchor[] | null {
+  const last = anchors.length - 1, end = anchors[last][1];
+  if (from <= anchors[0][1]) return null; // the first frame of a layer stays
+  const top = Math.min(to, end - 1);
+  if (top < from) return null;
+  const n = top - from + 1;
+  const slid = anchors.map((anchor, index) => (index === last ? anchor[1] : anchor[1] > top ? anchor[1] - n : anchor[1]));
+  return anchors.map((anchor, index) => {
+    if (index === 0 || index === last || anchor[1] < from || anchor[1] > top) return [anchor[0], slid[index]] as Anchor;
+    // a keyframe inside the removed frames: it ends up with no frames, at the place of the next one that stays
+    let j = index + 1;
+    while (j < last && anchors[j][1] >= from && anchors[j][1] <= top) j += 1;
+    return [anchor[0], slid[j]] as Anchor;
+  });
+}
+
+/** Clear Keyframe (⇧F6): keyframe k stops being one; the span before it takes over its frames. Null for the first keyframe or the end. */
+export function clearKeyframe(anchors: Anchor[], k: number): Anchor[] | null {
+  if (k <= 0 || k >= anchors.length - 1) return null;
+  return anchors.map((anchor, index) => (index === k ? ([anchor[0], anchors[k + 1][1]] as Anchor) : anchor));
+}
+
+/** The keyframe (anchor index) that starts at a frame, or -1. */
+export const keyframeAt = (anchors: Anchor[], frame: number) => anchors.findIndex((anchor, index) => index < anchors.length - 1 && anchor[1] === frame && anchors[index + 1][1] > frame);
+
+/** The keyframe (anchor index) whose span holds a frame, or -1. */
+export const spanAt = (anchors: Anchor[], frame: number) => anchors.findIndex((anchor, index) => index < anchors.length - 1 && frame >= anchor[1] && frame < anchors[index + 1][1]);

@@ -5,7 +5,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { EaseControl } from "@/components/Timeline";
 import type { SymbolEaseEdit, SymbolKeyEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
 import { scrubProps } from "@/lib/scrub";
-import { addAnchor, fileAnchors, isUnchanged, moveAnchor, removeAnchor, shownFrames, type Anchor } from "@/lib/symbolKeys";
+import { addAnchor, fileAnchors, isUnchanged, keyframeAt, moveAnchor, removeAnchor, shownFrames, type Anchor } from "@/lib/symbolKeys";
 
 /**
  * A character's own Animate timeline (step inside a character; only classic tween eases can be
@@ -26,6 +26,7 @@ export type FlaLayer = {
 };
 export type FlaSymbol = { version: number; js: string; fps: number; name: string; frames: number; layers: FlaLayer[] };
 
+export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "copy" | "cut" | "paste";
 const CELL = 11;
 const ROW = 26;
 const LAYER_PANEL = 230;
@@ -88,7 +89,7 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden, eases, keys, editable, values, keyValues, pickedProp, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onToggleLayer, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden, eases, keys, editable, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onToggleLayer, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -108,6 +109,10 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   keyValues?: { layer: number; frame: number; values: Record<string, number> | null } | null;
   /** The part picked on the stage (its property name in this symbol): the layers that show it are highlighted. */
   pickedProp?: string | null;
+  /** A frame operation of Animate on the selected frames (insert / remove frames, insert / clear keyframes, copy / cut / paste). */
+  onFrameOp: (op: FrameOp, selection: { layers: number[]; from: number; to: number }) => void;
+  /** Frames were copied: Paste is available. */
+  canPaste: boolean;
   /** A layer was picked by its name (null: none): its part is picked on the stage. */
   onSelectLayer: (layerIndex: number | null) => void;
   /** A keyframe was picked (file frame), or none. */
@@ -129,9 +134,16 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   onPreviewKeys: (layerIndex: number, anchors: Anchor[] | null) => void;
 }) {
   const [closed, setClosed] = useState<Set<number>>(new Set());
+  const rowsRef = useRef<number[]>([]);
+  const selectionRef = useRef<{ layers: number[]; from: number; to: number } | null>(null);
+  const opRef = useRef(onFrameOp);
+  opRef.current = onFrameOp;
   const [keySel, setKeySel] = useState<{ layer: number; frame: number } | null>(null);
   const selectKey = (sel: { layer: number; frame: number } | null) => { setKeySel(sel); onSelectKey(sel?.layer ?? 0, sel ? sel.frame : null); };
   const [layerSel, setLayerSel] = useState<number | null>(null);
+  // Selected frames, across layers (Animate): from where the press began to where the pointer is now.
+  const [frameSel, setFrameSel] = useState<{ a: { layer: number; frame: number }; b: { layer: number; frame: number } } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [picked, setPicked] = useState<{ layer: number; i: number } | null>(null);
   const anchorsOf = (index: number): Anchor[] => keys?.[index]?.anchors || fileAnchors(symbol.layers[index]);
   const pickedLayer = picked ? symbol.layers[picked.layer] : undefined;
@@ -147,6 +159,13 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   const commitKeys = (layerIndex: number, anchors: Anchor[]) => onSetKeys(layerIndex, isUnchanged(symbol.layers[layerIndex], anchors) ? null : anchors);
   const scrollRef = useRef<HTMLDivElement>(null);
   const last = Math.max(0, symbol.frames - 1);
+  // The selection as layers (in the order they are listed) and frames; kept in a ref for the shortcuts.
+  const selection = (() => {
+    if (!frameSel) return null;
+    const order = rowsRef.current, ia = order.indexOf(frameSel.a.layer), ib = order.indexOf(frameSel.b.layer);
+    const layers = ia >= 0 && ib >= 0 ? order.slice(Math.min(ia, ib), Math.max(ia, ib) + 1) : [frameSel.a.layer];
+    return { layers, from: Math.min(frameSel.a.frame, frameSel.b.frame), to: Math.max(frameSel.a.frame, frameSel.b.frame) };
+  })();
   const cells = symbol.frames + 12;
 
   // Folder nesting (Animate's parentLayerIndex): a layer's depth, and whether a closed folder hides it.
@@ -160,6 +179,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
     if (layer.parent != null && ["mask", "guide"].includes(symbol.layers[layer.parent]?.type)) depth += 1;
     return { layer, index, depth, folded };
   }).filter((row) => !row.folded), [closed, symbol.layers]);
+  rowsRef.current = rows.map((row) => row.index);
   const hiddenByFolder = (index: number) => {
     for (let parent = symbol.layers[index]?.parent; parent != null; parent = symbol.layers[parent]?.parent) if (hidden.has(parent)) return true;
     return false;
@@ -192,6 +212,11 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
     setPicked({ layer: layerIndex, i: anchorsOf(layerIndex)[anchor][1] });
     const startX = event.clientX, start = anchorsOf(layerIndex);
     selectKey({ layer: layerIndex, frame: start[anchor][0] });
+    // Its frame is selected too (Shift adds to the frames already selected), and the playhead goes there.
+    setMenu(null);
+    setLayerSel(layerIndex);
+    onSeek(start[anchor][1]);
+    setFrameSel((current) => (event.shiftKey && current ? { a: current.a, b: { layer: layerIndex, frame: start[anchor][1] } } : { a: { layer: layerIndex, frame: start[anchor][1] }, b: { layer: layerIndex, frame: start[anchor][1] } }));
     if (anchor === 0) return;
     let latest = start;
     const move = (moveEvent: PointerEvent) => {
@@ -209,6 +234,57 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
+  selectionRef.current = selection;
+  // Press on a frame and drag: select frames across layers (Shift extends); the playhead goes to the frame pressed.
+  const beginFrameSelect = (event: ReactPointerEvent<HTMLElement>, layerIndex: number) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    setMenu(null);
+    const lane = event.currentTarget, at = frameAt(event.clientX, lane);
+    onSeek(at);
+    const from = event.shiftKey && frameSel ? frameSel.a : { layer: layerIndex, frame: at };
+    setFrameSel({ a: from, b: { layer: layerIndex, frame: at } });
+    const move = (moveEvent: PointerEvent) => {
+      const row = (document.elementFromPoint(moveEvent.clientX, moveEvent.clientY) as HTMLElement | null)?.closest("[data-symbol-row]");
+      const layer = row ? Number(row.getAttribute("data-symbol-row")) : layerIndex;
+      setFrameSel((current) => (current ? { ...current, b: { layer, frame: frameAt(moveEvent.clientX, lane) } } : current));
+    };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  // Animate's frame shortcuts while frames are selected: F5 / ⇧F5 insert / remove frames, F6 / ⇧F6 insert / clear a keyframe,
+  // Delete clears a keyframe, ⌥⌘C / ⌥⌘X / ⌥⌘V copy / cut / paste frames.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null, tag = target?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) return;
+      const sel = selectionRef.current;
+      if (!sel) return;
+      const command = event.metaKey || event.ctrlKey;
+      let op: FrameOp | null = null;
+      if (event.key === "F5") op = event.shiftKey ? "remove-frames" : "insert-frame";
+      else if (event.key === "F6") op = event.shiftKey ? "clear-keyframe" : "insert-keyframe";
+      else if ((event.key === "Delete" || event.key === "Backspace") && !command) op = "clear-keyframe";
+      else if (command && event.altKey && event.code === "KeyC") op = "copy";
+      else if (command && event.altKey && event.code === "KeyX") op = "cut";
+      else if (command && event.altKey && event.code === "KeyV") op = "paste";
+      if (!op) return;
+      event.preventDefault();
+      event.stopPropagation();
+      opRef.current(op, sel);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const key = (event: KeyboardEvent) => { if (event.key === "Escape") { event.stopPropagation(); close(); } };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", key, true);
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("keydown", key, true); };
+  }, [menu]);
   const labels = Array.from({ length: Math.floor(cells / 5) }, (_, index) => (index + 1) * 5);
 
   return (
@@ -295,7 +371,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
         {rows.map(({ layer, index, depth }) => {
           const shown = !hidden.has(index) && !hiddenByFolder(index);
           return (
-            <div key={index} className={`cb-symbol-row ${shown ? "" : "is-hidden"} ${layer.type === "folder" ? "is-folder" : ""} ${layerSel === index || (pickedProp && layer.props?.includes(pickedProp)) ? "is-selected" : ""}`}>
+            <div key={index} data-symbol-row={index} className={`cb-symbol-row ${shown ? "" : "is-hidden"} ${layer.type === "folder" ? "is-folder" : ""} ${layerSel === index || (pickedProp && layer.props?.includes(pickedProp)) ? "is-selected" : ""}`}>
               <div className="cb-symbol-layer" style={{ paddingLeft: 6 + depth * 14 }} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) return; setLayerSel(index); onSelectLayer(index); }} title={`${layer.name}${layer.type !== "normal" ? ` (${layer.type} layer)` : ""}${layer.hidden ? " · hidden in Animate" : ""}${layer.locked ? " · locked in Animate" : ""}`}>
                 {layer.type === "folder"
                   ? <button type="button" className="cb-symbol-fold" onClick={() => setClosed((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} aria-label={closed.has(index) ? `Open ${layer.name}` : `Close ${layer.name}`} aria-expanded={!closed.has(index)}><LayerIcon type="folder" open={!closed.has(index)} /></button>
@@ -311,7 +387,14 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
                   const keyframe = shownFrames(layer, anchorsOf(index)).find((item) => at >= item.i && at < item.i + item.d);
                   setPicked(keyframe && layer.type !== "folder" ? { layer: index, i: keyframe.i } : null);
                   if (keyframe && layer.type !== "folder" && !keyframe.added) { setLayerSel(index); selectKey({ layer: index, frame: keyframe.source.i }); }
-                  scrub(event);
+                  if (layer.type !== "folder") beginFrameSelect(event, index); else scrub(event);
+                }}
+                onContextMenu={(event) => {
+                  if (layer.type === "folder") return;
+                  event.preventDefault();
+                  const at = frameAt(event.clientX, event.currentTarget);
+                  if (!selection || !selection.layers.includes(index) || at < selection.from || at > selection.to) setFrameSel({ a: { layer: index, frame: at }, b: { layer: index, frame: at } });
+                  setMenu({ x: event.clientX, y: event.clientY });
                 }}
                 onDoubleClick={(event) => {
                   const at = frameAt(event.clientX, event.currentTarget);
@@ -319,6 +402,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
                   const target = keyframe?.symbols?.find((item) => item.js);
                   if (target?.js) onStepInto(index, at, target.js);
                 }}>
+                {selection && selection.layers.includes(index) && <i className="cb-symbol-sel" style={{ left: selection.from * CELL, width: (selection.to - selection.from + 1) * CELL }} aria-hidden="true" />}
                 {layer.type !== "folder" && shownFrames(layer, anchorsOf(index)).map((item) => {
                   const kind = item.tween === "classic" || item.tween === "motion" ? "classic" : item.tween === "shape" ? "shape" : item.blank ? "blank" : "frames";
                   const edit = eases?.[`${index}:${item.source.i}`];
@@ -339,6 +423,23 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
             </div>
           );
         })}
+        {menu && selection && (() => {
+          const run = (op: FrameOp) => { setMenu(null); onFrameOp(op, selection); };
+          const onKeyframe = selection.layers.some((layerIndex) => { const anchors = anchorsOf(layerIndex); for (let f = selection.from; f <= selection.to; f += 1) if (keyframeAt(anchors, f) > 0) return true; return false; });
+          return (
+            <div className="cb-frame-menu cb-symbol-framemenu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(event) => event.stopPropagation()}>
+              <button type="button" role="menuitem" onClick={() => run("insert-frame")}>Insert Frame<kbd>F5</kbd></button>
+              <button type="button" role="menuitem" onClick={() => run("remove-frames")}>Remove Frames<kbd>⇧F5</kbd></button>
+              <span className="cb-frame-menu-sep" aria-hidden="true" />
+              <button type="button" role="menuitem" onClick={() => run("insert-keyframe")}>Insert Keyframe<kbd>F6</kbd></button>
+              <button type="button" role="menuitem" disabled={!onKeyframe} onClick={() => run("clear-keyframe")}>Clear Keyframe<kbd>⇧F6</kbd></button>
+              <span className="cb-frame-menu-sep" aria-hidden="true" />
+              <button type="button" role="menuitem" onClick={() => run("copy")}>Copy Frames<kbd>⌥⌘C</kbd></button>
+              <button type="button" role="menuitem" onClick={() => run("cut")}>Cut Frames<kbd>⌥⌘X</kbd></button>
+              <button type="button" role="menuitem" disabled={!canPaste} onClick={() => run("paste")}>Paste Frames<kbd>⌥⌘V</kbd></button>
+            </div>
+          );
+        })()}
         <i className="cb-symbol-playhead" style={{ left: LAYER_PANEL + frame * CELL + CELL / 2 - 1 }} aria-hidden="true" />
       </div>
     </section>

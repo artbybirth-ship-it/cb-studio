@@ -3414,6 +3414,8 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 .cb-symbol-handle.rotate{width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;cursor:grab}
 .cb-symbol-edge{position:absolute;height:9px;pointer-events:auto;touch-action:none}
 .cb-symbol-box-note{position:absolute;transform:translate(0,-130%);padding:1px 6px;border-radius:999px;background:#3a3320;color:#e8cf86;font-size:10px;font-weight:600;pointer-events:none;white-space:nowrap}
+.cb-symbol-sel{position:absolute;top:0;bottom:0;z-index:4;background:rgba(77,99,255,.28);border:1px solid rgba(124,142,255,.85);box-sizing:border-box;pointer-events:none}
+.cb-symbol-framemenu{position:fixed;z-index:3000}
 .cb-symbol-pivot{position:absolute;width:9px;height:9px;margin:-4.5px 0 0 -4.5px;border:1.5px solid #ffd166;border-radius:50%;background:rgba(0,0,0,.35);pointer-events:none}
 .cb-symbol-overlay{position:absolute;inset:0;z-index:2000;cursor:default}
 .cb-symbol-menu{min-width:200px}
