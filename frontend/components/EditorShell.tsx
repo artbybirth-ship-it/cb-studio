@@ -17,7 +17,7 @@ import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, keyframeAt, removeFrames, shownFrames, spanAt, type Anchor } from "@/lib/symbolKeys";
 import { duplicateLayers, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
-import { canTransform, partBox, rotatePart, scalePart, skewPart, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
+import { canTransform, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolLayerEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
@@ -3502,12 +3502,15 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     let live = true;
     const timer = window.setTimeout(() => {
       const ask = ++partAskSeq.current;
-      void askPart(pickedProp).then((info) => {
+      const read = (tries: number) => void askPart(pickedProp).then((info) => {
         if (partDragging.current || !live) return;
         if (ask < partAnswered.current) return;
+        // A reading made while the player redraws (after an undo) can be broken: ask again a moment later.
+        if (info && !isSound(info) && tries < 4) { window.setTimeout(() => { if (live) read(tries + 1); }, 80); return; }
         partAnswered.current = ask;
         setPartInfo(info && canTransform(info) ? info : null);
       });
+      read(0);
     }, askedProp.current === pickedProp ? 160 : 0);
     askedProp.current = pickedProp;
     return () => { live = false; window.clearTimeout(timer); };
@@ -3530,7 +3533,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return {
       move: (dx: number, dy: number, shift: boolean) => {
         const now: Pt = [(nx + dx) * info.W, (ny + dy) * info.H];
-        if (handle === "rotate") {
+        if (handle === "pivot") {
+          // The registration point moves, the artwork stays: the pivot's new place is a point of the part (local), and the part's position
+          // is where that point is now.
+          const at = stageToLocal(info, now), place = localToParent(info, at);
+          edit.apply({ regX: round(at[0]), regY: round(at[1]), x: round(place[0]), y: round(place[1]) });
+          follow({ regX: at[0], regY: at[1], x: place[0], y: place[1] });
+        } else if (handle === "rotate") {
           const turned = rotatePart(info, start, now, shift);
           edit.apply({ scaleX: round(turned.scaleX, 4), scaleY: round(turned.scaleY, 4), skewX: round(turned.skewX), skewY: round(turned.skewY) });
           follow({ sx: turned.scaleX, sy: turned.scaleY, skx: turned.skewX, sky: turned.skewY });

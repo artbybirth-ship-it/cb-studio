@@ -44,7 +44,11 @@ export function partBox(info: PartInfo) {
 }
 
 /** A part with a turn already in its `rotation` (not Animate's usual skews) is left alone. */
-export const canTransform = (info: PartInfo) => Math.abs(info.rot) < 1e-6 && info.bounds.width > 0 && info.bounds.height > 0;
+export const canTransform = (info: PartInfo) => Math.abs(info.rot) < 1e-6 && info.bounds.width > 0 && info.bounds.height > 0 && isSound(info);
+
+/** A reading taken while the player is mid-redraw (right after an undo) can hold NaN: it is not used. */
+export const isSound = (info: PartInfo) => [info.ax, info.ay, info.bx, info.by, info.p0x, info.p0y, info.x, info.y, info.sx, info.sy, info.skx, info.sky, info.regX, info.regY, info.W, info.H,
+  info.bounds.x, info.bounds.y, info.bounds.width, info.bounds.height].every(Number.isFinite);
 
 type Mat = [number, number, number, number]; // [a, b, c, d]: x → (a, b), y → (c, d)
 const matrixOf = (info: PartInfo): Mat => { const m = linear(info); return [m.a, m.b, m.c, m.d]; };

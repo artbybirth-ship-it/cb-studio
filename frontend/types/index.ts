@@ -17,7 +17,7 @@ export type SymbolEaseEdit = { props: string[]; frame: number; frames: number; v
 export type SymbolKeyEdit = { props: string[]; anchors: Array<[number, number]> };
 
 /** The values edited on one keyframe inside a character (x, y, scale, skew in degrees, alpha 0–1), by layer and file frame. */
-export type SymbolValueKey = "x" | "y" | "scaleX" | "scaleY" | "skewX" | "skewY" | "alpha";
+export type SymbolValueKey = "x" | "y" | "scaleX" | "scaleY" | "skewX" | "skewY" | "alpha" | "regX" | "regY";
 export type SymbolValueEdit = { props: string[]; frame: number; v: Partial<Record<SymbolValueKey, number>> };
 
 /** How the layers of a symbol inside a character were arranged (step inside): see lib/symbolLayers.ts. */

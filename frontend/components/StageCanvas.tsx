@@ -3484,7 +3484,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     style={{ left: `calc(${point[0] * 100}% + ${(ox / ol) * 15}px)`, top: `calc(${point[1] * 100}% + ${(oy / ol) * 15}px)` }}
                     onPointerDown={press("rotate")} />;
                 })}
-                <i className="cb-symbol-pivot" style={{ left: `${symbolBox.pivot[0] * 100}%`, top: `${symbolBox.pivot[1] * 100}%` }} aria-hidden="true" />
+                <i className={`cb-symbol-pivot${symbolBox.editable ? " movable" : ""}`} style={{ left: `${symbolBox.pivot[0] * 100}%`, top: `${symbolBox.pivot[1] * 100}%` }} aria-hidden="true" title={symbolBox.editable ? "Registration point: drag to move where this part turns and scales from" : undefined} onPointerDown={symbolBox.editable ? press("pivot") : undefined} />
               </div>
             );
           })()}

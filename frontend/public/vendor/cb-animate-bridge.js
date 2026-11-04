@@ -1239,7 +1239,7 @@
   // the file has none at). The tween steps of the layer's objects follow the anchors piecewise-linearly;
   // an added keyframe cuts its tween step in two there (splitSteps), so it can hold a value of its own.
   var cbRetimedSteps = [], cbValueSteps = [];
-  var VALUE_KEYS = ['x', 'y', 'scaleX', 'scaleY', 'skewX', 'skewY', 'alpha'];
+  var VALUE_KEYS = ['x', 'y', 'scaleX', 'scaleY', 'skewX', 'skewY', 'alpha', 'regX', 'regY'];
   // The steps that hold a keyframe's values (by the file's frames): the one that sets them there and the tween that ends there.
   function valueStepsAt(clip, props, frame) {
     var out = stepsOf(clip, props).filter(function (step) {
@@ -1527,7 +1527,8 @@
       if (v.item) {
         if (!v.hadP) delete v.item.p; else if (v.old === undefined) delete v.item.p[v.k]; else v.item.p[v.k] = v.old;
         if (v.objOld !== undefined) v.item.t[v.k] = v.objOld;
-      } else v.step.props[v.k] = v.old;
+      } else if (v.had) v.step.props[v.k] = v.old;
+      else { delete v.step.props[v.k]; if (v.target && typeof v.targetOld === 'number') v.target[v.k] = v.targetOld; }
       clips.add(v.clip);
     });
     cbValueSteps = [];
@@ -1581,7 +1582,8 @@
           valueStepsAt(clip, edit.props, edit.frame).forEach(function (step) {
             Object.keys(edit.v || {}).forEach(function (prop) {
               if (VALUE_KEYS.indexOf(prop) < 0 || typeof edit.v[prop] !== 'number') return;
-              cbValueSteps.push({ step: step, clip: clip, k: prop, old: step.props[prop] });
+              var owner = clip[(edit.props || [])[0]];
+              cbValueSteps.push({ step: step, clip: clip, k: prop, old: step.props[prop], had: Object.prototype.hasOwnProperty.call(step.props, prop), target: owner, targetOld: owner ? owner[prop] : undefined });
               step.props[prop] = edit.v[prop];
               clips.add(clip);
             });
