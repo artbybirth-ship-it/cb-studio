@@ -1435,9 +1435,57 @@
   // A pose draws its layers by its animations in order: the first ends up on top. Reordering layers reorders them, and hiding one
   // hides its objects. Both are undone when the edit goes.
   var cbLayerState = { orig: new Map(), hidden: [] };
-  function applySymbolLayers(specs, touched) {
+  // Duplicate Layer (symbolLayers[class].spec.clones: [{ of: <object's name>, prop: <name of the copy> }]): the copy is a new object of the
+  // same symbol on the same clip, with its own copy of the layer's tweens, named so that every edit finds it like any other layer.
+  var cbClones = [];
+  function cloneTween(tween, target) {
+    var made = createjs.Tween.get(target), same = new Map(), head = tween._stepHead;
+    var give = function (props) { var copy = same.get(props); if (!copy) { copy = Object.assign({}, props); same.set(props, copy); } return copy; };
+    if (head && head.props && Object.keys(head.props).length) made.to(give(head.props), 0);
+    for (var step = head && head.next, prev = head; step; prev = step, step = step.next) {
+      if (prev && step.props === prev.props) { if (step.d > 0) made.wait(step.d); } else made.to(give(step.props), step.d, step.ease || undefined);
+    }
+    return made;
+  }
+  function syncClones(specs, touched) {
+    var want = [];
+    Object.keys(specs || {}).forEach(function (name) {
+      var list = (specs[name] || {}).clones || [];
+      if (list.length) clipsOfClass(name).forEach(function (clip) { list.forEach(function (c) { want.push({ clip: clip, of: c.of, prop: c.prop }); }); });
+    });
+    var changed = false;
+    cbClones = cbClones.filter(function (made) {
+      if (want.some(function (w) { return w.clip === made.clip && w.prop === made.prop && w.of === made.of; })) return true;
+      var list = made.clip.timeline.tweens;
+      made.tweens.forEach(function (tw) { var at = list.indexOf(tw); if (at >= 0) list.splice(at, 1); });
+      try { made.clip.removeChild(made.obj); if (made.clip._managed) delete made.clip._managed[made.obj.id]; } catch (e) {}
+      delete made.clip[made.prop];
+      touched.add(made.clip);
+      changed = true;
+      return false;
+    });
+    want.forEach(function (w) {
+      if (cbClones.some(function (made) { return made.clip === w.clip && made.prop === w.prop; })) return;
+      var src = w.clip[w.of], Ctor = src && libSymbol(protoNames().get(Object.getPrototypeOf(src)) || '');
+      if (!Ctor) return;
+      var obj = new Ctor(src.mode, src.startPosition, src.loop), list = w.clip.timeline.tweens, own = [];
+      var at = list.findIndex(function (tw) { return tw.target === src; });
+      tweensFor(w.clip, [w.of]).forEach(function (tw) { if (tw.target !== src) return; var made = cloneTween(tw, obj); w.clip.timeline.addTween(made); own.push(made); });
+      // Just above the layer it copies: the first tween ends up on top.
+      own.forEach(function (tw) { var from = list.indexOf(tw); if (from >= 0) list.splice(from, 1); });
+      list.splice(at >= 0 ? at : 0, 0, ...own);
+      w.clip[w.prop] = obj;
+      cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, obj: obj, tweens: own });
+      touched.add(w.clip);
+      changed = true;
+    });
+    if (changed) cbClipsByClass = null;
+  }
+  function restoreLayerOrder(touched) {
     cbLayerState.orig.forEach(function (tweens, clip) { var list = clip.timeline.tweens; list.length = 0; tweens.forEach(function (tw) { list.push(tw); }); touched.add(clip); });
     cbLayerState.orig = new Map();
+  }
+  function applySymbolLayers(specs, touched) {
     Object.keys(specs || {}).forEach(function (name) {
       var spec = specs[name] || {};
       clipsOfClass(name).forEach(function (clip) {
@@ -1491,6 +1539,8 @@
     });
     cbSplitSteps = [];
     cbRetimedSteps = [];
+    restoreLayerOrder(clips);
+    syncClones(layerSpecs, clips);
     cbEasedSteps.forEach(function (eased) { eased.step.ease = eased.ease; clips.add(eased.clip); });
     cbEasedSteps = [];
     Object.keys(eases || {}).forEach(function (name) {

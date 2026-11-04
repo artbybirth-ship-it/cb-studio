@@ -95,7 +95,7 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -104,6 +104,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   /** How the layers were arranged here (order, hidden, locked, renamed, deleted, folders), saved with the character. */
   layerEdit?: SymbolLayerEdit;
   /** Change that arrangement (one undo step); a null result puts it back as the file has it. */
+  onDuplicateLayers?: (ids: number[]) => void;
   onLayerEdit: (change: (edit: SymbolLayerEdit) => SymbolLayerEdit | null) => void;
   onNotice?: (text: string) => void;
   /** This symbol's edited eases, by "<layer index>:<keyframe>". */
@@ -446,6 +447,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
             <span title={symbol.name}>{rows.length} layers · {short(symbol.name)}</span>
             <span className="cb-symbol-layer-tools">
               <button type="button" onClick={() => onLayerEdit((current) => addLayer(symbol.layers, current, "normal", layerSel))} title="New layer (an empty one, above the layer picked)" aria-label="New layer"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg></button>
+              {onDuplicateLayers && <button type="button" onClick={() => onDuplicateLayers(layerPick.size ? [...layerPick] : layerSel != null ? [layerSel] : [])} title="Duplicate layer (a copy of the picked layers, just above them)" aria-label="Duplicate layer"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" /><path d="M3 10.5V4a1 1 0 0 1 1-1h6.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg></button>}
               <button type="button" onClick={() => onLayerEdit((current) => addLayer(symbol.layers, current, "folder", layerSel))} title="New folder (drag layers into it)" aria-label="New folder"><LayerIcon type="folder" open={false} /></button>
               <button type="button" onClick={deleteLayers} disabled={!layerPick.size && layerSel == null} title="Delete the picked layers (they are hidden for good; Undo brings them back)" aria-label="Delete layer"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.5 8.5h5l.5-8.5" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
               {layerEdit && <button type="button" onClick={() => onLayerEdit(() => null)} title="Put the layers back as the .fla has them" aria-label="Reset layers">↺</button>}

@@ -1,4 +1,4 @@
-import type { FlaLayer } from "@/components/SymbolTimeline";
+import type { FlaLayer, FlaSymbol } from "@/components/SymbolTimeline";
 import type { SymbolLayerEdit } from "@/types";
 
 /**
@@ -96,7 +96,7 @@ export function addLayer(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, 
 }
 
 /** What the player is told: the file layers' objects top to bottom, and the objects to hide (hidden, deleted, or under a hidden folder). */
-export function playerSpec(layers: FlaLayer[], edit: SymbolLayerEdit): { order?: string[][]; hidden: string[] } {
+export function playerSpec(layers: FlaLayer[], edit: SymbolLayerEdit): { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string }> } {
   const ids = orderOf(layers, edit), gone = new Set([...(edit.hidden || []), ...(edit.deleted || [])]);
   const hiddenIds = ids.filter((id) => {
     for (let up: number | null = id, guard = 0; up != null && guard < 30; up = parentOf(layers, edit, up), guard += 1) if (gone.has(up)) return true;
@@ -104,9 +104,47 @@ export function playerSpec(layers: FlaLayer[], edit: SymbolLayerEdit): { order?:
   });
   const withParts = ids.filter((id) => id < EXTRA_BASE && layers[id]?.props?.length);
   const moved = edit.order && edit.order.length > 0;
-  return { order: moved ? withParts.map((id) => layers[id].props as string[]) : undefined, hidden: hiddenIds.flatMap((id) => (id < EXTRA_BASE ? layers[id]?.props || [] : [])) };
+  const clones = (edit.clones || []).map((clone) => ({ of: layers[clone.of]?.props?.[0] || "", prop: clone.prop })).filter((clone) => clone.of);
+  return { order: moved ? withParts.map((id) => layers[id].props as string[]) : undefined, hidden: hiddenIds.flatMap((id) => (id < EXTRA_BASE ? layers[id]?.props || [] : [])), clones: clones.length ? clones : undefined };
+}
+
+/** The file's layers plus the copies Duplicate Layer made (after them, in the order they were made): a copy starts as the file's layer. */
+export function withClones(data: FlaSymbol, clones?: SymbolClone[]): FlaSymbol {
+  if (!clones?.length) return data;
+  const layers = [...data.layers];
+  clones.forEach((clone) => {
+    const source = layers[clone.of];
+    if (!source) { layers.push({ name: "Layer", type: "normal", frames: [] }); return; }
+    const classes = source.classes && source.props?.[0] && source.classes[source.props[0]] ? { [clone.prop]: source.classes[source.props[0]] } : undefined;
+    layers.push({ ...source, name: `${source.name} copy`, props: [clone.prop], classes, frames: source.frames });
+  });
+  return { ...data, layers };
+}
+
+export type SymbolClone = { of: number; prop: string };
+
+/** A copy of each of these layers, put above the layer it copies (folders, masks and layers with no objects are left out). */
+export function duplicateLayers(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, ids: number[], fileCount: number): { edit: SymbolLayerEdit; made: number } {
+  const base = edit || {}, clones = [...(base.clones || [])];
+  let order = orderOf(layers, edit), made = 0;
+  const parents = { ...(base.parents || {}) };
+  let used = clones.reduce((top, clone) => Math.max(top, Number(clone.prop.replace(/\D+/g, "")) || 0), 0);
+  let count = layers.length;
+  order.filter((id) => ids.includes(id)).forEach((id) => {
+    const layer = layers[id];
+    if (id >= EXTRA_BASE || !layer || layer.type !== "normal" || !layer.props?.length) return;
+    used += 1;
+    clones.push({ of: id, prop: `cbdup${used}` });
+    const index = count;
+    count += 1;
+    made += 1;
+    order = [...order.slice(0, order.indexOf(id)), index, ...order.slice(order.indexOf(id))];
+    parents[String(index)] = parentOf(layers, edit, id);
+  });
+  void fileCount;
+  return { edit: { ...base, clones, order, parents }, made };
 }
 
 /** Nothing in the edit changes the layers: it can be dropped. */
 export const isLayerEditEmpty = (edit: SymbolLayerEdit) =>
-  !edit.order && !(edit.names && Object.keys(edit.names).length) && !edit.hidden?.length && !edit.locked?.length && !edit.deleted?.length && !(edit.parents && Object.keys(edit.parents).length) && !edit.extras?.length;
+  !edit.order && !(edit.names && Object.keys(edit.names).length) && !edit.hidden?.length && !edit.locked?.length && !edit.deleted?.length && !(edit.parents && Object.keys(edit.parents).length) && !edit.extras?.length && !edit.clones?.length;

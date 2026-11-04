@@ -16,7 +16,7 @@ import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsert
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, keyframeAt, removeFrames, shownFrames, spanAt, type Anchor } from "@/lib/symbolKeys";
-import { isLayerEditEmpty, playerSpec, toggled } from "@/lib/symbolLayers";
+import { duplicateLayers, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
 import { canTransform, partBox, rotatePart, scalePart, skewPart, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolLayerEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
@@ -1686,6 +1686,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // Keys for the part picked inside a pose (set where the pose's editing code lives, further down).
   const symbolNudgeRef = useRef<((dx: number, dy: number) => boolean) | null>(null);
   const symbolDeleteRef = useRef<(() => boolean) | null>(null);
+  const symbolDuplicateRef = useRef<(() => boolean) | null>(null);
   frameActionRef.current = frameAction;
 
   // Drag a keyframe to another frame (Animate). Frames extend to follow it past either end;
@@ -3190,7 +3191,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // the scene's timeline, with the rest of the scene dimmed. Double-clicking a keyframe's symbol (or
   // a part on the stage) steps further in; Esc, the breadcrumb or a double-click elsewhere step out.
   // Every level but the last stays on the frame it was entered at (cb-animate-bridge SYMBOL_VIEW).
-  type SymbolLevel = { js: string; data: FlaSymbol; frame: number; props?: string[] };
+  type SymbolLevel = { js: string; data: FlaSymbol; frame: number; props?: string[]; fileData?: FlaSymbol; clonesKey?: string };
   const [symbolView, setSymbolView] = useState<{ objectId: string; base: string; levels: SymbolLevel[]; hidden: Set<number>; playing: boolean } | null>(null);
   const symbolCacheRef = useRef(new Map<string, Promise<FlaSymbol>>());
   const loadSymbol = useCallback((base: string, js: string) => {
@@ -3376,7 +3377,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       const item = data.objects.find((object) => object.id === symbolView.objectId);
       if (!item) return;
       const symbols = { ...(item.symbolLayers || {}) }, next = change({ ...(symbols[level.js] || {}) });
-      if (!next || isLayerEditEmpty(next)) delete symbols[level.js]; else symbols[level.js] = { ...next, spec: playerSpec(level.data.layers, next) };
+      if (!next || isLayerEditEmpty(next)) delete symbols[level.js]; else symbols[level.js] = { ...next, spec: playerSpec(withClones(level.fileData || level.data, next.clones).layers, next) };
       item.symbolLayers = symbols;
     });
   }, [mutate, symbolView]);
@@ -3546,6 +3547,44 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       end: edit.end,
     };
   }, [askPart, partEditor, pickedProp, planPartEdit]);
+  // Layers made by Duplicate Layer join the level's layer list (after the file's), so the timeline and every edit see them like any other.
+  const clonesKey = symbolView ? JSON.stringify(symbolView.levels.map((level) => symbolObjectNow?.symbolLayers?.[level.js]?.clones || [])) : "";
+  useEffect(() => {
+    setSymbolView((state) => {
+      if (!state) return state;
+      const object = draft?.objects.find((item) => item.id === state.objectId);
+      let changed = false;
+      const levels = state.levels.map((level) => {
+        const clones = object?.symbolLayers?.[level.js]?.clones, key = JSON.stringify(clones || []);
+        if ((level.clonesKey ?? "[]") === key) return level;
+        changed = true;
+        const file = level.fileData || level.data;
+        return { ...level, fileData: file, data: withClones(file, clones), clonesKey: key };
+      });
+      return changed ? { ...state, levels } : state;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clonesKey]);
+  /** Duplicate Layer: a copy of each of these layers just above it, with its own keyframes (layers drawn frame by frame can't be copied yet). */
+  const duplicateSymbolLayers = useCallback((ids: number[]) => {
+    const level = symbolLevelNow;
+    if (!level) return;
+    const layers = level.data.layers, ready = keysEditable?.js === level.js ? keysEditable : null;
+    const copyable = ids.filter((id) => layers[id]?.type === "normal" && layers[id]?.props?.length);
+    if (!copyable.length) { showNotice("Pick a layer that holds an object to duplicate it."); return; }
+    const usable = copyable.filter((id) => !ready?.drawn[id]);
+    if (!usable.length) { showNotice("This layer is drawn frame by frame: it can't be duplicated yet."); return; }
+    if (usable.length < copyable.length) showNotice("Layers drawn frame by frame were left out: they can't be duplicated yet.");
+    setLayerEdit((current) => duplicateLayers(layers, current, usable, 0).edit);
+  }, [keysEditable, setLayerEdit, showNotice, symbolLevelNow]);
+  symbolDuplicateRef.current = () => {
+    const level = symbolLevelNow;
+    if (!symbolView || !pickedProp || !level) return false;
+    const index = level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp));
+    if (index < 0) return false;
+    duplicateSymbolLayers([index]);
+    return true;
+  };
   // Arrow keys nudge the picked part (as a drag would) and Delete removes its layer from the pose.
   const partInfoRef = useRef(partInfo);
   partInfoRef.current = partInfo;
@@ -3975,6 +4014,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
 
       const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "d" && symbolDuplicateRef.current?.()) { event.preventDefault(); return; }
       if (arrows[event.key] && !event.metaKey && !event.ctrlKey && !event.altKey && !/^(input|textarea|select)$/i.test((event.target as HTMLElement | null)?.tagName || "")) {
         // Inside a pose, the arrows nudge the picked part: 1 px, Shift = 10 px.
         const step = event.shiftKey ? 10 : 1, [dx, dy] = arrows[event.key];
@@ -5164,6 +5204,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 const level = symbolLevelNow, index = level && pickedProp ? level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp)) : -1;
                 if (index < 0) return;
                 if (action === "delete") { symbolDeleteRef.current?.(); return; }
+                if (action === "duplicate") { duplicateSymbolLayers([index]); return; }
                 setLayerEdit((current) => (action === "hide" ? { ...current, hidden: toggled(current.hidden, [index]) } : { ...current, locked: toggled(current.locked, [index]) }));
               }}
               symbolBox={symbolBox}
@@ -5199,6 +5240,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 playing={symbolView.playing}
                 layerEdit={object?.symbolLayers?.[current.js]}
                 onLayerEdit={setLayerEdit}
+                onDuplicateLayers={duplicateSymbolLayers}
                 onNotice={showNotice}
                 eases={object?.symbolEases?.[current.js]}
                 keys={object?.symbolKeys?.[current.js]}

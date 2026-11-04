@@ -83,7 +83,7 @@ type Props = {
   /** A click on nothing inside a character: the picked part is dropped. */
   onSymbolDeselect?: () => void;
   /** The right-click menu inside a pose: what to do to the part picked there. */
-  onSymbolContext?: (action: "hide" | "lock" | "delete") => void;
+  onSymbolContext?: (action: "hide" | "lock" | "delete" | "duplicate") => void;
   /** The picked part's box (its four corners, top left first, and its pivot) as fractions of the player. */
   symbolBox?: { corners: Array<[number, number]>; pivot: [number, number]; editable: boolean } | null;
   /** Inside a character: a double-click on one of its objects (its property name), or elsewhere (null). */
@@ -3494,6 +3494,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       {partMenu && symbolView && (
         <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: partMenu.x, top: partMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
           {partMenu.hasPart ? <>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("duplicate"); }}>Duplicate Layer<kbd>⌘D</kbd></button>
             <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("hide"); }}>Hide Layer</button>
             <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("lock"); }}>Lock Layer</button>
             <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("delete"); }}>Delete Layer<kbd>⌫</kbd></button>
