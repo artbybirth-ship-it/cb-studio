@@ -3435,6 +3435,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   /** The edit the pointer makes: the first change adds the keyframe, every change sets values (one undo step). */
   const partDragging = useRef(false), partAskSeq = useRef(0), partAnswered = useRef(0);
   const [partRefresh, setPartRefresh] = useState(0);
+  const askedProp = useRef<string | null>(null);
   const partEditor = useCallback((plan: { layer: number; prop: string; grown: Array<[number, number]> | null; target: number }) => {
     let started = false;
     return {
@@ -3506,7 +3507,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         partAnswered.current = ask;
         setPartInfo(info && canTransform(info) ? info : null);
       });
-    }, 160);
+    }, askedProp.current === pickedProp ? 160 : 0);
+    askedProp.current = pickedProp;
     return () => { live = false; window.clearTimeout(timer); };
   }, [askPart, partVersion, partRefresh, pickedProp]);
   useEffect(() => { if (!symbolView) setPickedPart(null); }, [symbolView]);
