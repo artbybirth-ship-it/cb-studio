@@ -3434,10 +3434,8 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
             const [c0, c1, c2, c3] = symbolBox.corners;
             const mid = (p: [number, number], q: [number, number]): [number, number] => [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
             const sides: Array<[string, [number, number]]> = [["nw", c0], ["n", mid(c0, c1)], ["ne", c1], ["e", mid(c1, c2)], ["se", c2], ["s", mid(c2, c3)], ["sw", c3], ["w", mid(c3, c0)]];
-            const centre: [number, number] = [(c0[0] + c2[0]) / 2, (c0[1] + c2[1]) / 2], top = sides[1][1];
-            const vx = (top[0] - centre[0]) * handleFrame.width, vy = (top[1] - centre[1]) * handleFrame.height, length = Math.hypot(vx, vy) || 1;
-            const rotate: [number, number] = [top[0] + (vx / length) * 26 / handleFrame.width, top[1] + (vy / length) * 26 / handleFrame.height];
-            const press = (name: string) => (event: ReactPointerEvent<HTMLElement>) => {
+            const centre: [number, number] = [(c0[0] + c2[0]) / 2, (c0[1] + c2[1]) / 2];
+                        const press = (name: string) => (event: ReactPointerEvent<HTMLElement>) => {
               if (event.button !== 0 || !onSymbolHandleStart) return;
               event.stopPropagation();
               event.preventDefault();
@@ -3447,7 +3445,6 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
               <div className="cb-symbol-box" style={{ left: handleFrame.left, top: handleFrame.top, width: handleFrame.width, height: handleFrame.height }}>
                 <svg className="cb-symbol-box-lines" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
                   <polygon points={symbolBox.corners.map((p) => p.join(",")).join(" ")} vectorEffect="non-scaling-stroke" />
-                  <line x1={top[0]} y1={top[1]} x2={rotate[0]} y2={rotate[1]} vectorEffect="non-scaling-stroke" />
                 </svg>
                 {symbolBox.editable && ([["skew-n", c0, c1], ["skew-e", c1, c2], ["skew-s", c2, c3], ["skew-w", c3, c0]] as Array<[string, [number, number], [number, number]]>).map(([name, from, to]) => {
                   const centre = mid(from, to), dx = (to[0] - from[0]) * handleFrame.width, dy = (to[1] - from[1]) * handleFrame.height;
@@ -3457,7 +3454,13 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                 })}
                 {symbolBox.editable && sides.map(([name, point]) => <i key={name} className={`cb-symbol-handle ${name}`} style={{ left: `${point[0] * 100}%`, top: `${point[1] * 100}%` }} role="button" aria-label={`Scale ${name}`} onPointerDown={press(name)} />)}
                 {!symbolBox.editable && <b className="cb-symbol-box-note" style={{ left: `${c0[0] * 100}%`, top: `${c0[1] * 100}%` }}>View only</b>}
-                {symbolBox.editable && <i className="cb-symbol-handle rotate" style={{ left: `${rotate[0] * 100}%`, top: `${rotate[1] * 100}%` }} role="button" aria-label="Rotate" title="Rotate (Shift: 15° steps)" onPointerDown={press("rotate")} />}
+                {symbolBox.editable && ([["nw", c0], ["ne", c1], ["se", c2], ["sw", c3]] as Array<[string, [number, number]]>).map(([name, point]) => {
+                  // Animate: press just outside a corner to turn the part; the rotate arrow shows on hover.
+                  const ox = (point[0] - centre[0]) * handleFrame.width, oy = (point[1] - centre[1]) * handleFrame.height, ol = Math.hypot(ox, oy) || 1;
+                  return <i key={`turn-${name}`} className="cb-symbol-turn" role="button" aria-label="Rotate" title="Rotate (Shift: 15° steps)"
+                    style={{ left: `calc(${point[0] * 100}% + ${(ox / ol) * 15}px)`, top: `calc(${point[1] * 100}% + ${(oy / ol) * 15}px)` }}
+                    onPointerDown={press("rotate")} />;
+                })}
                 <i className="cb-symbol-pivot" style={{ left: `${symbolBox.pivot[0] * 100}%`, top: `${symbolBox.pivot[1] * 100}%` }} aria-hidden="true" />
               </div>
             );
