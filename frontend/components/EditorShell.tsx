@@ -1683,6 +1683,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     }
   }, [draft, duration, mutate, setPlaying, showNotice]);
   const frameActionRef = useRef(frameAction);
+  // Keys for the part picked inside a pose (set where the pose's editing code lives, further down).
+  const symbolNudgeRef = useRef<((dx: number, dy: number) => boolean) | null>(null);
+  const symbolDeleteRef = useRef<(() => boolean) | null>(null);
   frameActionRef.current = frameAction;
 
   // Drag a keyframe to another frame (Animate). Frames extend to follow it past either end;
@@ -3529,6 +3532,35 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       end: edit.end,
     };
   }, [askPart, partEditor, pickedProp, planPartEdit]);
+  // Arrow keys nudge the picked part (as a drag would) and Delete removes its layer from the pose.
+  const partInfoRef = useRef(partInfo);
+  partInfoRef.current = partInfo;
+  symbolNudgeRef.current = (dx, dy) => {
+    const info = partInfoRef.current;
+    if (!pickedProp || !info || !canTransform(info)) return false;
+    const plan = planPartEdit(pickedProp);
+    if (!plan) return true;
+    const det = info.ax * info.by - info.bx * info.ay;
+    if (!det) return true;
+    const round = (value: number) => Math.round(value * 100) / 100;
+    const x = round(info.x + (dx * info.by - info.bx * dy) / det), y = round(info.y + (info.ax * dy - dx * info.ay) / det);
+    const edit = partEditor(plan);
+    edit.apply({ x, y });
+    edit.end();
+    partInfoRef.current = { ...info, x, y };
+    setPartInfo(partInfoRef.current);
+    return true;
+  };
+  symbolDeleteRef.current = () => {
+    const level = symbolLevelNow;
+    if (!symbolView || !pickedProp || !level || frameSelectionRef.current) return false;
+    const index = level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp));
+    if (index < 0) return false;
+    if (symbolObjectNow?.symbolLayers?.[level.js]?.locked?.includes(index)) { showNotice("This layer is locked."); return true; }
+    setLayerEdit((current) => ({ ...current, deleted: [...new Set([...(current.deleted || []), index])] }));
+    setPickedPart(null);
+    return true;
+  };
   // ---- Frame operations, as in Animate: insert / remove frames, insert / clear keyframes, copy / cut / paste frames.
   // The pose's timeline keeps its length, so frames slide inside it. One operation is one undo step.
   type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "copy" | "cut" | "paste";
@@ -3744,6 +3776,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         frameActionRef.current("clear-keyframe", selectionLayerIds(frames), frames.from, frames.to);
         return;
       }
+      if (symbolDeleteRef.current?.()) { event.preventDefault(); event.stopImmediatePropagation(); return; }
       if (selectedObjectIds.length === 0) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -3928,6 +3961,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
 
       const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if (arrows[event.key] && !event.metaKey && !event.ctrlKey && !event.altKey && !/^(input|textarea|select)$/i.test((event.target as HTMLElement | null)?.tagName || "")) {
+        // Inside a pose, the arrows nudge the picked part: 1 px, Shift = 10 px.
+        const step = event.shiftKey ? 10 : 1, [dx, dy] = arrows[event.key];
+        if (symbolNudgeRef.current?.(dx * step, dy * step)) { event.preventDefault(); return; }
+      }
       if (!activeCharacterPart && selectedObjectIds.length > 0 && arrows[event.key] && !event.metaKey && !event.ctrlKey && !event.altKey) {
         // Animate-style nudge of the whole selection: 1 px, Shift = 10 px.
         event.preventDefault();
