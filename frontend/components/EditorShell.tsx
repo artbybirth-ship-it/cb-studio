@@ -16,7 +16,7 @@ import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsert
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, keyframeAt, removeFrames, shownFrames, spanAt, type Anchor } from "@/lib/symbolKeys";
-import { duplicateLayers, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
+import { addSymbolLayer, duplicateLayers, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
 import { canTransform, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolLayerEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
@@ -3586,6 +3586,26 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (usable.length < copyable.length) showNotice("Layers drawn frame by frame were left out: they can't be duplicated yet.");
     setLayerEdit((current) => duplicateLayers(layers, current, usable, 0).edit);
   }, [keysEditable, setLayerEdit, showNotice, symbolLevelNow]);
+  /** The pose's library symbols (asked of the player). */
+  const listPoseLibrary = useCallback(() => new Promise<string[]>((resolve) => {
+    const frame = symbolView && frameAccessRef.current?.(symbolView.objectId);
+    if (!frame?.contentWindow) { resolve([]); return; }
+    const token = `lib${Date.now()}${Math.random()}`;
+    const done = (names: string[]) => { window.removeEventListener("message", onMessage); window.clearTimeout(timer); resolve(names); };
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (d?.source === "characterbazaarstudio-animate" && d.type === "SYMBOL_LIBRARY" && d.token === token) done(Array.isArray(d.names) ? d.names : []);
+    };
+    const timer = window.setTimeout(() => done([]), 1500);
+    window.addEventListener("message", onMessage);
+    frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_LIBRARY_QUERY", token }, "*");
+  }), [symbolView]);
+  /** New layer from the library: one instance of the symbol in the middle of the pose, above the layer picked. */
+  const addLibrarySymbol = useCallback((name: string, above: number | null) => {
+    const level = symbolLevelNow;
+    if (!level) return;
+    setLayerEdit((current) => addSymbolLayer(level.data.layers, current, name, above));
+  }, [setLayerEdit, symbolLevelNow]);
   symbolDuplicateRef.current = () => {
     const level = symbolLevelNow;
     if (!symbolView || !pickedProp || !level) return false;
@@ -5250,6 +5270,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 layerEdit={object?.symbolLayers?.[current.js]}
                 onLayerEdit={setLayerEdit}
                 onDuplicateLayers={duplicateSymbolLayers}
+                onListLibrary={listPoseLibrary}
+                onAddSymbol={addLibrarySymbol}
                 onNotice={showNotice}
                 eases={object?.symbolEases?.[current.js]}
                 keys={object?.symbolKeys?.[current.js]}

@@ -1447,15 +1447,39 @@
     }
     return made;
   }
+  // New layer from the pose's library (clones: [{ of: '', symbol: <library class>, prop }]): one instance of the symbol, centred on the
+  // stage, held by one keyframe for the whole pose, on top of the file's layers.
+  function addLibraryLayer(w, touched) {
+    var Ctor = libSymbol(w.symbol);
+    if (!Ctor) return;
+    var obj = new Ctor(), total = Math.max(1, w.clip.timeline.duration || w.clip.totalFrames || 1), x = 0, y = 0;
+    try { var b = obj.nominalBounds || (obj.getBounds && obj.getBounds()); if (b) { x = W / 2 - (b.x + b.width / 2); y = H / 2 - (b.y + b.height / 2); } } catch (e) {}
+    var made = createjs.Tween.get(obj).to({ x: x, y: y, scaleX: 1, scaleY: 1, skewX: 0, skewY: 0, alpha: 1 }, 0);
+    if (total > 1) made.wait(total - 1);
+    w.clip.timeline.addTween(made);
+    var list = w.clip.timeline.tweens, from = list.indexOf(made);
+    if (from >= 0) list.splice(from, 1);
+    list.unshift(made);
+    w.clip[w.prop] = obj;
+    cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: w.symbol, obj: obj, tweens: [made] });
+    touched.add(w.clip);
+  }
+  function postLibrary(d) {
+    protoNames();
+    var names = [], seen = {};
+    cbLibs.forEach(function (lib) { Object.keys(lib || {}).forEach(function (n) { var f = lib[n]; if (seen[n] || typeof f !== 'function' || !f.prototype) return; try { if (f.prototype instanceof createjs.MovieClip && n.charAt(0) !== '_' && !GENERIC_SYMBOL.test(n)) { seen[n] = 1; names.push(n); } } catch (e) {} }); });
+    names.sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; });
+    cbPost('SYMBOL_LIBRARY', { token: d.token, names: names.slice(0, 500) });
+  }
   function syncClones(specs, touched) {
     var want = [];
     Object.keys(specs || {}).forEach(function (name) {
       var list = (specs[name] || {}).clones || [];
-      if (list.length) clipsOfClass(name).forEach(function (clip) { list.forEach(function (c) { want.push({ clip: clip, of: c.of, prop: c.prop }); }); });
+      if (list.length) clipsOfClass(name).forEach(function (clip) { list.forEach(function (c) { want.push({ clip: clip, of: c.of, prop: c.prop, symbol: c.symbol || '' }); }); });
     });
     var changed = false;
     cbClones = cbClones.filter(function (made) {
-      if (want.some(function (w) { return w.clip === made.clip && w.prop === made.prop && w.of === made.of; })) return true;
+      if (want.some(function (w) { return w.clip === made.clip && w.prop === made.prop && w.of === made.of && w.symbol === made.symbol; })) return true;
       var list = made.clip.timeline.tweens;
       made.tweens.forEach(function (tw) { var at = list.indexOf(tw); if (at >= 0) list.splice(at, 1); });
       try { made.clip.removeChild(made.obj); if (made.clip._managed) delete made.clip._managed[made.obj.id]; } catch (e) {}
@@ -1466,6 +1490,7 @@
     });
     want.forEach(function (w) {
       if (cbClones.some(function (made) { return made.clip === w.clip && made.prop === w.prop; })) return;
+      if (w.symbol) { addLibraryLayer(w, touched); changed = true; return; }
       var src = w.clip[w.of], Ctor = src && libSymbol(protoNames().get(Object.getPrototypeOf(src)) || '');
       if (!Ctor) return;
       var obj = new Ctor(src.mode, src.startPosition, src.loop), list = w.clip.timeline.tweens, own = [];
@@ -1475,7 +1500,7 @@
       own.forEach(function (tw) { var from = list.indexOf(tw); if (from >= 0) list.splice(from, 1); });
       list.splice(at >= 0 ? at : 0, 0, ...own);
       w.clip[w.prop] = obj;
-      cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, obj: obj, tweens: own });
+      cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: '', obj: obj, tweens: own });
       touched.add(w.clip);
       changed = true;
     });
@@ -1662,6 +1687,7 @@
       else if (d.type === 'SYMBOL_VALUES_QUERY') { postKeyValues(d); }
       else if (d.type === 'SYMBOL_DRAG_BEGIN') { postDragInfo(d); }
       else if (d.type === 'SYMBOL_PART_QUERY') { postPartInfo(d); }
+      else if (d.type === 'SYMBOL_LIBRARY_QUERY') { postLibrary(d); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
       else if (d.type === 'CHARACTER_EDITS') { applySymbolEdits(d.symbolEases, d.symbolKeys, d.symbolValues, d.symbolLayers); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); applyLayerVisibility(d.symbolLayers); if (st && st.update) st.update(); scheduleBounds(); }

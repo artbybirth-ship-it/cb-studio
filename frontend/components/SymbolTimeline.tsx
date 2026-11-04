@@ -95,7 +95,7 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -105,6 +105,9 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   layerEdit?: SymbolLayerEdit;
   /** Change that arrangement (one undo step); a null result puts it back as the file has it. */
   onDuplicateLayers?: (ids: number[]) => void;
+  /** Library symbols of the pose (names), and adding one on a new layer. */
+  onListLibrary?: () => Promise<string[]>;
+  onAddSymbol?: (name: string, above: number | null) => void;
   onLayerEdit: (change: (edit: SymbolLayerEdit) => SymbolLayerEdit | null) => void;
   onNotice?: (text: string) => void;
   /** This symbol's edited eases, by "<layer index>:<keyframe>". */
@@ -150,6 +153,9 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   const [keySel, setKeySel] = useState<{ layer: number; frame: number } | null>(null);
   const selectKey = (sel: { layer: number; frame: number } | null) => { setKeySel(sel); onSelectKey(sel?.layer ?? 0, sel ? sel.frame : null); };
   const [layerSel, setLayerSel] = useState<number | null>(null);
+  const [libMenu, setLibMenu] = useState<{ x: number; y: number } | null>(null);
+  const [libNames, setLibNames] = useState<string[]>([]);
+  const [libFilter, setLibFilter] = useState("");
   // Selected frames, across layers (Animate): from where the press began to where the pointer is now.
   const [frameSel, setFrameSel] = useState<{ a: { layer: number; frame: number }; b: { layer: number; frame: number } } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -447,6 +453,12 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
             <span title={symbol.name}>{rows.length} layers · {short(symbol.name)}</span>
             <span className="cb-symbol-layer-tools">
               <button type="button" onClick={() => onLayerEdit((current) => addLayer(symbol.layers, current, "normal", layerSel))} title="New layer (an empty one, above the layer picked)" aria-label="New layer"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg></button>
+              {onAddSymbol && onListLibrary && <button type="button" onClick={(event) => {
+                const box = event.currentTarget.getBoundingClientRect();
+                setLibMenu((open) => (open ? null : { x: box.left, y: box.bottom + 4 }));
+                setLibFilter("");
+                onListLibrary().then(setLibNames);
+              }} title="New layer from the library (a symbol of this pose, placed in the middle of the stage)" aria-label="New layer from library"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3" width="8" height="10" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" /><path d="M13 5.5v5M10.5 8h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg></button>}
               {onDuplicateLayers && <button type="button" onClick={() => onDuplicateLayers(layerPick.size ? [...layerPick] : layerSel != null ? [layerSel] : [])} title="Duplicate layer (a copy of the picked layers, just above them)" aria-label="Duplicate layer"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" /><path d="M3 10.5V4a1 1 0 0 1 1-1h6.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg></button>}
               <button type="button" onClick={() => onLayerEdit((current) => addLayer(symbol.layers, current, "folder", layerSel))} title="New folder (drag layers into it)" aria-label="New folder"><LayerIcon type="folder" open={false} /></button>
               <button type="button" onClick={deleteLayers} disabled={!layerPick.size && layerSel == null} title="Delete the picked layers (they are hidden for good; Undo brings them back)" aria-label="Delete layer"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.5 8.5h5l.5-8.5" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
@@ -539,6 +551,20 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
         })()}
         <i className="cb-symbol-playhead" style={{ left: LAYER_PANEL + frame * CELL + CELL / 2 - 1 }} aria-hidden="true" />
       </div>
+      {libMenu && onAddSymbol && (
+        <>
+          <div className="cb-symbol-lib-shade" onPointerDown={() => setLibMenu(null)} />
+          <div className="cb-frame-menu cb-symbol-lib" role="menu" style={{ left: libMenu.x, top: libMenu.y }}>
+            <input autoFocus value={libFilter} onChange={(event) => setLibFilter(event.target.value)} placeholder="Find a symbol" onKeyDown={(event) => { if (event.key === "Escape") setLibMenu(null); event.stopPropagation(); }} />
+            <div className="cb-symbol-lib-list">
+              {libNames.filter((name) => name.toLowerCase().includes(libFilter.toLowerCase())).map((name) => (
+                <button key={name} type="button" role="menuitem" onClick={() => { setLibMenu(null); onAddSymbol(name, layerSel); }}>{name}</button>
+              ))}
+              {!libNames.length && <span className="cb-symbol-lib-empty">No symbols in this pose's library.</span>}
+            </div>
+          </div>
+        </>
+      )}
     </section>
   );
 }

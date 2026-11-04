@@ -30,9 +30,9 @@ export type SymbolLayerEdit = {
   parents?: Record<string, number | null>;
   extras?: Array<{ id: number; name: string; type: "normal" | "folder" }>;
   /** Layers made by Duplicate Layer: a new copy (named `prop` in the player) of the layer `of` (its index, a duplicate's index follows the file's layers). */
-  clones?: Array<{ of: number; prop: string }>;
+  clones?: Array<{ of: number; prop: string; symbol?: string }>;
   /** What the player gets (made from the above): the objects of each layer top to bottom, and the objects to hide. */
-  spec?: { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string }> };
+  spec?: { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string; symbol?: string }> };
 };
 
 export type ColorReplacement = {
