@@ -2927,6 +2927,18 @@ export default function EditorShell({ projectId }: { projectId: string }) {
 
   const runAlign = (action: AlignAction) => {
     if (!draft) return;
+    if (symbolView && pickedProp) {
+      // Inside a pose: the picked part lines up with the pose's own stage (Animate's "Align to Stage").
+      const info = partInfoRef.current;
+      if (!info || !canTransform(info)) { showNotice("Pick a part first to align it."); return; }
+      if (action === "hdistribute" || action === "vdistribute") { showNotice("Distribute needs three or more parts."); return; }
+      const xs = partBox(info).corners.map((corner) => corner[0] * info.W), ys = partBox(info).corners.map((corner) => corner[1] * info.H);
+      const left = Math.min(...xs), right = Math.max(...xs), top = Math.min(...ys), bottom = Math.max(...ys);
+      const dx = action === "left" ? -left : action === "right" ? info.W - right : action === "hcenter" ? info.W / 2 - (left + right) / 2 : 0;
+      const dy = action === "top" ? -top : action === "bottom" ? info.H - bottom : action === "vcenter" ? info.H / 2 - (top + bottom) / 2 : 0;
+      if (Math.abs(dx) > 1e-6 || Math.abs(dy) > 1e-6) symbolNudgeRef.current?.(dx, dy);
+      return;
+    }
     if (activeCharacterPart) { showNotice("Align works on whole layers. Press Esc to leave the part first."); return; }
     const ids = new Set(selectedObjectIds);
     const entries = draft.objects
