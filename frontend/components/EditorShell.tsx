@@ -3418,10 +3418,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return { layer, prop, grown, target: inTween && grown ? fileOf(anchors, at) : anchors[item.anchor][0] };
   }, [keysEditable, showNotice, symbolLevelNow, symbolObjectNow]);
   /** The edit the pointer makes: the first change adds the keyframe, every change sets values (one undo step). */
+  const partDragging = useRef(false), partAskSeq = useRef(0), partAnswered = useRef(0);
+  const [partRefresh, setPartRefresh] = useState(0);
   const partEditor = useCallback((plan: { layer: number; prop: string; grown: Array<[number, number]> | null; target: number }) => {
     let started = false;
     return {
       apply: (patch: Partial<Record<SymbolValueKey, number>>) => {
+        partDragging.current = true;
         if (!started) {
           started = true;
           scrubHistoryRef.current = "armed";
@@ -3429,7 +3432,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         }
         setSymbolValue(plan.layer, plan.target, patch, plan.prop);
       },
-      end: () => { window.setTimeout(() => { scrubHistoryRef.current = "idle"; }, 0); },
+      end: () => { window.setTimeout(() => { scrubHistoryRef.current = "idle"; partDragging.current = false; setPartRefresh((n) => n + 1); }, 0); },
     };
   }, [setSymbolKeys, setSymbolValue]);
   const beginSymbolDrag = useCallback((normalizedX: number, normalizedY: number) => new Promise<PartHandle | null>((resolve) => {
@@ -3477,10 +3480,20 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const partVersion = JSON.stringify([symbolLevelNow?.frame, symbolLevelNow?.js, symbolObjectNow?.symbolValues, symbolObjectNow?.symbolKeys, symbolObjectNow?.symbolEases]);
   useEffect(() => {
     if (!pickedProp) { setPartInfo(null); return; }
+    // While a handle or the part is being dragged the box follows at once; replies are applied in the order asked
+    // (an older reply never lands over a newer one), and a late reply for a part that is no longer picked is dropped.
     let live = true;
-    const timer = window.setTimeout(() => { void askPart(pickedProp).then((info) => { if (live) setPartInfo(info && canTransform(info) ? info : null); }); }, 160);
+    const timer = window.setTimeout(() => {
+      const ask = ++partAskSeq.current;
+      void askPart(pickedProp).then((info) => {
+        if (partDragging.current || !live) return;
+        if (ask < partAnswered.current) return;
+        partAnswered.current = ask;
+        setPartInfo(info && canTransform(info) ? info : null);
+      });
+    }, 160);
     return () => { live = false; window.clearTimeout(timer); };
-  }, [askPart, partVersion, pickedProp]);
+  }, [askPart, partVersion, partRefresh, pickedProp]);
   useEffect(() => { if (!symbolView) setPickedPart(null); }, [symbolView]);
   useEffect(() => { setPickedPart(null); }, [symbolLevelNow?.js]);
   const partEditable = Boolean(pickedProp && partInfo && planPartEdit(pickedProp, true));
@@ -3493,6 +3506,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const plan = planPartEdit(pickedProp);
     if (!plan) return null;
     const edit = partEditor(plan), start: Pt = [nx * info.W, ny * info.H];
+    // The box moves with the pointer at once; the player's own reading confirms it a moment later.
+    const follow = (patch: Partial<PartInfo>) => setPartInfo({ ...info, ...patch });
     const round = (value: number, digits = 2) => Math.round(value * 10 ** digits) / 10 ** digits;
     return {
       move: (dx: number, dy: number, shift: boolean) => {
@@ -3500,12 +3515,15 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         if (handle === "rotate") {
           const turned = rotatePart(info, start, now, shift);
           edit.apply({ scaleX: round(turned.scaleX, 4), scaleY: round(turned.scaleY, 4), skewX: round(turned.skewX), skewY: round(turned.skewY) });
+          follow({ sx: turned.scaleX, sy: turned.scaleY, skx: turned.skewX, sky: turned.skewY });
         } else if (handle.startsWith("skew-")) {
           const skewed = skewPart(info, handle as SkewEdge, start, now);
           edit.apply({ scaleX: round(skewed.scaleX, 4), scaleY: round(skewed.scaleY, 4), skewX: round(skewed.skewX), skewY: round(skewed.skewY), x: round(skewed.x), y: round(skewed.y) });
+          follow({ sx: skewed.scaleX, sy: skewed.scaleY, skx: skewed.skewX, sky: skewed.skewY, x: skewed.x, y: skewed.y });
         } else {
           const scaled = scalePart(info, handle as ScaleHandle, start, now, shift);
           edit.apply({ scaleX: round(scaled.scaleX, 4), scaleY: round(scaled.scaleY, 4), x: round(scaled.x), y: round(scaled.y) });
+          follow({ sx: scaled.scaleX, sy: scaled.scaleY, x: scaled.x, y: scaled.y });
         }
       },
       end: edit.end,
