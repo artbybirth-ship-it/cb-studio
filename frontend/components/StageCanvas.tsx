@@ -82,6 +82,8 @@ type Props = {
   onSymbolHandleStart?: (handle: string, normalizedX: number, normalizedY: number) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void } | null>;
   /** A click on nothing inside a character: the picked part is dropped. */
   onSymbolDeselect?: () => void;
+  /** The right-click menu inside a pose: what to do to the part picked there. */
+  onSymbolContext?: (action: "hide" | "lock" | "delete") => void;
   /** The picked part's box (its four corners, top left first, and its pivot) as fractions of the player. */
   symbolBox?: { corners: Array<[number, number]>; pivot: [number, number]; editable: boolean } | null;
   /** Inside a character: a double-click on one of its objects (its property name), or elsewhere (null). */
@@ -278,7 +280,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -1445,6 +1447,27 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const rect = frame?.getBoundingClientRect();
     if (!frame || !rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) { onSymbolDoubleClick?.(null); return; }
     frame.contentWindow?.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_HIT", normalizedX: (event.clientX - rect.left) / rect.width, normalizedY: (event.clientY - rect.top) / rect.height }, "*");
+  };
+  // Right-click inside a pose: the part under the pointer is picked and a small menu offers what Animate does with it.
+  const [partMenu, setPartMenu] = useState<{ x: number; y: number; hasPart: boolean } | null>(null);
+  useEffect(() => {
+    if (!partMenu) return;
+    const close = () => setPartMenu(null);
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", close);
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("keydown", close); };
+  }, [partMenu]);
+  const openPartMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!symbolView || !onSymbolDragStart) return;
+    const rect = frameRefs.current.get(symbolView.objectId)?.getBoundingClientRect();
+    if (!rect) return;
+    const at = { x: event.clientX, y: event.clientY };
+    void onSymbolDragStart((at.x - rect.left) / rect.width, (at.y - rect.top) / rect.height).then((handle) => {
+      if (handle) { handle.click?.(); handle.end(); }
+      setPartMenu({ ...at, hasPart: Boolean(handle) });
+    });
   };
   // Right-click a character (or its selected parts) › Edit Symbol, Distribute to Layers (Animate).
   const [symbolMenu, setSymbolMenu] = useState<{ x: number; y: number; objectId: string } | null>(null);
@@ -3422,7 +3445,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         );
       })}
       {/* Inside a character: the stage only answers double-clicks (a part steps in, elsewhere steps out). */}
-      {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={doubleClickInsideSymbol} onPointerDown={(event) => {
+      {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={doubleClickInsideSymbol} onContextMenu={openPartMenu} onPointerDown={(event) => {
           if (spacePanning) return;
           event.stopPropagation();
           // Press a part and drag: it moves. A click picks it (handles appear); a click on nothing drops it.
@@ -3468,6 +3491,16 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         </div>
       )}
       </div>
+      {partMenu && symbolView && (
+        <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: partMenu.x, top: partMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+          {partMenu.hasPart ? <>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("hide"); }}>Hide Layer</button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("lock"); }}>Lock Layer</button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("delete"); }}>Delete Layer<kbd>⌫</kbd></button>
+          </> : <button type="button" role="menuitem" disabled>No part here</button>}
+          <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolDoubleClick?.(null); }}>Back to Scene<kbd>Esc</kbd></button>
+        </div>
+      )}
       {symbolMenu && (
         <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: symbolMenu.x, top: symbolMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
           {onEnterSymbol && <button type="button" role="menuitem" onClick={() => { const id = symbolMenu.objectId; setSymbolMenu(null); onEnterSymbol(id); }}>Edit Symbol<kbd>{canEnterSymbol?.(symbolMenu.objectId) ? "double-click" : ""}</kbd></button>}

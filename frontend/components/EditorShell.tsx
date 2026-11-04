@@ -16,7 +16,7 @@ import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsert
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, keyframeAt, removeFrames, shownFrames, spanAt, type Anchor } from "@/lib/symbolKeys";
-import { isLayerEditEmpty, playerSpec } from "@/lib/symbolLayers";
+import { isLayerEditEmpty, playerSpec, toggled } from "@/lib/symbolLayers";
 import { canTransform, partBox, rotatePart, scalePart, skewPart, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolLayerEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
@@ -5158,6 +5158,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onSymbolDragStart={beginSymbolDrag}
               onSymbolHandleStart={beginSymbolHandle}
               onSymbolDeselect={() => setPickedPart(null)}
+              onSymbolContext={(action) => {
+                const level = symbolLevelNow, index = level && pickedProp ? level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp)) : -1;
+                if (index < 0) return;
+                if (action === "delete") { symbolDeleteRef.current?.(); return; }
+                setLayerEdit((current) => (action === "hide" ? { ...current, hidden: toggled(current.hidden, [index]) } : { ...current, locked: toggled(current.locked, [index]) }));
+              }}
               symbolBox={symbolBox}
               onEnterSymbol={(id) => void enterSymbol(id)}
               canEnterSymbol={(id) => {
