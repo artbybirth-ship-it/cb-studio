@@ -20,6 +20,19 @@ export type SymbolKeyEdit = { props: string[]; anchors: Array<[number, number]> 
 export type SymbolValueKey = "x" | "y" | "scaleX" | "scaleY" | "skewX" | "skewY" | "alpha";
 export type SymbolValueEdit = { props: string[]; frame: number; v: Partial<Record<SymbolValueKey, number>> };
 
+/** How the layers of a symbol inside a character were arranged (step inside): see lib/symbolLayers.ts. */
+export type SymbolLayerEdit = {
+  order?: number[];
+  names?: Record<string, string>;
+  hidden?: number[];
+  locked?: number[];
+  deleted?: number[];
+  parents?: Record<string, number | null>;
+  extras?: Array<{ id: number; name: string; type: "normal" | "folder" }>;
+  /** What the player gets (made from the above): the objects of each layer top to bottom, and the objects to hide. */
+  spec?: { order?: string[][]; hidden: string[] };
+};
+
 export type ColorReplacement = {
   id: string;
   from: string;
@@ -278,6 +291,8 @@ export type EditorObject = {
   symbolKeys?: Record<string, Record<string, SymbolKeyEdit>>;
   /** Values edited on keyframes inside this character, by symbol class, then "<layer>:<file frame>". */
   symbolValues?: Record<string, Record<string, SymbolValueEdit>>;
+  /** Layers arranged inside this character (reordered, hidden, locked, renamed, deleted, folders), by symbol class. */
+  symbolLayers?: Record<string, SymbolLayerEdit>;
   /** Runtime-detected source body parts for Archive/CreateJS actions. */
   sourceParts?: CharacterPartDescriptor[];
   /** User-supplied image replacements for selected body parts. */

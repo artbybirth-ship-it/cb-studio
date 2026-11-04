@@ -1431,8 +1431,46 @@
     });
     cbPost('SYMBOL_KEYS_EDITABLE', { js: d.js, token: d.token, editable: found, moves: moves, drawn: drawn });
   }
-  function applySymbolEdits(eases, keys, values) {
-    var key = JSON.stringify([eases || {}, keys || {}, values || {}]), root = cbRoot();
+  // ---- Layers (CHARACTER_EDITS.symbolLayers: { <class>: { order: [[props of a layer], …] top to bottom, hidden: [props] } }).
+  // A pose draws its layers by its animations in order: the first ends up on top. Reordering layers reorders them, and hiding one
+  // hides its objects. Both are undone when the edit goes.
+  var cbLayerState = { orig: new Map(), hidden: [] };
+  function applySymbolLayers(specs, touched) {
+    cbLayerState.orig.forEach(function (tweens, clip) { var list = clip.timeline.tweens; list.length = 0; tweens.forEach(function (tw) { list.push(tw); }); touched.add(clip); });
+    cbLayerState.orig = new Map();
+    Object.keys(specs || {}).forEach(function (name) {
+      var spec = specs[name] || {};
+      clipsOfClass(name).forEach(function (clip) {
+        if (spec.order && spec.order.length) {
+          var list = clip.timeline.tweens, used = new Set(), grouped = [];
+          spec.order.forEach(function (props) { tweensFor(clip, props).forEach(function (tw) { if (!used.has(tw)) { used.add(tw); grouped.push(tw); } }); });
+          var rest = list.filter(function (tw) { return !used.has(tw); });
+          cbLayerState.orig.set(clip, list.slice());
+          var next = rest.concat(grouped);
+          list.length = 0; next.forEach(function (tw) { list.push(tw); });
+          touched.add(clip);
+        }
+      });
+    });
+  }
+  // Hidden layers: their objects are hidden after the part edits have run (they set every part's visibility again each time), and
+  // shown again when the layer is no longer hidden.
+  function applyLayerVisibility(specs) {
+    cbLayerState.hidden.forEach(function (h) { h.o.visible = h.was; });
+    cbLayerState.hidden = [];
+    Object.keys(specs || {}).forEach(function (name) {
+      var hidden = (specs[name] || {}).hidden || [];
+      if (!hidden.length) return;
+      clipsOfClass(name).forEach(function (clip) {
+        hidden.forEach(function (prop) {
+          var o = clip[prop];
+          if (o && o.localToGlobal) { cbLayerState.hidden.push({ o: o, was: o.visible === false ? true : o.visible, clip: clip }); o.visible = false; }
+        });
+      });
+    });
+  }
+  function applySymbolEdits(eases, keys, values, layerSpecs) {
+    var key = JSON.stringify([eases || {}, keys || {}, values || {}, layerSpecs || {}]), root = cbRoot();
     if (key === cbEasesKey || !root) return;
     cbEasesKey = key;
     var clips = new Set();
@@ -1505,6 +1543,7 @@
       var layers = keys[name] || {};
       clipsOfClass(name).forEach(function (clip) { Object.keys(layers).forEach(function (index) { retimeSteps(clip, layers[index], clips); }); });
     });
+    applySymbolLayers(layerSpecs, clips);
     // An independent clip only redoes its timeline when its position changes (synched ones do when drawn).
     clips.forEach(function (clip) {
       // A timeline, and each of its tweens, asked for the position it already holds does nothing: make them run again for the changed values.
@@ -1573,7 +1612,7 @@
       else if (d.type === 'SYMBOL_PART_QUERY') { postPartInfo(d); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
-      else if (d.type === 'CHARACTER_EDITS') { applySymbolEdits(d.symbolEases, d.symbolKeys, d.symbolValues); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); if (st && st.update) st.update(); scheduleBounds(); }
+      else if (d.type === 'CHARACTER_EDITS') { applySymbolEdits(d.symbolEases, d.symbolKeys, d.symbolValues, d.symbolLayers); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); applyLayerVisibility(d.symbolLayers); if (st && st.update) st.update(); scheduleBounds(); }
       else if (d.type === 'SYMBOL_VIEW') { restoreSymbolView(); cbSymbolView = d.view || null; applySymbolView(); if (st && st.update) st.update(); scheduleBounds(); }
       else if (d.type === 'SYMBOL_HIT') { cbPost('SYMBOL_HIT', { prop: symbolHit(Number(d.normalizedX || 0), Number(d.normalizedY || 0)) }); }
       else if (d.type === 'HIT_TEST_PART') { selectAt(Number(d.normalizedX || 0), Number(d.normalizedY || 0)); }

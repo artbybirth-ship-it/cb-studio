@@ -348,6 +348,7 @@
       symbolEases:object.symbolEases || {},
       symbolKeys:object.symbolKeys || {},
       symbolValues:object.symbolValues || {},
+      symbolLayers:Object.keys(object.symbolLayers || {}).reduce(function(all,name){ all[name] = (object.symbolLayers[name] && object.symbolLayers[name].spec) || {}; return all; }, {}),
       strokeScale:object.strokeScale == null ? 1 : object.strokeScale,
       selectedPart:'',
       focusPart:'',

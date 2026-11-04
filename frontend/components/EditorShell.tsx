@@ -16,8 +16,9 @@ import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsert
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, keyframeAt, removeFrames, shownFrames, spanAt, type Anchor } from "@/lib/symbolKeys";
+import { isLayerEditEmpty, playerSpec } from "@/lib/symbolLayers";
 import { canTransform, partBox, rotatePart, scalePart, skewPart, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
-import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolValueKey } from "@/types";
+import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolLayerEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
 import { readOpenProjects, recentProjectsOf, removeOpenProject, upsertOpenProject, type OpenProjectTab } from "@/lib/openProjects";
@@ -3352,6 +3353,18 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     };
     if (symbolBatch.current) symbolBatch.current.push(write); else mutate(write);
   }, [mutate, symbolView]);
+  // Layers arranged inside the character (order, hide, lock, rename, delete, folders): one change, one undo step.
+  const setLayerEdit = useCallback((change: (edit: SymbolLayerEdit) => SymbolLayerEdit | null) => {
+    if (!symbolView) return;
+    const level = symbolView.levels[symbolView.levels.length - 1];
+    mutate((data) => {
+      const item = data.objects.find((object) => object.id === symbolView.objectId);
+      if (!item) return;
+      const symbols = { ...(item.symbolLayers || {}) }, next = change({ ...(symbols[level.js] || {}) });
+      if (!next || isLayerEditEmpty(next)) delete symbols[level.js]; else symbols[level.js] = { ...next, spec: playerSpec(level.data.layers, next) };
+      item.symbolLayers = symbols;
+    });
+  }, [mutate, symbolView]);
   // Parts on the stage inside the character: press and drag to move, click to pick (then rotate / scale with handles). All of it edits
   // the keyframe at the playhead: on a keyframe that keyframe, between keyframes of a tween one is added there first (holding the
   // motion), as in Animate. One drag is one undo step.
@@ -3387,6 +3400,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (found) { layer = index; item = found; }
     }
     if (layer < 0 || !item) return null;
+    if (symbolObjectNow?.symbolLayers?.[level.js]?.locked?.includes(layer)) {
+      if (!quiet) showNotice("This layer is locked.");
+      return null;
+    }
     if (item.tween === "shape") {
       if (!quiet) showNotice("This part is in a shape tween: it can be looked at here, not moved yet.");
       return null;
@@ -3519,7 +3536,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (!level || !object) return;
     const layers = level.data.layers, ready = keysEditable?.js === level.js ? keysEditable : null;
     const anchorsOf = (index: number): Anchor[] => object.symbolKeys?.[level.js]?.[String(index)]?.anchors || fileAnchors(layers[index]);
-    const rows = sel.layers.filter((index) => layers[index] && layers[index].type !== "folder");
+    const lockedIds = object.symbolLayers?.[level.js]?.locked || [];
+    const rows = sel.layers.filter((index) => layers[index] && layers[index].type !== "folder" && !lockedIds.includes(index));
     const doable = rows.filter((index) => ready?.editable[index]);
     const count = sel.to - sel.from + 1;
     const commit = (index: number, next: Anchor[]) => setSymbolKeys(index, isUnchanged(layers[index], next) ? null : next);
@@ -3649,12 +3667,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // (a closed eye on a folder hides everything in it).
   const stageSymbolView = useMemo(() => {
     if (!symbolView) return null;
-    const last = symbolView.levels[symbolView.levels.length - 1].data;
-    const hiddenProps = last.layers.flatMap((layer, index) => {
-      for (let at: number | undefined = index, guard = 0; at != null && guard < 30; at = last.layers[at]?.parent, guard += 1) if (symbolView.hidden.has(at)) return layer.props || [];
-      return [];
-    });
-    return { objectId: symbolView.objectId, levels: symbolView.levels.map((level) => ({ props: level.props, frame: level.frame })), hidden: hiddenProps };
+    // Hidden layers are saved with the character now (symbolLayers); the view itself hides nothing.
+    return { objectId: symbolView.objectId, levels: symbolView.levels.map((level) => ({ props: level.props, frame: level.frame })), hidden: [] as string[] };
   }, [symbolView]);
 
   const deleteLayer = useCallback((id: string) => {
@@ -5107,7 +5121,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 symbol={current.data}
                 frame={current.frame}
                 playing={symbolView.playing}
-                hidden={symbolView.hidden}
+                layerEdit={object?.symbolLayers?.[current.js]}
+                onLayerEdit={setLayerEdit}
+                onNotice={showNotice}
                 eases={object?.symbolEases?.[current.js]}
                 keys={object?.symbolKeys?.[current.js]}
                 editable={keysEditable?.js === current.js ? keysEditable.editable : undefined}
@@ -5129,12 +5145,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 onSetEase={setSymbolEase}
                 onPreviewEase={previewSymbolEase}
                 onPlay={() => setSymbolView((state) => (state ? { ...state, playing: !state.playing } : state))}
-                onToggleLayer={(index) => setSymbolView((state) => {
-                  if (!state) return state;
-                  const hidden = new Set(state.hidden);
-                  if (hidden.has(index)) hidden.delete(index); else hidden.add(index);
-                  return { ...state, hidden };
-                })}
                 // Scene and the character's name step all the way out; a symbol steps back to it.
                 onCrumb={(index) => setSymbolView((state) => (!state || index < 2 ? null : { ...state, playing: false, hidden: new Set(), levels: state.levels.slice(0, index - 1) }))}
                 onStepInto={(layerIndex, frame, js) => void stepIntoSymbol(layerIndex, frame, js)}

@@ -1029,6 +1029,8 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       symbolEases: object.symbolEases || {},
       symbolKeys: object.symbolKeys || {},
       symbolValues: object.symbolValues || {},
+      // Layers arranged inside the character (order, hidden): what the player needs of them.
+      symbolLayers: Object.fromEntries(Object.entries(object.symbolLayers || {}).map(([name, edit]) => [name, edit.spec || {}])),
       strokeScale: object.strokeScale ?? 1,
       selectedPart: object.id === selectedObjectId ? (activeCharacterPart || "") : "",
       onlyParts: object.onlyParts || [],

@@ -3,8 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { EaseControl } from "@/components/Timeline";
-import type { SymbolEaseEdit, SymbolKeyEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
+import type { SymbolEaseEdit, SymbolKeyEdit, SymbolLayerEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
 import { scrubProps } from "@/lib/scrub";
+import { addLayer, descendants, EXTRA_BASE, layerRows, lockedTogether, moveLayers, toggled } from "@/lib/symbolLayers";
 import { addAnchor, fileAnchors, isUnchanged, keyframeAt, moveAnchor, removeAnchor, shownFrames, type Anchor } from "@/lib/symbolKeys";
 
 /**
@@ -58,6 +59,11 @@ const EyeIcon = ({ shown }: { shown: boolean }) => (
     <path d="M1.8 8s2.3-4 6.2-4 6.2 4 6.2 4-2.3 4-6.2 4-6.2-4-6.2-4z" /><circle cx="8" cy="8" r="1.8" />{!shown && <path d="M3 13 13 3" />}
   </g></svg>
 );
+const LockIcon = ({ on }: { on: boolean }) => (
+  <svg viewBox="0 0 16 16" aria-hidden="true"><g fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3.5" y="7" width="9" height="6.5" rx="1.2" fill={on ? "currentColor" : "none"} /><path d={on ? "M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" : "M5.5 7V5.2a2.5 2.5 0 0 1 4.8-1"} />
+  </g></svg>
+);
 const TransportIcon = ({ kind }: { kind: "first" | "prev" | "play" | "pause" | "next" | "last" }) => (
   <svg viewBox="0 0 16 16" aria-hidden="true"><g fill="currentColor">
     {kind === "first" && <><rect x="2.5" y="3" width="1.8" height="10" /><path d="M13 3v10L5.5 8z" /></>}
@@ -89,14 +95,17 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden, eases, keys, editable, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onToggleLayer, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
   frame: number;
   playing: boolean;
-  /** Layers hidden with the eye (indexes into symbol.layers). */
-  hidden: Set<number>;
+  /** How the layers were arranged here (order, hidden, locked, renamed, deleted, folders), saved with the character. */
+  layerEdit?: SymbolLayerEdit;
+  /** Change that arrangement (one undo step); a null result puts it back as the file has it. */
+  onLayerEdit: (change: (edit: SymbolLayerEdit) => SymbolLayerEdit | null) => void;
+  onNotice?: (text: string) => void;
   /** This symbol's edited eases, by "<layer index>:<keyframe>". */
   eases?: Record<string, SymbolEaseEdit>;
   /** This symbol's moved and added keyframes, by layer index. */
@@ -121,7 +130,6 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   onSetValue: (layerIndex: number, frame: number, patch: Partial<Record<SymbolValueKey, number>> | null) => void;
   onSeek: (frame: number) => void;
   onPlay: () => void;
-  onToggleLayer: (index: number) => void;
   onCrumb: (index: number) => void;
   onStepInto: (layerIndex: number, frame: number, js: string) => void;
   /** A new ease for a keyframe's tween; null goes back to the .fla's. */
@@ -145,8 +153,13 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   const [frameSel, setFrameSel] = useState<{ a: { layer: number; frame: number }; b: { layer: number; frame: number } } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [picked, setPicked] = useState<{ layer: number; i: number } | null>(null);
-  const anchorsOf = (index: number): Anchor[] => keys?.[index]?.anchors || fileAnchors(symbol.layers[index]);
-  const pickedLayer = picked ? symbol.layers[picked.layer] : undefined;
+  const viewRows = useMemo(() => layerRows(symbol.layers, layerEdit), [symbol.layers, layerEdit]);
+  const layerAt = (id: number) => (id < EXTRA_BASE ? symbol.layers[id] : viewRows.find((row) => row.id === id)?.layer);
+  const hiddenSet = new Set(layerEdit?.hidden || []), lockedSet = new Set(layerEdit?.locked || []);
+  // A locked layer takes no edits: its keyframes cannot be moved or changed.
+  const editable: Record<number, boolean> | undefined = editableProp && Object.fromEntries(Object.entries(editableProp).map(([id, value]) => [id, Boolean(value) && !lockedSet.has(Number(id))]));
+  const anchorsOf = (index: number): Anchor[] => keys?.[index]?.anchors || fileAnchors(layerAt(index) as FlaLayer);
+  const pickedLayer = picked ? layerAt(picked.layer) : undefined;
   const pickedShown = picked && pickedLayer ? shownFrames(pickedLayer, anchorsOf(picked.layer)).find((item) => item.i === picked.i) : undefined;
   const pickedFrame = pickedShown?.source;
   const pickedEdit = picked && pickedFrame ? eases?.[`${picked.layer}:${pickedFrame.i}`] : undefined;
@@ -156,7 +169,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   // The playhead is inside the picked tween (not on its first frame): a keyframe can be added there.
   const canAdd = Boolean(picked && pickedClassic && pickedMovable && addAnchor(pickedAnchors, frame));
   const keysEdited = Boolean(picked && keys?.[picked.layer]);
-  const commitKeys = (layerIndex: number, anchors: Anchor[]) => onSetKeys(layerIndex, isUnchanged(symbol.layers[layerIndex], anchors) ? null : anchors);
+  const commitKeys = (layerIndex: number, anchors: Anchor[]) => onSetKeys(layerIndex, isUnchanged(layerAt(layerIndex) as FlaLayer, anchors) ? null : anchors);
   const scrollRef = useRef<HTMLDivElement>(null);
   const last = Math.max(0, symbol.frames - 1);
   // The selection as layers (in the order they are listed) and frames; kept in a ref for the shortcuts.
@@ -168,20 +181,22 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
   })();
   const cells = symbol.frames + 12;
 
-  // Folder nesting (Animate's parentLayerIndex): a layer's depth, and whether a closed folder hides it.
-  const rows = useMemo(() => symbol.layers.map((layer, index) => {
+  // The layers as arranged, with their folder depth, and whether a closed folder hides them.
+  const parentById = new Map(viewRows.map((row) => [row.id, row.parent] as const));
+  const typeById = new Map(viewRows.map((row) => [row.id, row.type] as const));
+  const rows = useMemo(() => viewRows.map((row) => {
     let depth = 0;
     let folded = false;
-    for (let parent = layer.parent; parent != null && depth < 20; parent = symbol.layers[parent]?.parent) {
-      if (symbol.layers[parent]?.type === "folder") { depth += 1; if (closed.has(parent)) folded = true; }
+    for (let parent = row.parent; parent != null && depth < 20; parent = parentById.get(parent) ?? null) {
+      if (typeById.get(parent) === "folder") { depth += 1; if (closed.has(parent)) folded = true; }
     }
     // A masked / guided layer sits indented under its mask or guide.
-    if (layer.parent != null && ["mask", "guide"].includes(symbol.layers[layer.parent]?.type)) depth += 1;
-    return { layer, index, depth, folded };
-  }).filter((row) => !row.folded), [closed, symbol.layers]);
+    if (row.parent != null && ["mask", "guide"].includes(typeById.get(row.parent) || "")) depth += 1;
+    return { layer: row.layer, index: row.id, depth, folded, name: row.name, extra: row.extra };
+  }).filter((row) => !row.folded), [closed, viewRows]); // eslint-disable-line react-hooks/exhaustive-deps
   rowsRef.current = rows.map((row) => row.index);
   const hiddenByFolder = (index: number) => {
-    for (let parent = symbol.layers[index]?.parent; parent != null; parent = symbol.layers[parent]?.parent) if (hidden.has(parent)) return true;
+    for (let parent = parentById.get(index) ?? null; parent != null; parent = parentById.get(parent) ?? null) if (hiddenSet.has(parent)) return true;
     return false;
   };
 
@@ -285,6 +300,72 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
     window.addEventListener("keydown", key, true);
     return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("keydown", key, true); };
   }, [menu]);
+  // ---- Layers: pick (Shift / ⌘ for several), rename, hide, lock, reorder by dragging, new layer / folder, delete.
+  const [layerPick, setLayerPick] = useState<Set<number>>(new Set());
+  const [renaming, setRenaming] = useState<number | null>(null);
+  const [dropAt, setDropAt] = useState<{ id: number; where: "before" | "after" | "into" } | null>(null);
+  const dropRef = useRef<typeof dropAt>(null);
+  const idsFor = (id: number) => (layerPick.has(id) ? [...layerPick] : [id]);
+  const pickLayer = (event: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }, id: number) => {
+    const order = rowsRef.current;
+    if (event.shiftKey && layerSel != null && order.includes(layerSel)) {
+      const a = order.indexOf(layerSel), b = order.indexOf(id);
+      setLayerPick(new Set(order.slice(Math.min(a, b), Math.max(a, b) + 1)));
+    } else if (event.metaKey || event.ctrlKey) {
+      setLayerPick((current) => { const next = new Set(current.size ? current : layerSel != null ? [layerSel] : []); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+      setLayerSel(id);
+    } else { setLayerPick(new Set([id])); setLayerSel(id); }
+    onSelectLayer(id);
+  };
+  const renameLayer = (id: number, value: string, fileName: string) => {
+    setRenaming(null);
+    const text = value.trim();
+    onLayerEdit((current) => {
+      const names = { ...(current.names || {}) };
+      if (!text || (text === fileName && id < EXTRA_BASE)) delete names[String(id)]; else names[String(id)] = text;
+      const extras = id >= EXTRA_BASE ? (current.extras || []).map((extra) => (extra.id === id && text ? { ...extra, name: text } : extra)) : current.extras;
+      return { ...current, names, extras };
+    });
+  };
+  const beginLayerDrag = (event: ReactPointerEvent<HTMLElement>, id: number) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button,input")) return;
+    const startY = event.clientY, ids = idsFor(id);
+    let active = false;
+    const move = (moveEvent: PointerEvent) => {
+      if (!active) { if (Math.abs(moveEvent.clientY - startY) < 5) return; active = true; document.body.classList.add("cb-dragging-layer"); }
+      const row = (document.elementFromPoint(moveEvent.clientX, moveEvent.clientY) as HTMLElement | null)?.closest("[data-symbol-row]");
+      if (!row) { dropRef.current = null; setDropAt(null); return; }
+      const target = Number(row.getAttribute("data-symbol-row")), box = row.getBoundingClientRect(), y = (moveEvent.clientY - box.top) / box.height;
+      const where = typeById.get(target) === "folder" && y > 0.3 && y < 0.7 ? "into" : y < 0.5 ? "before" : "after";
+      dropRef.current = ids.includes(target) ? null : { id: target, where };
+      setDropAt(dropRef.current);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.classList.remove("cb-dragging-layer");
+      const drop = dropRef.current;
+      dropRef.current = null;
+      setDropAt(null);
+      if (!active || !drop) return;
+      const next = moveLayers(symbol.layers, layerEdit, ids, drop.id, drop.where);
+      if (!next) onNotice?.("A mask and the layers it masks stay together: they can't be moved, or dropped into, one by one.");
+      else onLayerEdit(() => next);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  const deleteLayers = () => {
+    const picked = layerPick.size ? [...layerPick] : layerSel != null ? [layerSel] : [];
+    if (!picked.length) return;
+    if (picked.some((id) => lockedTogether(symbol.layers, layerEdit, id))) { onNotice?.("A mask and the layers it masks go together: delete them as a block."); return; }
+    const all = new Set<number>(picked);
+    picked.forEach((id) => descendants(symbol.layers, layerEdit, id).forEach((below) => all.add(below)));
+    onLayerEdit((current) => ({ ...current, deleted: [...new Set([...(current.deleted || []), ...all])] }));
+    setLayerPick(new Set());
+    setLayerSel(null);
+    onSelectLayer(null);
+  };
   const labels = Array.from({ length: Math.floor(cells / 5) }, (_, index) => (index + 1) * 5);
 
   return (
@@ -332,8 +413,8 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
           <span className="cb-symbol-counter">{frame + 1} / {symbol.frames}</span>
         </div>
       </div>
-      {keySel && symbol.layers[keySel.layer] && (() => {
-        const layer = symbol.layers[keySel.layer];
+      {keySel && layerAt(keySel.layer) && (() => {
+        const layer = layerAt(keySel.layer) as FlaLayer;
         const edit = values?.[`${keySel.layer}:${keySel.frame}`];
         const file = keyValues && keyValues.layer === keySel.layer && keyValues.frame === keySel.frame ? keyValues.values : null;
         const now = file ? { ...file, ...(edit?.v || {}) } as Record<string, number> : null;
@@ -361,25 +442,39 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
       </div>
       <div className="cb-symbol-grid" ref={scrollRef}>
         <div className="cb-symbol-head">
-          <div className="cb-symbol-head-name">{symbol.layers.length} layers · {short(symbol.name)}</div>
+          <div className="cb-symbol-head-name">
+            <span title={symbol.name}>{rows.length} layers · {short(symbol.name)}</span>
+            <span className="cb-symbol-layer-tools">
+              <button type="button" onClick={() => onLayerEdit((current) => addLayer(symbol.layers, current, "normal", layerSel))} title="New layer (an empty one, above the layer picked)" aria-label="New layer"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg></button>
+              <button type="button" onClick={() => onLayerEdit((current) => addLayer(symbol.layers, current, "folder", layerSel))} title="New folder (drag layers into it)" aria-label="New folder"><LayerIcon type="folder" open={false} /></button>
+              <button type="button" onClick={deleteLayers} disabled={!layerPick.size && layerSel == null} title="Delete the picked layers (they are hidden for good; Undo brings them back)" aria-label="Delete layer"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.5 8.5h5l.5-8.5" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
+              {layerEdit && <button type="button" onClick={() => onLayerEdit(() => null)} title="Put the layers back as the .fla has them" aria-label="Reset layers">↺</button>}
+            </span>
+          </div>
           <div className="cb-symbol-ruler" style={{ width: cells * CELL }} onPointerDown={scrub} role="slider" aria-label="Frame" aria-valuemin={1} aria-valuemax={symbol.frames} aria-valuenow={frame + 1}>
             {labels.map((label) => <span key={label} style={{ left: (label - 1) * CELL + CELL / 2 }}>{label}</span>)}
             <i className="cb-symbol-end" style={{ left: symbol.frames * CELL }} aria-hidden="true" />
             <b className="cb-symbol-ruler-head" style={{ left: frame * CELL, width: CELL }} aria-hidden="true" />
           </div>
         </div>
-        {rows.map(({ layer, index, depth }) => {
-          const shown = !hidden.has(index) && !hiddenByFolder(index);
+        {rows.map(({ layer, index, depth, name }) => {
+          const shown = !hiddenSet.has(index) && !hiddenByFolder(index), locked = lockedSet.has(index);
           return (
-            <div key={index} data-symbol-row={index} className={`cb-symbol-row ${shown ? "" : "is-hidden"} ${layer.type === "folder" ? "is-folder" : ""} ${layerSel === index || (pickedProp && layer.props?.includes(pickedProp)) ? "is-selected" : ""}`}>
-              <div className="cb-symbol-layer" style={{ paddingLeft: 6 + depth * 14 }} onClick={(event) => { if ((event.target as HTMLElement).closest("button")) return; setLayerSel(index); onSelectLayer(index); }} title={`${layer.name}${layer.type !== "normal" ? ` (${layer.type} layer)` : ""}${layer.hidden ? " · hidden in Animate" : ""}${layer.locked ? " · locked in Animate" : ""}`}>
+            <div key={index} data-symbol-row={index} className={`cb-symbol-row ${shown ? "" : "is-hidden"} ${locked ? "is-locked" : ""} ${layer.type === "folder" ? "is-folder" : ""} ${layerSel === index || layerPick.has(index) || (pickedProp && layer.props?.includes(pickedProp)) ? "is-selected" : ""} ${dropAt?.id === index ? `drop-${dropAt.where}` : ""}`}>
+              <div className="cb-symbol-layer" style={{ paddingLeft: 6 + depth * 14 }} onPointerDown={(event) => beginLayerDrag(event, index)} onClick={(event) => { if ((event.target as HTMLElement).closest("button,input")) return; pickLayer(event, index); }} title={`${name}${layer.type !== "normal" ? ` (${layer.type} layer)` : ""}${layer.hidden ? " · hidden in Animate" : ""}${layer.locked ? " · locked in Animate" : ""} · drag to reorder, double-click to rename`}>
                 {layer.type === "folder"
-                  ? <button type="button" className="cb-symbol-fold" onClick={() => setClosed((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} aria-label={closed.has(index) ? `Open ${layer.name}` : `Close ${layer.name}`} aria-expanded={!closed.has(index)}><LayerIcon type="folder" open={!closed.has(index)} /></button>
+                  ? <button type="button" className="cb-symbol-fold" onClick={() => setClosed((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} aria-label={closed.has(index) ? `Open ${name}` : `Close ${name}`} aria-expanded={!closed.has(index)}><LayerIcon type="folder" open={!closed.has(index)} /></button>
                   : <span className="cb-symbol-type"><LayerIcon type={layer.type} open /></span>}
-                <span className="cb-symbol-layer-name">{layer.name}</span>
+                {renaming === index
+                  ? <input className="cb-symbol-rename" autoFocus defaultValue={name} aria-label="Layer name" onFocus={(event) => event.target.select()} onPointerDown={(event) => event.stopPropagation()}
+                      onBlur={(event) => renameLayer(index, event.target.value, index < EXTRA_BASE ? symbol.layers[index]?.name || "" : "")}
+                      onKeyDown={(event) => { event.stopPropagation(); if (event.key === "Enter") event.currentTarget.blur(); else if (event.key === "Escape") setRenaming(null); }} />
+                  : <span className="cb-symbol-layer-name" onDoubleClick={() => setRenaming(index)}>{name}</span>}
                 {layer.color && <i className="cb-symbol-swatch" style={{ borderColor: layer.color }} aria-hidden="true" />}
-                <button type="button" className={`cb-symbol-eye ${shown ? "" : "off"}`} onClick={() => onToggleLayer(index)} aria-pressed={!shown}
-                  aria-label={`${shown ? "Hide" : "Show"} ${layer.name}`} title={`${shown ? "Hide" : "Show"} this layer on the stage (not saved)`}><EyeIcon shown={shown} /></button>
+                <button type="button" className={`cb-symbol-eye ${shown ? "" : "off"}`} onClick={() => onLayerEdit((current) => ({ ...current, hidden: toggled(current.hidden, idsFor(index)) }))} aria-pressed={!shown}
+                  aria-label={`${shown ? "Hide" : "Show"} ${name}`} title={`${shown ? "Hide" : "Show"} this layer (saved with the character, also in exports)`}><EyeIcon shown={shown} /></button>
+                <button type="button" className={`cb-symbol-lock ${locked ? "on" : ""}`} onClick={() => onLayerEdit((current) => ({ ...current, locked: toggled(current.locked, idsFor(index)) }))} aria-pressed={locked}
+                  aria-label={`${locked ? "Unlock" : "Lock"} ${name}`} title={locked ? "Unlock this layer" : "Lock this layer: its parts and keyframes can't be edited"}><LockIcon on={locked} /></button>
               </div>
               <div className="cb-symbol-lane" style={{ width: cells * CELL }}
                 onPointerDown={(event) => {
@@ -387,7 +482,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, hidden,
                   const keyframe = shownFrames(layer, anchorsOf(index)).find((item) => at >= item.i && at < item.i + item.d);
                   setPicked(keyframe && layer.type !== "folder" ? { layer: index, i: keyframe.i } : null);
                   if (keyframe && layer.type !== "folder" && !keyframe.added) { setLayerSel(index); selectKey({ layer: index, frame: keyframe.source.i }); }
-                  if (layer.type !== "folder") beginFrameSelect(event, index); else scrub(event);
+                  if (layer.type !== "folder" && !locked) beginFrameSelect(event, index); else scrub(event);
                 }}
                 onContextMenu={(event) => {
                   if (layer.type === "folder") return;
