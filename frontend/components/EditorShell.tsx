@@ -3606,6 +3606,14 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (!level) return;
     setLayerEdit((current) => addSymbolLayer(level.data.layers, current, name, above));
   }, [setLayerEdit, symbolLevelNow]);
+  /** New layer from a library picture (Backgrounds / FX): the picture's URL and size are saved, the player loads it. */
+  const addLibraryPicture = useCallback(async (item: MediaLibraryItem, above: number | null) => {
+    const level = symbolLevelNow;
+    if (!level) return;
+    const size = await readUrlImageDimensions(item.url);
+    const image = { url: item.url, w: size.width || 300, h: size.height || 300, name: item.name };
+    setLayerEdit((current) => addSymbolLayer(level.data.layers, current, image, above));
+  }, [setLayerEdit, symbolLevelNow]);
   symbolDuplicateRef.current = () => {
     const level = symbolLevelNow;
     if (!symbolView || !pickedProp || !level) return false;
@@ -5272,6 +5280,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 onDuplicateLayers={duplicateSymbolLayers}
                 onListLibrary={listPoseLibrary}
                 onAddSymbol={addLibrarySymbol}
+                onAddPicture={(item, above) => void addLibraryPicture(item, above)}
                 onNotice={showNotice}
                 eases={object?.symbolEases?.[current.js]}
                 keys={object?.symbolKeys?.[current.js]}

@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useMediaLibrary } from "@/lib/useMediaLibrary";
+import type { MediaLibraryItem } from "@/lib/mediaLibrary";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { EaseControl } from "@/components/Timeline";
 import type { SymbolEaseEdit, SymbolKeyEdit, SymbolLayerEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
@@ -95,7 +97,7 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onAddPicture, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -108,6 +110,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   /** Library symbols of the pose (names), and adding one on a new layer. */
   onListLibrary?: () => Promise<string[]>;
   onAddSymbol?: (name: string, above: number | null) => void;
+  onAddPicture?: (item: MediaLibraryItem, above: number | null) => void;
   onLayerEdit: (change: (edit: SymbolLayerEdit) => SymbolLayerEdit | null) => void;
   onNotice?: (text: string) => void;
   /** This symbol's edited eases, by "<layer index>:<keyframe>". */
@@ -562,9 +565,32 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
               ))}
               {!libNames.length && <span className="cb-symbol-lib-empty">No symbols in this pose's library.</span>}
             </div>
+            {onAddPicture && <PoseLibraryPictures filter={libFilter} onPick={(item) => { setLibMenu(null); onAddPicture(item, layerSel); }} />}
           </div>
         </>
       )}
     </section>
+  );
+}
+
+/** Pictures of the Backgrounds and FX libraries, for a new layer in a pose. */
+function PoseLibraryPictures({ filter, onPick }: { filter: string; onPick: (item: MediaLibraryItem) => void }) {
+  const backgrounds = useMediaLibrary("backgrounds"), fx = useMediaLibrary("fx");
+  const query = filter.toLowerCase();
+  const items = [...fx.items, ...backgrounds.items].filter((item) => !query || item.name.toLowerCase().includes(query) || item.category.toLowerCase().includes(query)).slice(0, 60);
+  if (!items.length) return null;
+  return (
+    <>
+      <div className="cb-symbol-lib-title">Pictures</div>
+      <div className="cb-symbol-lib-pics">
+        {items.map((item) => (
+          <button key={`${item.type}-${item.id}`} type="button" role="menuitem" title={`${item.name} (${item.category})`} onClick={() => onPick(item)}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={item.previewUrl || item.url} alt="" loading="lazy" />
+            <span>{item.name}</span>
+          </button>
+        ))}
+      </div>
+    </>
   );
 }

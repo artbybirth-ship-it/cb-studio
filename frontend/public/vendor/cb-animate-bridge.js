@@ -1449,10 +1449,28 @@
   }
   // New layer from the pose's library (clones: [{ of: '', symbol: <library class>, prop }]): one instance of the symbol, centred on the
   // stage, held by one keyframe for the whole pose, on top of the file's layers.
+  function pictureObject(image) {
+    // A picture is a container with the image inside, sized to fit about 40% of the stage and centred on the container's origin.
+    var box = new createjs.Container(), iw = Math.max(1, image.w || 100), ih = Math.max(1, image.h || 100);
+    var fit = Math.min(1, (H * 0.4) / ih, (W * 0.4) / iw), pw = iw * fit, ph = ih * fit;
+    box.nominalBounds = new createjs.Rectangle(-pw / 2, -ph / 2, pw, ph);
+    box.setBounds(-pw / 2, -ph / 2, pw, ph);
+    var img = new Image();
+    img.onload = function () {
+      var bmp = new createjs.Bitmap(img), k = pw / (img.naturalWidth || iw);
+      bmp.scaleX = bmp.scaleY = k; bmp.x = -pw / 2; bmp.y = -ph / 2;
+      box.addChild(bmp);
+      var st = cbStage(); if (st && st.update) st.update();
+      cbPost('SYMBOL_PICTURE_READY', { url: image.url });
+    };
+    img.src = image.url;
+    return box;
+  }
   function addLibraryLayer(w, touched) {
-    var Ctor = libSymbol(w.symbol);
-    if (!Ctor) return;
-    var obj = new Ctor(), total = Math.max(1, w.clip.timeline.duration || w.clip.totalFrames || 1), x = 0, y = 0;
+    var obj, Ctor = w.symbol ? libSymbol(w.symbol) : null;
+    if (w.symbol && !Ctor) return;
+    obj = w.symbol ? new Ctor() : pictureObject(w.image);
+    var total = Math.max(1, w.clip.timeline.duration || w.clip.totalFrames || 1), x = 0, y = 0;
     try { var b = obj.nominalBounds || (obj.getBounds && obj.getBounds()); if (b) { x = W / 2 - (b.x + b.width / 2); y = H / 2 - (b.y + b.height / 2); } } catch (e) {}
     var made = createjs.Tween.get(obj).to({ x: x, y: y, scaleX: 1, scaleY: 1, skewX: 0, skewY: 0, alpha: 1 }, 0);
     if (total > 1) made.wait(total - 1);
@@ -1461,7 +1479,7 @@
     if (from >= 0) list.splice(from, 1);
     list.unshift(made);
     w.clip[w.prop] = obj;
-    cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: w.symbol, obj: obj, tweens: [made] });
+    cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: w.symbol, image: w.image ? w.image.url : '', obj: obj, tweens: [made] });
     touched.add(w.clip);
   }
   function postLibrary(d) {
@@ -1475,11 +1493,11 @@
     var want = [];
     Object.keys(specs || {}).forEach(function (name) {
       var list = (specs[name] || {}).clones || [];
-      if (list.length) clipsOfClass(name).forEach(function (clip) { list.forEach(function (c) { want.push({ clip: clip, of: c.of, prop: c.prop, symbol: c.symbol || '' }); }); });
+      if (list.length) clipsOfClass(name).forEach(function (clip) { list.forEach(function (c) { want.push({ clip: clip, of: c.of, prop: c.prop, symbol: c.symbol || '', image: c.image || null }); }); });
     });
     var changed = false;
     cbClones = cbClones.filter(function (made) {
-      if (want.some(function (w) { return w.clip === made.clip && w.prop === made.prop && w.of === made.of && w.symbol === made.symbol; })) return true;
+      if (want.some(function (w) { return w.clip === made.clip && w.prop === made.prop && w.of === made.of && w.symbol === made.symbol && (w.image ? w.image.url : '') === (made.image || ''); })) return true;
       var list = made.clip.timeline.tweens;
       made.tweens.forEach(function (tw) { var at = list.indexOf(tw); if (at >= 0) list.splice(at, 1); });
       try { made.clip.removeChild(made.obj); if (made.clip._managed) delete made.clip._managed[made.obj.id]; } catch (e) {}
@@ -1490,7 +1508,7 @@
     });
     want.forEach(function (w) {
       if (cbClones.some(function (made) { return made.clip === w.clip && made.prop === w.prop; })) return;
-      if (w.symbol) { addLibraryLayer(w, touched); changed = true; return; }
+      if (w.symbol || w.image) { addLibraryLayer(w, touched); changed = true; return; }
       var src = w.clip[w.of], Ctor = src && libSymbol(protoNames().get(Object.getPrototypeOf(src)) || '');
       if (!Ctor) return;
       var obj = new Ctor(src.mode, src.startPosition, src.loop), list = w.clip.timeline.tweens, own = [];
@@ -1500,7 +1518,7 @@
       own.forEach(function (tw) { var from = list.indexOf(tw); if (from >= 0) list.splice(from, 1); });
       list.splice(at >= 0 ? at : 0, 0, ...own);
       w.clip[w.prop] = obj;
-      cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: '', obj: obj, tweens: own });
+      cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: '', image: '', obj: obj, tweens: own });
       touched.add(w.clip);
       changed = true;
     });

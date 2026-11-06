@@ -96,7 +96,7 @@ export function addLayer(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, 
 }
 
 /** What the player is told: the file layers' objects top to bottom, and the objects to hide (hidden, deleted, or under a hidden folder). */
-export function playerSpec(layers: FlaLayer[], edit: SymbolLayerEdit): { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string; symbol?: string }> } {
+export function playerSpec(layers: FlaLayer[], edit: SymbolLayerEdit): { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string; symbol?: string; image?: PoseImage }> } {
   const ids = orderOf(layers, edit), gone = new Set([...(edit.hidden || []), ...(edit.deleted || [])]);
   const hiddenIds = ids.filter((id) => {
     for (let up: number | null = id, guard = 0; up != null && guard < 30; up = parentOf(layers, edit, up), guard += 1) if (gone.has(up)) return true;
@@ -104,7 +104,7 @@ export function playerSpec(layers: FlaLayer[], edit: SymbolLayerEdit): { order?:
   });
   const withParts = ids.filter((id) => id < EXTRA_BASE && layers[id]?.props?.length);
   const moved = edit.order && edit.order.length > 0;
-  const clones = (edit.clones || []).map((clone) => (clone.symbol ? { of: "", prop: clone.prop, symbol: clone.symbol } : { of: layers[clone.of]?.props?.[0] || "", prop: clone.prop })).filter((clone) => clone.of || clone.symbol);
+  const clones = (edit.clones || []).map((clone) => (clone.symbol || clone.image ? { of: "", prop: clone.prop, symbol: clone.symbol, image: clone.image } : { of: layers[clone.of]?.props?.[0] || "", prop: clone.prop })).filter((clone) => clone.of || clone.symbol || clone.image);
   return { order: moved ? withParts.map((id) => layers[id].props as string[]) : undefined, hidden: hiddenIds.flatMap((id) => (id < EXTRA_BASE ? layers[id]?.props || [] : [])), clones: clones.length ? clones : undefined };
 }
 
@@ -113,8 +113,9 @@ export function withClones(data: FlaSymbol, clones?: SymbolClone[]): FlaSymbol {
   if (!clones?.length) return data;
   const layers = [...data.layers];
   clones.forEach((clone) => {
-    if (clone.symbol) {
-      layers.push({ name: clone.symbol.replace(/(?:copy\d*|_\d+)+$/i, "") || "Layer", type: "normal", props: [clone.prop], frames: [{ i: 0, d: Math.max(1, data.frames), symbols: [{ name: clone.symbol }] }] });
+    if (clone.symbol || clone.image) {
+      const name = clone.image ? clone.image.name || "Picture" : clone.symbol!.replace(/(?:copy\d*|_\d+)+$/i, "") || "Layer";
+      layers.push({ name, type: "normal", props: [clone.prop], frames: [{ i: 0, d: Math.max(1, data.frames), ...(clone.image ? { bitmaps: 1 } : { symbols: [{ name: clone.symbol! }] }) }] });
       return;
     }
     const source = layers[clone.of];
@@ -125,14 +126,15 @@ export function withClones(data: FlaSymbol, clones?: SymbolClone[]): FlaSymbol {
   return { ...data, layers };
 }
 
-export type SymbolClone = { of: number; prop: string; symbol?: string };
+export type PoseImage = { url: string; w: number; h: number; name: string };
+export type SymbolClone = { of: number; prop: string; symbol?: string; image?: PoseImage };
 
 /** A new layer holding one instance of a library symbol (a keyframe over the whole pose), above the layer picked (or on top). */
-export function addSymbolLayer(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, symbol: string, above?: number | null): SymbolLayerEdit {
+export function addSymbolLayer(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, symbol: string | PoseImage, above?: number | null): SymbolLayerEdit {
   const base = edit || {}, clones = [...(base.clones || [])];
   const used = clones.reduce((top, clone) => Math.max(top, Number(clone.prop.replace(/\D+/g, "")) || 0), 0);
   const index = layers.length, order = orderOf(layers, edit), parents = { ...(base.parents || {}) };
-  clones.push({ of: -1, prop: `cbnew${used + 1}`, symbol });
+  clones.push(typeof symbol === "string" ? { of: -1, prop: `cbnew${used + 1}`, symbol } : { of: -1, prop: `cbnew${used + 1}`, image: symbol });
   const at = above != null && order.includes(above) ? order.indexOf(above) : 0;
   parents[String(index)] = above != null ? parentOf(layers, edit, above) : null;
   return { ...base, clones, order: [...order.slice(0, at), index, ...order.slice(at)], parents };

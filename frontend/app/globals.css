@@ -3539,3 +3539,9 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 .cb-symbol-lib-list{max-height:280px;overflow:auto}
 .cb-symbol-lib-list button{height:28px;padding:0 8px}
 .cb-symbol-lib-empty{display:block;padding:8px;color:#8a8a8a;font-size:12px}
+
+.cb-symbol-lib-title{margin:6px 4px 2px;color:#8a8a8a;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.cb-symbol-lib-pics{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;max-height:220px;overflow:auto}
+.cb-frame-menu .cb-symbol-lib-pics button{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:2px;height:auto;padding:4px}
+.cb-symbol-lib-pics img{width:100%;height:52px;object-fit:contain;background:#1d1d1d;border-radius:4px}
+.cb-symbol-lib-pics span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#bbb}
