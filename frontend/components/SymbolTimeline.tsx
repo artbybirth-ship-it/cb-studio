@@ -97,7 +97,7 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onAddPicture, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onAddPicture, onUploadPicture, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -111,6 +111,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   onListLibrary?: () => Promise<string[]>;
   onAddSymbol?: (name: string, above: number | null) => void;
   onAddPicture?: (item: MediaLibraryItem, above: number | null) => void;
+  onUploadPicture?: (file: File, above: number | null) => void;
   onLayerEdit: (change: (edit: SymbolLayerEdit) => SymbolLayerEdit | null) => void;
   onNotice?: (text: string) => void;
   /** This symbol's edited eases, by "<layer index>:<keyframe>". */
@@ -565,6 +566,12 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
               ))}
               {!libNames.length && <span className="cb-symbol-lib-empty">No symbols in this pose's library.</span>}
             </div>
+            {onUploadPicture && (
+              <label className="cb-symbol-lib-upload">
+                Upload a picture…
+                <input type="file" accept="image/*" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) { setLibMenu(null); onUploadPicture(file, layerSel); } }} />
+              </label>
+            )}
             {onAddPicture && <PoseLibraryPictures filter={libFilter} onPick={(item) => { setLibMenu(null); onAddPicture(item, layerSel); }} />}
           </div>
         </>

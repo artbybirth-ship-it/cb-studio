@@ -3545,3 +3545,4 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 .cb-frame-menu .cb-symbol-lib-pics button{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:2px;height:auto;padding:4px}
 .cb-symbol-lib-pics img{width:100%;height:52px;object-fit:contain;background:#1d1d1d;border-radius:4px}
 .cb-symbol-lib-pics span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#bbb}
+.cb-symbol-lib-upload{display:block;margin:4px 0;padding:6px 8px;border-radius:6px;color:#e2e2e2;font-size:12px;cursor:pointer}.cb-symbol-lib-upload:hover{background:#3d4675}

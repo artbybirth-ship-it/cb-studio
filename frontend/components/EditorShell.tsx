@@ -3614,6 +3614,18 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const image = { url: item.url, w: size.width || 300, h: size.height || 300, name: item.name };
     setLayerEdit((current) => addSymbolLayer(level.data.layers, current, image, above));
   }, [setLayerEdit, symbolLevelNow]);
+  /** New layer from a picture file from the computer: it is stored with the project, like Import to Stage. */
+  const uploadPosePicture = useCallback(async (file: File, above: number | null) => {
+    const level = symbolLevelNow;
+    if (!level || !project) return;
+    if (!file.type.startsWith("image/")) { showNotice("Pick a picture file.", "error"); return; }
+    try {
+      const size = await readImageDimensions(file);
+      const asset = await api.uploadAsset(project.id, "background", file);
+      const image = { url: asset.url, w: size.width || 300, h: size.height || 300, name: file.name };
+      setLayerEdit((current) => addSymbolLayer(level.data.layers, current, image, above));
+    } catch (error) { showNotice(error instanceof Error ? error.message : "Upload failed", "error"); }
+  }, [project, setLayerEdit, showNotice, symbolLevelNow]);
   symbolDuplicateRef.current = () => {
     const level = symbolLevelNow;
     if (!symbolView || !pickedProp || !level) return false;
@@ -5281,6 +5293,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 onListLibrary={listPoseLibrary}
                 onAddSymbol={addLibrarySymbol}
                 onAddPicture={(item, above) => void addLibraryPicture(item, above)}
+                onUploadPicture={(file, above) => void uploadPosePicture(file, above)}
                 onNotice={showNotice}
                 eases={object?.symbolEases?.[current.js]}
                 keys={object?.symbolKeys?.[current.js]}
