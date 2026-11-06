@@ -108,3 +108,13 @@ export function skewPart(info: PartInfo, edge: SkewEdge, start: Pt, now: Pt) {
   const q: Pt = horizontal ? [x + width / 2, anchorAt] : [anchorAt, y + height / 2];
   return { ...toScaleSkew(next, info), ...keepPoint(info, next, q) };
 }
+
+/** Flipping the part as seen on the stage (left–right or top–bottom) about the middle of its box: the middle stays where it is. */
+export function flipPart(info: PartInfo, axis: "h" | "v") {
+  const parent = basisOf(info), flip: Mat = axis === "h" ? [-1, 0, 0, 1] : [1, 0, 0, -1];
+  const next = mul(inverse(parent), mul(flip, mul(parent, matrixOf(info))));
+  const det = next[0] * next[3] - next[1] * next[2];
+  const flipY = info.sy < 0 ? -1 : 1, flipX = (det < 0 ? -1 : 1) * flipY;
+  const centre: Pt = [info.bounds.x + info.bounds.width / 2, info.bounds.y + info.bounds.height / 2];
+  return { ...toScaleSkew(next, { sx: flipX, sy: flipY }), ...keepPoint(info, next, centre) };
+}

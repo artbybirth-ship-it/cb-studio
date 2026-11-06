@@ -78,6 +78,22 @@ export function moveLayers(layers: FlaLayer[], edit: SymbolLayerEdit | undefined
   return { ...base, order: rest, parents };
 }
 
+/** Puts these layers into a new folder (where the top one was). Null when a mask layer is among them. */
+export function groupLayers(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, ids: number[]): SymbolLayerEdit | null {
+  const order = orderOf(layers, edit), picked = order.filter((id) => ids.includes(id));
+  if (!picked.length) return null;
+  const withFolder = addLayer(layers, edit, "folder", picked[0]);
+  const folder = withFolder.extras![withFolder.extras!.length - 1].id;
+  return moveLayers(layers, withFolder, picked, folder, "into");
+}
+
+/** Takes the layers out of a folder (they go to the folder's own parent) and removes the folder. */
+export function ungroupLayer(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, folder: number): SymbolLayerEdit {
+  const base = edit || {}, parents = { ...(base.parents || {}) }, above = parentOf(layers, edit, folder);
+  orderOf(layers, edit).forEach((id) => { if (parentOf(layers, edit, id) === folder) parents[String(id)] = above; });
+  return { ...base, parents, deleted: [...new Set([...(base.deleted || []), folder])] };
+}
+
 export const toggled = (list: number[] | undefined, ids: number[]) => {
   const have = new Set(list || []), all = ids.every((id) => have.has(id));
   ids.forEach((id) => (all ? have.delete(id) : have.add(id)));

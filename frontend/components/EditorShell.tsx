@@ -16,8 +16,8 @@ import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsert
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, keyframeAt, removeFrames, shownFrames, spanAt, type Anchor } from "@/lib/symbolKeys";
-import { addSymbolLayer, duplicateLayers, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
-import { canTransform, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
+import { addSymbolLayer, duplicateLayers, groupLayers, parentOf, ungroupLayer, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
+import { canTransform, flipPart, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolLayerEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
@@ -1687,6 +1687,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const symbolNudgeRef = useRef<((dx: number, dy: number) => boolean) | null>(null);
   const symbolDeleteRef = useRef<(() => boolean) | null>(null);
   const symbolDuplicateRef = useRef<(() => boolean) | null>(null);
+  const symbolFlipRef = useRef<((axis: "h" | "v") => boolean) | null>(null);
+  const symbolGroupRef = useRef<((ungroup: boolean) => boolean) | null>(null);
+  const symbolPivotResetRef = useRef<(() => boolean) | null>(null);
   frameActionRef.current = frameAction;
 
   // Drag a keyframe to another frame (Animate). Frames extend to follow it past either end;
@@ -2840,6 +2843,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   const transformReadRef = useRef<() => TransformReading | null>(() => null);
   transformReadRef.current = () => {
+    if (symbolView && pickedProp) {
+      // Inside a pose: the picked part's own numbers (position in the pose, size in %, turn and skew in degrees).
+      const info = partInfoRef.current, level = symbolLevelNow;
+      if (!info || !canTransform(info) || info.prop !== pickedProp) return null;
+      const layer = level?.data.layers.find((item) => (item.props || []).includes(pickedProp));
+      return {
+        mode: "part", targetLabel: `${symbolObjectNow?.name || "Character"} › ${layer?.name || pickedProp}`, scaleStrokesAvailable: false,
+        values: { x: info.x, y: info.y, w: info.sx * 100, h: info.sy * 100, rotation: info.sky, skew: info.skx - info.sky },
+      };
+    }
     const target = transformTarget();
     if (!target) return null;
     if (target.kind === "part") {
@@ -2859,6 +2872,32 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const readTransform = useCallback(() => transformReadRef.current(), []);
   const transformChangeRef = useRef<(field: TransformField, value: number) => void>(() => undefined);
   transformChangeRef.current = (field, value) => {
+    if (symbolView && pickedProp) {
+      const info = partInfoRef.current;
+      if (!info || !canTransform(info) || !Number.isFinite(value)) return;
+      const plan = planPartEdit(pickedProp);
+      if (!plan) return;
+      const r = (v: number, digits = 2) => Math.round(v * 10 ** digits) / 10 ** digits;
+      let patch: Partial<Record<SymbolValueKey, number>>, next: Partial<PartInfo>;
+      if (field === "x") { patch = { x: r(value) }; next = { x: value }; }
+      else if (field === "y") { patch = { y: r(value) }; next = { y: value }; }
+      else if (field === "w" || field === "h") {
+        const now = field === "w" ? info.sx : info.sy;
+        if (!value || !now) return;
+        const factor = value / 100 / now;
+        const sx = transformLinked || field === "w" ? info.sx * factor : info.sx, sy = transformLinked || field === "h" ? info.sy * factor : info.sy;
+        patch = { scaleX: r(sx, 4), scaleY: r(sy, 4) }; next = { sx, sy };
+      } else if (field === "rotation") {
+        const turn = value - info.sky;
+        patch = { skewX: r(info.skx + turn), skewY: r(value) }; next = { skx: info.skx + turn, sky: value };
+      } else { patch = { skewX: r(info.sky + value) }; next = { skx: info.sky + value }; }
+      const edit = partEditor(plan);
+      edit.apply(patch);
+      edit.end();
+      partInfoRef.current = { ...info, ...next };
+      setPartInfo(partInfoRef.current);
+      return;
+    }
     const target = transformTarget();
     if (!target || !Number.isFinite(value)) return;
     const limit = (v: number, low: number, high: number) => Math.min(high, Math.max(low, v));
@@ -3653,6 +3692,54 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     setPartInfo(partInfoRef.current);
     return true;
   };
+  // Flip (H left–right, Shift+H top–bottom) turns the picked part over about the middle of its box, as it looks on the stage.
+  symbolFlipRef.current = (axis) => {
+    const info = partInfoRef.current;
+    if (!pickedProp || !info || !canTransform(info)) return false;
+    const plan = planPartEdit(pickedProp);
+    if (!plan) return true;
+    const flipped = flipPart(info, axis), round = (value: number, digits = 2) => Math.round(value * 10 ** digits) / 10 ** digits;
+    const edit = partEditor(plan);
+    edit.apply({ scaleX: round(flipped.scaleX, 4), scaleY: round(flipped.scaleY, 4), skewX: round(flipped.skewX), skewY: round(flipped.skewY), x: round(flipped.x), y: round(flipped.y) });
+    edit.end();
+    partInfoRef.current = { ...info, sx: flipped.scaleX, sy: flipped.scaleY, skx: flipped.skewX, sky: flipped.skewY, x: flipped.x, y: flipped.y };
+    setPartInfo(partInfoRef.current);
+    return true;
+  };
+  // The registration point goes back to the middle of the part's box (the artwork stays).
+  symbolPivotResetRef.current = () => {
+    const info = partInfoRef.current;
+    if (!pickedProp || !info || !canTransform(info)) return false;
+    const plan = planPartEdit(pickedProp);
+    if (!plan) return true;
+    const at: Pt = [info.bounds.x + info.bounds.width / 2, info.bounds.y + info.bounds.height / 2], place = localToParent(info, at);
+    const round = (value: number) => Math.round(value * 100) / 100;
+    const edit = partEditor(plan);
+    edit.apply({ regX: round(at[0]), regY: round(at[1]), x: round(place[0]), y: round(place[1]) });
+    edit.end();
+    partInfoRef.current = { ...info, regX: at[0], regY: at[1], x: place[0], y: place[1] };
+    setPartInfo(partInfoRef.current);
+    return true;
+  };
+  // Cmd+G puts the picked part's layer in a new folder; Cmd+Shift+G takes it out of its folder (the folder goes).
+  symbolGroupRef.current = (ungroup) => {
+    const level = symbolLevelNow;
+    if (!symbolView || !pickedProp || !level) return false;
+    const layers = level.data.layers, index = layers.findIndex((layer) => (layer.props || []).includes(pickedProp));
+    if (index < 0) return false;
+    const current = symbolObjectNow?.symbolLayers?.[level.js];
+    if (ungroup) {
+      const folder = parentOf(layers, current, index);
+      if (folder == null) { showNotice("This layer is not in a folder."); return true; }
+      setLayerEdit((edit) => ungroupLayer(layers, edit, folder));
+      return true;
+    }
+    if (symbolObjectNow?.symbolLayers?.[level.js]?.locked?.includes(index)) { showNotice("This layer is locked."); return true; }
+    let done = false;
+    setLayerEdit((edit) => { const next = groupLayers(layers, edit, [index]); done = Boolean(next); return next || edit; });
+    if (!done) showNotice("This layer can't be put in a folder.");
+    return true;
+  };
   symbolDeleteRef.current = () => {
     const level = symbolLevelNow;
     if (!symbolView || !pickedProp || !level || frameSelectionRef.current) return false;
@@ -4063,6 +4150,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
 
       const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.code === "KeyG" && symbolGroupRef.current?.(event.shiftKey)) { event.preventDefault(); return; }
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && event.code === "KeyH" && !/^(input|textarea|select)$/i.test((event.target as HTMLElement | null)?.tagName || "") && symbolFlipRef.current?.(event.shiftKey ? "v" : "h")) { event.preventDefault(); return; }
       if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "d" && symbolDuplicateRef.current?.()) { event.preventDefault(); return; }
       if (arrows[event.key] && !event.metaKey && !event.ctrlKey && !event.altKey && !/^(input|textarea|select)$/i.test((event.target as HTMLElement | null)?.tagName || "")) {
         // Inside a pose, the arrows nudge the picked part: 1 px, Shift = 10 px.
@@ -5253,10 +5342,14 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 const level = symbolLevelNow, index = level && pickedProp ? level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp)) : -1;
                 if (index < 0) return;
                 if (action === "delete") { symbolDeleteRef.current?.(); return; }
+                if (action === "flipH" || action === "flipV") { symbolFlipRef.current?.(action === "flipH" ? "h" : "v"); return; }
+                if (action === "group" || action === "ungroup") { symbolGroupRef.current?.(action === "ungroup"); return; }
+                if (action === "pivot") { symbolPivotResetRef.current?.(); return; }
                 if (action === "duplicate") { duplicateSymbolLayers([index]); return; }
                 setLayerEdit((current) => (action === "hide" ? { ...current, hidden: toggled(current.hidden, [index]) } : { ...current, locked: toggled(current.locked, [index]) }));
               }}
               symbolBox={symbolBox}
+              onSymbolPivotReset={() => void symbolPivotResetRef.current?.()}
               onEnterSymbol={(id) => void enterSymbol(id)}
               canEnterSymbol={(id) => {
                 const object = draft?.objects.find((item) => item.id === id);

@@ -83,7 +83,8 @@ type Props = {
   /** A click on nothing inside a character: the picked part is dropped. */
   onSymbolDeselect?: () => void;
   /** The right-click menu inside a pose: what to do to the part picked there. */
-  onSymbolContext?: (action: "hide" | "lock" | "delete" | "duplicate") => void;
+  onSymbolContext?: (action: "hide" | "lock" | "delete" | "duplicate" | "flipH" | "flipV" | "group" | "ungroup" | "pivot") => void;
+  onSymbolPivotReset?: () => void;
   /** The picked part's box (its four corners, top left first, and its pivot) as fractions of the player. */
   symbolBox?: { corners: Array<[number, number]>; pivot: [number, number]; editable: boolean } | null;
   /** Inside a character: a double-click on one of its objects (its property name), or elsewhere (null). */
@@ -280,7 +281,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, onSymbolPivotReset, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -3484,7 +3485,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     style={{ left: `calc(${point[0] * 100}% + ${(ox / ol) * 15}px)`, top: `calc(${point[1] * 100}% + ${(oy / ol) * 15}px)` }}
                     onPointerDown={press("rotate")} />;
                 })}
-                <i className={`cb-symbol-pivot${symbolBox.editable ? " movable" : ""}`} style={{ left: `${symbolBox.pivot[0] * 100}%`, top: `${symbolBox.pivot[1] * 100}%` }} aria-hidden="true" title={symbolBox.editable ? "Registration point: drag to move where this part turns and scales from" : undefined} onPointerDown={symbolBox.editable ? press("pivot") : undefined} />
+                <i className={`cb-symbol-pivot${symbolBox.editable ? " movable" : ""}`} style={{ left: `${symbolBox.pivot[0] * 100}%`, top: `${symbolBox.pivot[1] * 100}%` }} aria-hidden="true" title={symbolBox.editable ? "Registration point: drag to move where this part turns and scales from; double-click to put it back in the middle" : undefined} onPointerDown={symbolBox.editable ? press("pivot") : undefined} onDoubleClick={symbolBox.editable ? onSymbolPivotReset : undefined} />
               </div>
             );
           })()}
@@ -3495,6 +3496,11 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: partMenu.x, top: partMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
           {partMenu.hasPart ? <>
             <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("duplicate"); }}>Duplicate Layer<kbd>⌘D</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("flipH"); }}>Flip Horizontal<kbd>H</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("flipV"); }}>Flip Vertical<kbd>⇧H</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pivot"); }}>Reset Registration Point</button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("group"); }}>Group in Folder<kbd>⌘G</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("ungroup"); }}>Ungroup<kbd>⇧⌘G</kbd></button>
             <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("hide"); }}>Hide Layer</button>
             <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("lock"); }}>Lock Layer</button>
             <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("delete"); }}>Delete Layer<kbd>⌫</kbd></button>
