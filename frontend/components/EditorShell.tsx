@@ -805,6 +805,17 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (item) fn(item);
     });
   }, [mutate, selectedObjectId]);
+  // The colour tools' target: the selected layer; inside a pose with a part picked, the character that holds the pose.
+  const [poseOwnerId, setPoseOwnerId] = useState<string | null>(null);
+  const colourItem = useMemo(() => selected || (poseOwnerId ? draft?.objects.find((item) => item.id === poseOwnerId) || null : null), [draft, poseOwnerId, selected]);
+  const mutateColour = useCallback((fn: (item: EditorObject) => void) => {
+    const id = colourItem?.id;
+    if (!id) return;
+    mutate((data) => {
+      const item = data.objects.find((object) => object.id === id);
+      if (item) fn(item);
+    });
+  }, [colourItem?.id, mutate]);
 
   // Shift+Cmd/Ctrl+F opens Find and Replace (Cmd+F is Paste in Front); Esc cancels its canvas eyedropper.
   useEffect(() => {
@@ -887,10 +898,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       });
       return;
     }
-    if (selected?.type !== "character") { showNotice("Select a character first, then click its colours, or click a text layer."); return; }
-    const scope = activeCharacterPart || "*";
+    if (colourItem?.type !== "character") { showNotice("Select a character first, then click its colours, or click a text layer."); return; }
+    const scope = activeCharacterPart || poseColourScope || "*";
     const scopeArg = scope === "*" ? "" : scope;
-    const frame = frameAccessRef.current?.(selected.id);
+    const frame = frameAccessRef.current?.(colourItem.id);
     const rect = frame?.getBoundingClientRect();
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
     type PlayerColours = Window & {
@@ -910,7 +921,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
     } catch { original = ""; }
     if (!original) { showNotice("No character colour there. Click on the character's artwork."); return; }
-    const rules = selected.colorReplacements || [];
+    const rules = colourItem.colorReplacements || [];
     const isTone = (rule: ColorReplacement) => rule.id.startsWith("tone-") && rule.scope === scope;
     // What a colour shows now: its own Light/Dark rule, else what the player draws.
     const currentOf = (from: string, target?: ColorReplacement["target"]) =>
@@ -924,7 +935,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     // back to the original puts them back exactly.
     if (toneStroke) for (const stroke of relatives.strokes) changes.push({ from: stroke, to: shiftLike(stroke, original, after), target: "stroke" });
     if (toneShadow) for (const shadow of relatives.shadows) changes.push({ from: shadow, to: shiftLike(shadow, original, after), target });
-    mutateSelected((item) => {
+    mutateColour((item) => {
       let list = item.colorReplacements || [];
       changes.forEach((change, index) => {
         // The colour clicked keeps one rule, whatever it covered before; the others one per target.
@@ -1084,11 +1095,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // ---- Fill / Stroke boxes (Illustrator). What they hold depends on the selection:
   // text → its colour (no stroke); prop → its fill; nothing (or an empty layer) → the scene
   // background; character → an original colour of its artwork, in the part being edited if any.
-  const boxScope = activeCharacterPart || "*";
-  const characterRulesKey = selected?.type === "character" ? JSON.stringify(selected.colorReplacements || []) : "";
+  // Inside a pose, the colour tools work on the picked part ("@<pose class>/<object>"; set below once the pose view is known).
+  const [poseColourScope, setPoseColourScope] = useState<string | null>(null);
+  const boxScope = activeCharacterPart || poseColourScope || "*";
+  const characterRulesKey = colourItem?.type === "character" ? JSON.stringify(colourItem.colorReplacements || []) : "";
   useEffect(() => {
-    if (selected?.type !== "character") { setBoxPalette(null); return; }
-    const objectId = selected.id, scope = boxScope;
+    if (colourItem?.type !== "character") { setBoxPalette(null); return; }
+    const objectId = colourItem.id, scope = boxScope;
     let cancelled = false;
     const read = () => {
       try {
@@ -1100,20 +1113,20 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     // The player shows new rules a moment after an edit, and may still be loading.
     const timers = [120, 450, 1200, 3000].map((ms) => window.setTimeout(read, ms));
     return () => { cancelled = true; timers.forEach((timer) => window.clearTimeout(timer)); };
-  }, [selected?.id, selected?.type, boxScope, characterRulesKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { setBoxPicking(false); }, [selected?.id]);
+  }, [colourItem?.id, colourItem?.type, boxScope, characterRulesKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setBoxPicking(false); }, [colourItem?.id]);
 
   type BoxState = { kind: "character" | "text" | "prop" | "background" | "none"; fill: string | null; stroke: string | null; fillOriginal?: string; strokeOriginal?: string };
   const boxState: BoxState = (() => {
-    if (!selected || selected.type === "empty") return { kind: "background", fill: normalizeHex(draft?.background) || "#ffffff", stroke: null };
-    if (selected.type === "text") return { kind: "text", fill: normalizeHex(selected.fillColor) || "#ffffff", stroke: null };
-    if (selected.type === "prop") return { kind: "prop", fill: normalizeHex(selected.fillColor) || "#17343a", stroke: null };
-    if (selected.type !== "character") return { kind: "none", fill: null, stroke: null };
-    const entries = boxPalette?.key === `${selected.id}|${boxScope}` ? boxPalette.entries : [];
-    const picks = boxPicks?.objectId === selected.id && boxPicks.scope === boxScope ? boxPicks : null;
+    if (!colourItem || colourItem.type === "empty") return { kind: "background", fill: normalizeHex(draft?.background) || "#ffffff", stroke: null };
+    if (colourItem.type === "text") return { kind: "text", fill: normalizeHex(colourItem.fillColor) || "#ffffff", stroke: null };
+    if (colourItem.type === "prop") return { kind: "prop", fill: normalizeHex(colourItem.fillColor) || "#17343a", stroke: null };
+    if (colourItem.type !== "character") return { kind: "none", fill: null, stroke: null };
+    const entries = boxPalette?.key === `${colourItem.id}|${boxScope}` ? boxPalette.entries : [];
+    const picks = boxPicks?.objectId === colourItem.id && boxPicks.scope === boxScope ? boxPicks : null;
     // What an original colour shows now: the last exact rule for it wins, as in the player.
     const currentOf = (original: string, box: "fill" | "stroke") => {
-      const rule = [...(selected.colorReplacements || [])].reverse().find((item) => item.match !== "shades" && item.from === original
+      const rule = [...(colourItem.colorReplacements || [])].reverse().find((item) => item.match !== "shades" && item.from === original
         && (item.scope === "*" || item.scope === boxScope) && (item.target === "both" || item.target === box));
       return rule?.to || entries.find((entry) => entry.color === original)?.current || original;
     };
@@ -1137,17 +1150,17 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const applyBoxColour = (box: "fill" | "stroke", hex: string, effects?: { stroke: boolean; shadow: boolean }) => {
     if (boxState.kind === "background") mutate((data) => { data.background = hex; });
     else if ((boxState.kind === "text" || boxState.kind === "prop") && box === "fill") mutateSelected((item) => { item.fillColor = hex; });
-    else if (boxState.kind === "character" && selected?.type === "character") {
+    else if (boxState.kind === "character" && colourItem?.type === "character") {
       const original = box === "fill" ? boxState.fillOriginal : boxState.strokeOriginal;
       if (!original) return;
       let relatives = { strokes: [] as string[], shadows: [] as string[] };
       if (effects?.stroke || effects?.shadow) {
         try {
-          const player = frameAccessRef.current?.(selected.id)?.contentWindow as (Window & { cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[] } }) | null | undefined;
+          const player = frameAccessRef.current?.(colourItem.id)?.contentWindow as (Window & { cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[] } }) | null | undefined;
           relatives = player?.cbColorRelatives?.(original, boxScope === "*" ? "" : boxScope) || relatives;
         } catch { /* player not reachable: the colour alone */ }
       }
-      mutateSelected((item) => {
+      mutateColour((item) => {
         let rules = withBoxRule(item.colorReplacements || [], original, box, hex);
         if (effects?.stroke) for (const stroke of relatives.strokes) rules = withBoxRule(rules, stroke, "stroke", followColour(stroke, original, hex));
         if (effects?.shadow) for (const shadow of relatives.shadows) rules = withBoxRule(rules, shadow, box, followColour(shadow, original, hex));
@@ -1166,8 +1179,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const pickBoxColour = (clientX: number, clientY: number) => {
     setBoxPicking(false);
     setActiveTool("select");
-    if (selected?.type !== "character") return;
-    const frame = frameAccessRef.current?.(selected.id);
+    if (colourItem?.type !== "character") return;
+    const frame = frameAccessRef.current?.(colourItem.id);
     const rect = frame?.getBoundingClientRect();
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
     try {
@@ -1175,7 +1188,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       const result = typeof colorAt === "function" ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, boxScope === "*" ? "" : boxScope) : null;
       const original = normalizeHex(result?.original);
       if (!original) { showNotice("No character colour there. Click on the character's artwork."); return; }
-      const objectId = selected.id;
+      const objectId = colourItem.id;
       setBoxPicks((previous) => ({ ...(previous?.objectId === objectId && previous.scope === boxScope ? previous : {}), objectId, scope: boxScope, [activeBox]: original }));
     } catch { /* player not reachable */ }
   };
@@ -1253,10 +1266,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   type AdjustState = NonNullable<typeof adjust>;
   const openAdjust = () => {
     const objects = draftRef.current?.objects || [];
-    const items = selectedIdsRef.current.map((id) => objects.find((item) => item.id === id))
+    const ids = selectedIdsRef.current.length ? selectedIdsRef.current : poseOwnerId ? [poseOwnerId] : [];
+    const items = ids.map((id) => objects.find((item) => item.id === id))
       .filter((item): item is EditorObject => Boolean(item) && !item!.locked && (item!.type === "character" || item!.type === "text"));
     if (!items.length) { showNotice("Select a character or a text layer to adjust its colours."); return; }
-    const scope = items.length === 1 ? activeCharacterPart || "*" : "*";
+    const scope = items.length === 1 ? activeCharacterPart || poseColourScope || "*" : "*";
     const base: AdjustState["base"] = {};
     const palettes: AdjustState["palettes"] = {};
     for (const item of items) {
@@ -1268,7 +1282,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       } catch { /* player not reachable */ }
     }
     if (items.every((item) => item.type === "character" && !palettes[item.id])) { showNotice("The character is still loading. Try again in a moment."); return; }
-    const label = items.length > 1 ? `${items.length} layers` : scope !== "*" ? `${items[0].name} · ${partLabel(items[0], scope)}` : items[0].type === "text" ? (items[0].text || items[0].name || "Text").slice(0, 32) : items[0].name;
+    const label = items.length > 1 ? `${items.length} layers` : scope.startsWith("@") ? `${items[0].name} · ${symbolLevelNow?.data.layers.find((layer) => (layer.props || []).includes(scope.split("/").pop() || ""))?.name || "part"}` : scope !== "*" ? `${items[0].name} · ${partLabel(items[0], scope)}` : items[0].type === "text" ? (items[0].text || items[0].name || "Text").slice(0, 32) : items[0].name;
     setAdjust({ ids: items.map((item) => item.id), label, hasShadow: items.some((item) => item.type === "text"), base, palettes });
   };
   const adjustPatches = (state: AdjustState, settings: AdjustSettings) => {
@@ -3533,6 +3547,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   }), [partEditor, planPartEdit, symbolView]);
   // The picked part's box, read again after every change the stage makes.
   const pickedProp = pickedPart && symbolView?.objectId === pickedPart.objectId ? pickedPart.prop : null;
+  const poseScopeNow = pickedProp && symbolLevelNow ? `@${symbolLevelNow.js}/${pickedProp}` : null;
+  const poseOwnerNow = pickedProp && symbolView ? symbolView.objectId : null;
+  useEffect(() => { setPoseColourScope(poseScopeNow); setPoseOwnerId(poseOwnerNow); }, [poseScopeNow, poseOwnerNow]);
   const partVersion = JSON.stringify([symbolLevelNow?.frame, symbolLevelNow?.js, symbolObjectNow?.symbolValues, symbolObjectNow?.symbolKeys, symbolObjectNow?.symbolEases]);
   useEffect(() => {
     if (!pickedProp) { setPartInfo(null); return; }

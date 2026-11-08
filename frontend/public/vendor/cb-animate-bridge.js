@@ -820,33 +820,54 @@
   }
   // Shapes of the character (or one part), including timeline instances not on the current frame
   // (Animate names them shape, shape_1, instance_3…) and swapped-in variants. fn(shape, partKey).
+  // A pose part is a scope of its own: "@<pose class>/<object name>" (e.g. "@Sardar_01/instance_9"). Its shapes get that tag, next to
+  // the character part they belong to.
+  var cbTagNodes = new Map();
+  function refreshTagNodes(extra) {
+    cbTagNodes = new Map();
+    var scopes = (cbColorRules || []).map(function (r) { return String(r && r.scope || ''); }).concat(extra ? [String(extra)] : []);
+    scopes.forEach(function (sc) {
+      if (sc.charAt(0) !== '@') return;
+      var cut = sc.indexOf('/'), cls = sc.slice(1, cut), prop = sc.slice(cut + 1);
+      try { clipsOfClass(cls).forEach(function (clip) { var node = clip[prop]; if (node && typeof node === 'object') cbTagNodes.set(node, sc); }); } catch (e) {}
+    });
+  }
+  function scopeNodes(scope) {
+    scope = String(scope || ''); if (!scope) return [];
+    if (scope.charAt(0) === '@') { refreshTagNodes(scope); var out = []; cbTagNodes.forEach(function (tag, node) { if (tag === scope) out.push(node); }); return out; }
+    return nodesOf(resolvePart(scope));
+  }
+  function tagsOf(node) { var out = []; for (var n = node; n; n = n.parent) { var t = cbTagNodes.get(n); if (t) out.push(t); } return out; }
+  function inScopeT(partKey, tags, scope) { return scope.charAt(0) === '@' ? tags.indexOf(scope) >= 0 : inScope(partKey, scope); }
   function eachShape(start, fn) {
     var partOf = new Map(); Object.keys(cbParts).forEach(function (k) { nodesOf(cbParts[k]).forEach(function (n) { partOf.set(n, k); }); });
     var seen = new Set();
-    (function visit(node, partKey) {
+    (function visit(node, partKey, tags) {
       if (!node || typeof node !== 'object' || seen.has(node)) return;
       seen.add(node);
-      var key = partOf.get(node) || partKey;
-      if (node.graphics) fn(node, key);
+      var key = partOf.get(node) || partKey, own = cbTagNodes.get(node), mine = own ? tags.concat(own) : tags;
+      if (node.graphics) fn(node, key, mine);
       var kids = node.children || [];
-      for (var i = 0; i < kids.length; i++) visit(kids[i], key);
-      for (var name in node) if (/^(shape|instance)(_\d+)?$/.test(name)) visit(node[name], key);
-      if (node.__cbSwap) visit(node.__cbSwap.inst, key);
-    })(start, '');
+      for (var i = 0; i < kids.length; i++) visit(kids[i], key, mine);
+      for (var name in node) if (/^(shape|instance)(_\d+)?$/.test(name)) visit(node[name], key, mine);
+      if (node.__cbSwap) visit(node.__cbSwap.inst, key, mine);
+    })(start, '', tagsOf(start.parent));
   }
   // "head/hair" is recoloured by rules for "head" and then "head/hair".
   function scopesOf(key) { var out = [], parts = String(key || '').split('/'); for (var i = 1; i <= parts.length; i++) if (parts[0]) out.push(parts.slice(0, i).join('/')); return out; }
   function inScope(partKey, scope) { return scope === '*' || partKey === scope || String(partKey || '').indexOf(scope + '/') === 0; }
   function applyRecolor(list) {
     var root = cbRoot(); if (!root || !window.createjs) return;
+    refreshTagNodes();
     var rules = prepareRules(list), sig = JSON.stringify(list || []);
     var whole = rules.filter(function (r) { return r.scope === '*'; }), byPart = {};
     rules.forEach(function (r) { if (r.scope !== '*') (byPart[r.scope] = byPart[r.scope] || []).push(r); });
     var cached = [];
-    eachShape(root, function (shape, partKey) {
-      var g = shape.graphics, partSig = sig + '|' + partKey;
+    eachShape(root, function (shape, partKey, tags) {
+      var g = shape.graphics, partSig = sig + '|' + partKey + '|' + tags.join(',');
       if (g.__cbSig === partSig) return;
       var active = whole; scopesOf(partKey).forEach(function (sc) { if (byPart[sc]) active = active.concat(byPart[sc]); });
+      tags.forEach(function (tg) { if (byPart[tg]) active = active.concat(byPart[tg]); });
       var list = graphicsList(g);
       for (var i = 0; i < list.length; i++) {
         var ins = list[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
@@ -870,10 +891,11 @@
   // the colour it currently shows. Called directly by the same-origin editor.
   window.cbColorPalette = function (scopeKey) {
     var root = cbRoot(); if (!root || !window.createjs) return [];
-    var scoped = scopeKey ? nodesOf(resolvePart(scopeKey)) : [];
+    refreshTagNodes(scopeKey);
+    var scoped = scopeKey ? scopeNodes(scopeKey) : [];
     var rules = prepareRules(cbColorRules), found = {};
-    (scoped.length ? scoped : [root]).forEach(function (start) { eachShape(start, function (shape, partKey) {
-      var active = rules.filter(function (r) { return inScope(partKey, r.scope); });
+    (scoped.length ? scoped : [root]).forEach(function (start) { eachShape(start, function (shape, partKey, tags) {
+      var active = rules.filter(function (r) { return inScopeT(partKey, tags, r.scope); });
       var list = graphicsList(shape.graphics);
       for (var i = 0; i < list.length; i++) {
         var ins = list[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
@@ -897,7 +919,7 @@
   window.cbColorRelatives = function (hexIn, scopeKey) {
     var none = { strokes: [], shadows: [] }, root = cbRoot(), base = parseColor(hexIn);
     if (!root || !window.createjs || !base) return none;
-    var baseHex = hexOf(base), baseHsl = toHsl(base), scoped = scopeKey ? nodesOf(resolvePart(scopeKey)) : [];
+    var baseHex = hexOf(base), baseHsl = toHsl(base), scoped = scopeKey ? scopeNodes(scopeKey) : [];
     var strokes = {}, shadows = {}, partsWithBase = {}, strokesByPart = {};
     // An outline of this colour: darker, and its hue (or grey/black) — not a neighbour's outline drawn
     // in the same shape (a green lungi's outline next to skin).
@@ -942,7 +964,8 @@
       var a = d[3] / 255, picked = { r: d[0] / a, g: d[1] / a, b: d[2] / a, a: 1 }, pickedHex = hexOf(picked);
       var dist = function (c) { return Math.pow(c.r - picked.r, 2) + Math.pow(c.g - picked.g, 2) + Math.pow(c.b - picked.b, 2); };
       var rules = prepareRules(cbColorRules);
-      var scoped = scopeKey ? nodesOf(resolvePart(scopeKey)) : [];
+      refreshTagNodes(scopeKey);
+      var scoped = scopeKey ? scopeNodes(scopeKey) : [];
       // Visible shapes on the current frame, in drawing order (later = on top).
       var top = null;
       (scoped.length ? scoped : [root]).forEach(function visitStart(start) { (function visit(node) {
@@ -958,7 +981,8 @@
         // The deepest part (nested parts included) that contains the shape.
         var partKey = '', best = null, bestDist = Infinity;
         for (var n = top; n && !partKey; n = n.parent) Object.keys(cbParts).forEach(function (k) { if (!partKey && nodesOf(cbParts[k]).indexOf(n) >= 0) partKey = k; });
-        var active = rules.filter(function (r) { return inScope(partKey, r.scope); });
+        var topTags = tagsOf(top);
+        var active = rules.filter(function (r) { return inScopeT(partKey, topTags, r.scope); });
         var list = graphicsList(top.graphics);
         for (var i = 0; i < list.length; i++) {
           var ins = list[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
