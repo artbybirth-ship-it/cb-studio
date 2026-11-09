@@ -299,6 +299,9 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [spacePanning, setSpacePanning] = useState(false);
   const [rotationToolActive, setRotationToolActive] = useState(false);
+  // R (Illustrator's Rotate tool): stays on after the key is released; a drag anywhere turns the selection about its
+  // registration point. R again, V or Esc puts the normal tool back.
+  const [rotateHeld, setRotateHeld] = useState(false);
   const panDragRef = useRef<{ pointerId: number; startClientX: number; startClientY: number; startPanX: number; startPanY: number } | null>(null);
   // Part selected when the current click gesture began, and characters whose pending
   // HIT_TEST_PART answer came from a double-click.
@@ -764,7 +767,10 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         setSpacePanning(true);
         return;
       }
-      if (event.key === "Escape") setRotationToolActive(false);
+      if (event.key === "Escape") { setRotationToolActive(false); setRotateHeld(false); }
+      const plain = !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.repeat && !isEditableTarget(event.target);
+      if (plain && event.code === "KeyR") setRotateHeld((on) => !on);
+      else if (plain && event.code === "KeyV") setRotateHeld(false);
     };
     const up = (event: KeyboardEvent) => {
       if (event.code === "Space") setSpacePanning(false);
@@ -3055,7 +3061,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   return (
     <div
       ref={hostRef}
-      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""} ${symbolView && !renderMode ? "cb-symbol-viewing" : ""} ${isolating && !renderMode ? "cb-isolating" : ""}`}
+      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotateHeld && !renderMode ? "cb-rotate-held" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""} ${symbolView && !renderMode ? "cb-symbol-viewing" : ""} ${isolating && !renderMode ? "cb-isolating" : ""}`}
       onWheel={handleWheel}
       // Scale tool (S) takes the drag before objects or the marquee see it.
       onPointerDownCapture={(event) => {
@@ -3065,6 +3071,18 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         // Hand tool (Space held): pan from anywhere on the canvas. Taken here, before any part, handle
         // or object sees the press, so nothing is picked or moved in any mode.
         if (spacePanning) { beginPan(event); return; }
+        // Rotate tool (R): hand the press to the selection's own rotate handle (pose part, character part, then whole object),
+        // so the drag turns it exactly as dragging beside a corner does.
+        if (rotateHeld && !renderMode && event.button === 0 && selectedObjectId) {
+          const host = hostRef.current;
+          const rotate = host?.querySelector<HTMLElement>(".cb-symbol-turn") || host?.querySelector<HTMLElement>(".cb-part-rotate-handle") || host?.querySelector<HTMLElement>(".cb-corner-rotate-handle");
+          if (rotate) {
+            event.preventDefault();
+            event.stopPropagation();
+            rotate.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, shiftKey: event.shiftKey }));
+            return;
+          }
+        }
         // A press in the text being typed moves the caret: nothing is selected or dragged.
         if ((event.target as HTMLElement).closest?.(".cb-stage-text-editing")) { event.stopPropagation(); return; }
         // Text tool (T): a press on a text layer types into it; anywhere else starts new text there.
@@ -3496,7 +3514,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                   // Animate: press just outside a corner to turn the part; the rotate arrow shows on hover.
                   const ox = (point[0] - centre[0]) * handleFrame.width, oy = (point[1] - centre[1]) * handleFrame.height, ol = Math.hypot(ox, oy) || 1;
                   return <i key={`turn-${name}`} className="cb-symbol-turn" role="button" aria-label="Rotate" title="Rotate (Shift: 15° steps)"
-                    style={{ left: `calc(${point[0] * 100}% + ${(ox / ol) * 15}px)`, top: `calc(${point[1] * 100}% + ${(oy / ol) * 15}px)` }}
+                    style={{ left: `calc(${point[0] * 100}% + ${(ox / ol) * 22}px)`, top: `calc(${point[1] * 100}% + ${(oy / ol) * 22}px)` }}
                     onPointerDown={press("rotate")} />;
                 })}
                 {symbolBox.pivot && <i className={`cb-symbol-pivot${symbolBox.editable ? " movable" : ""}`} style={{ left: `${symbolBox.pivot[0] * 100}%`, top: `${symbolBox.pivot[1] * 100}%` }} aria-hidden="true" title={symbolBox.editable ? "Registration point: drag to move where this part turns and scales from; double-click to put it back in the middle" : undefined} onPointerDown={symbolBox.editable ? press("pivot") : undefined} onDoubleClick={symbolBox.editable ? onSymbolPivotReset : undefined} />}

@@ -898,13 +898,13 @@ button{cursor:pointer}
 
 /* Keep rotate slightly outside the corner while remaining screen-fixed. */
 .cb-whole-corner-control.cb-corner-nw .cb-corner-rotate-handle,
-.cb-part-corner-control.cb-corner-nw .cb-part-rotate-handle{left:0!important;top:0!important;transform:translate(-55%,-55%)!important}
+.cb-part-corner-control.cb-corner-nw .cb-part-rotate-handle{left:0!important;top:0!important;transform:translate(-115%,-115%)!important}
 .cb-whole-corner-control.cb-corner-ne .cb-corner-rotate-handle,
-.cb-part-corner-control.cb-corner-ne .cb-part-rotate-handle{right:0!important;top:0!important;transform:translate(55%,-55%)!important}
+.cb-part-corner-control.cb-corner-ne .cb-part-rotate-handle{right:0!important;top:0!important;transform:translate(115%,-115%)!important}
 .cb-whole-corner-control.cb-corner-se .cb-corner-rotate-handle,
-.cb-part-corner-control.cb-corner-se .cb-part-rotate-handle{right:0!important;bottom:0!important;transform:translate(55%,55%)!important}
+.cb-part-corner-control.cb-corner-se .cb-part-rotate-handle{right:0!important;bottom:0!important;transform:translate(115%,115%)!important}
 .cb-whole-corner-control.cb-corner-sw .cb-corner-rotate-handle,
-.cb-part-corner-control.cb-corner-sw .cb-part-rotate-handle{left:0!important;bottom:0!important;transform:translate(-55%,55%)!important}
+.cb-part-corner-control.cb-corner-sw .cb-part-rotate-handle{left:0!important;bottom:0!important;transform:translate(-115%,115%)!important}
 
 /* Part flip button is a direct child of the zoomed group, so counter-scale it. */
 .cb-character-part-hitbox .cb-part-flip-handle,
@@ -3547,3 +3547,6 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 .cb-symbol-lib-pics span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#bbb}
 .cb-symbol-lib-upload{display:block;margin:4px 0;padding:6px 8px;border-radius:6px;color:#e2e2e2;font-size:12px;cursor:pointer}.cb-symbol-lib-upload:hover{background:#3d4675}
 .cb-symbol-marquee{z-index:60;pointer-events:none;border:1px dashed #e8e8e8;background:rgba(120,150,255,.12);box-shadow:0 0 0 1px rgba(0,0,0,.5)}
+
+/* Rotate tool (R, Illustrator): the whole stage shows the rotate cursor; a drag turns the selection. */
+.studio-stage-host.cb-rotate-held,.studio-stage-host.cb-rotate-held *{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M18.5 9.5A7 7 0 1 0 19 15' fill='none' stroke='%23fff' stroke-width='4'/%3E%3Cpath d='M18.5 9.5A7 7 0 1 0 19 15' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M21 4v6h-6' fill='none' stroke='%23fff' stroke-width='4'/%3E%3Cpath d='M21 4v6h-6' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E") 12 12,crosshair!important}
