@@ -1493,7 +1493,7 @@
   function pictureObject(image) {
     // A picture is a container with the image inside, sized to fit about 40% of the stage and centred on the container's origin.
     var box = new createjs.Container(), iw = Math.max(1, image.w || 100), ih = Math.max(1, image.h || 100);
-    var fit = Math.min(1, (H * 0.4) / ih, (W * 0.4) / iw), pw = iw * fit, ph = ih * fit;
+    var fit = image.keep ? 1 : Math.min(1, (H * 0.4) / ih, (W * 0.4) / iw), pw = iw * fit, ph = ih * fit;
     box.nominalBounds = new createjs.Rectangle(-pw / 2, -ph / 2, pw, ph);
     box.setBounds(-pw / 2, -ph / 2, pw, ph);
     var img = new Image();
@@ -1522,6 +1522,23 @@
     w.clip[w.prop] = obj;
     cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: w.symbol, image: w.image ? w.image.url : '', obj: obj, tweens: [made] });
     touched.add(w.clip);
+  }
+  // A picture of one part of the open symbol, as it looks now (colour edits included), for pasting into another character's pose.
+  // w / h are its size on the stage, so the paste keeps the size it had.
+  function postPartPicture(d) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, o = node && d.prop ? node[d.prop] : null, out = { token: d.token, url: '', w: 0, h: 0 };
+    try {
+      var b = o && (rawBounds(o) || shapeBounds(o));
+      if (b && b.width > 0 && b.height > 0) {
+        var m = o.getConcatenatedMatrix ? o.getConcatenatedMatrix() : null, sx = m ? Math.hypot(m.a, m.b) : 1, sy = m ? Math.hypot(m.c, m.d) : 1;
+        var k = Math.min(4, 2048 / Math.max(b.width * sx, b.height * sy, 1)), cv = document.createElement('canvas');
+        cv.width = Math.max(1, Math.ceil(b.width * sx * k)); cv.height = Math.max(1, Math.ceil(b.height * sy * k));
+        var ctx = cv.getContext('2d'); ctx.scale(sx * k, sy * k); ctx.translate(-b.x, -b.y);
+        o.draw(ctx, true);
+        out.url = cv.toDataURL('image/png'); out.w = b.width * sx; out.h = b.height * sy;
+      }
+    } catch (e) {}
+    cbPost('SYMBOL_PART_PICTURE', out);
   }
   function postLibrary(d) {
     protoNames();
@@ -1747,6 +1764,7 @@
       else if (d.type === 'SYMBOL_DRAG_BEGIN') { postDragInfo(d); }
       else if (d.type === 'SYMBOL_PART_QUERY') { postPartInfo(d); }
       else if (d.type === 'SYMBOL_LIBRARY_QUERY') { postLibrary(d); }
+      else if (d.type === 'SYMBOL_PART_PICTURE_QUERY') { postPartPicture(d); }
       else if (d.type === 'SYMBOL_PARTS_IN_RECT') { postPartsInRect(d); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }

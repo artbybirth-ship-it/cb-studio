@@ -1,5 +1,6 @@
 "use client";
 
+import { createPortal } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, MutableRefObject, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import type { CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject } from "@/types";
@@ -3464,7 +3465,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           // Press a part and drag: it moves. A click picks it (handles appear); a click on nothing drops it.
           if (event.button === 0 && onSymbolDragStart) trackSymbolPointer(event, (nx, ny, shift) => onSymbolDragStart(nx, ny, shift), onSymbolDeselect, onSymbolBoxSelect);
         }} title="Drag a part to move it, click it for handles; double-click a part to step inside it; double-click elsewhere (or Esc) to step out" />}
-      {poseMarquee && <div className="cb-symbol-marquee" style={{ position: "fixed", left: poseMarquee.left, top: poseMarquee.top, width: poseMarquee.width, height: poseMarquee.height }} aria-hidden="true" />}
+      {poseMarquee && typeof document !== "undefined" && createPortal(<div className="cb-symbol-marquee" style={{ position: "fixed", left: poseMarquee.left, top: poseMarquee.top, width: poseMarquee.width, height: poseMarquee.height }} aria-hidden="true" />, document.body)}
       {symbolView && !renderMode && symbolBox && (
         <div ref={handlesRef} className="cb-symbol-handles">
           {handleFrame && (() => {

@@ -142,7 +142,7 @@ export function withClones(data: FlaSymbol, clones?: SymbolClone[]): FlaSymbol {
   return { ...data, layers };
 }
 
-export type PoseImage = { url: string; w: number; h: number; name: string };
+export type PoseImage = { url: string; w: number; h: number; name: string; keep?: boolean };
 export type SymbolClone = { of: number; prop: string; symbol?: string; image?: PoseImage };
 
 /** A new layer holding one instance of a library symbol (a keyframe over the whole pose), above the layer picked (or on top). */

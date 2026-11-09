@@ -4006,7 +4006,22 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // ---- Copy / Cut / Paste (and in Front / in Back), Arrange: a part's layer is copied with the edits made on it (keyframes moved,
   // values typed or dragged, eases), so a paste looks like the part does now. Paste works inside the same pose.
   type LayerSnap = { values: Array<[number, SymbolValueEdit]>; keys: SymbolKeyEdit | null; eases: Array<[number, SymbolEaseEdit]> };
-  const poseClipboard = useRef<{ js: string; items: Array<{ from: number; name: string; snap: LayerSnap }> } | null>(null);
+  type PartPicture = { url: string; w: number; h: number } | null;
+  const poseClipboard = useRef<{ js: string; items: Array<{ from: number; name: string; snap: LayerSnap; picture: Promise<PartPicture> }> } | null>(null);
+  /** A picture of a part as it looks now, taken from the open pose; it lets the part be pasted into a different character. */
+  const capturePartPicture = (prop: string) => new Promise<PartPicture>((resolve) => {
+    const view = symbolView, frame = view && frameAccessRef.current?.(view.objectId);
+    if (!view || !frame?.contentWindow) { resolve(null); return; }
+    const token = `pic${Date.now()}${Math.random()}`;
+    const done = (value: PartPicture) => { window.removeEventListener("message", onMessage); window.clearTimeout(timer); resolve(value); };
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (d?.source === "characterbazaarstudio-animate" && d.type === "SYMBOL_PART_PICTURE" && d.token === token) done(d.url ? { url: d.url, w: d.w, h: d.h } : null);
+    };
+    const timer = window.setTimeout(() => done(null), 4000);
+    window.addEventListener("message", onMessage);
+    frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_PART_PICTURE_QUERY", prop, token }, "*");
+  });
   const snapshotLayer = (item: EditorObject, js: string, index: number, prop: string): LayerSnap => {
     const pick = <T extends { props: string[]; frame: number }>(map: Record<string, T> | undefined) => Object.entries(map || {}).filter(([key]) => {
       const [layer, , part] = key.split(":");
@@ -4037,15 +4052,33 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (!level || !object) return false;
     const ids = pickedLayerIds().filter((id) => level.data.layers[id]?.type === "normal" && level.data.layers[id]?.props?.length);
     if (!ids.length) { if (!quiet) showNotice("Pick a part first to copy it."); return false; }
-    poseClipboard.current = { js: level.js, items: ids.map((from) => ({ from, name: level.data.layers[from].name, snap: snapshotLayer(object, level.js, from, level.data.layers[from].props![0]) })) };
+    poseClipboard.current = { js: level.js, items: ids.map((from) => ({ from, name: level.data.layers[from].name, snap: snapshotLayer(object, level.js, from, level.data.layers[from].props![0]), picture: capturePartPicture(level.data.layers[from].props![0]) })) };
     if (!quiet) showNotice(ids.length > 1 ? `Copied ${ids.length} parts` : `Copied ${level.data.layers[ids[0]].name}`);
     return true;
+  };
+  /** Pasting into a different character: the part arrives as a picture layer, keeping the size it had on the stage. */
+  const pastePoseAsPictures = async (clip: NonNullable<typeof poseClipboard.current>) => {
+    const level = symbolLevelNow;
+    if (!level || !project) return;
+    try {
+      const pictures: Array<{ url: string; w: number; h: number; name: string; keep: boolean }> = [];
+      for (const item of clip.items) {
+        const shot = await item.picture;
+        if (!shot) continue;
+        const blob = await (await fetch(shot.url)).blob();
+        const asset = await api.uploadAsset(project.id, "background", new File([blob], `${item.name || "part"}.png`, { type: "image/png" }));
+        pictures.push({ url: asset.url, w: shot.w, h: shot.h, name: item.name || "Part", keep: true });
+      }
+      if (!pictures.length) { showNotice("This part could not be copied as a picture."); return; }
+      setLayerEdit((current) => pictures.reduce((edit, image) => addSymbolLayer(level.data.layers, edit, image, null), current));
+      showNotice(pictures.length > 1 ? `Pasted ${pictures.length} parts as pictures` : "Pasted as a picture layer");
+    } catch (error) { showNotice(error instanceof Error ? error.message : "Paste failed", "error"); }
   };
   const pastePoseLayers = (place: "above" | "front" | "back") => {
     const level = symbolLevelNow, clip = poseClipboard.current;
     if (!level || !symbolView) return false;
     if (!clip) { showNotice("Nothing copied yet. Pick a part and press ⌘C."); return true; }
-    if (clip.js !== level.js) { showNotice("Paste works inside the pose the part was copied from."); return true; }
+    if (clip.js !== level.js) { void pastePoseAsPictures(clip); return true; }
     const layers = level.data.layers;
     let pairs: Array<{ from: number; to: number; prop: string }> = [];
     const sources = clip.items.map((item) => item.from).filter((from) => layers[from]);
