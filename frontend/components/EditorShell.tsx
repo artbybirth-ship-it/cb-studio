@@ -17,7 +17,7 @@ import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, keyframeAt, removeFrames, shownFrames, spanAt, type Anchor } from "@/lib/symbolKeys";
 import { addSymbolLayer, arrangeSymbolLayers, duplicateLayers, groupLayers, parentOf, ungroupLayer, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
-import { canTransform, flipPart, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
+import { affinePart, canTransform, flipPart, stageRectOf, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolEaseEdit, SymbolKeyEdit, SymbolLayerEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
@@ -2984,6 +2984,24 @@ export default function EditorShell({ projectId }: { projectId: string }) {
 
   const runAlign = (action: AlignAction) => {
     if (!draft) return;
+    if (symbolView && multiProps.length > 1) {
+      // Several parts: each lines up with the pose's stage (or, with Align to Stage off, with the box that holds them), Distribute spaces them.
+      const infos = groupInfosRef.current, plans = groupPlans(infos.map((info) => info.prop));
+      if (!infos.length || !plans) { showNotice("These parts can't be moved here."); return; }
+      const W = infos[0].W, H = infos[0].H;
+      const entries = infos.map((info, index) => { const box = stageRectOf([info]); return { id: String(index), bounds: box }; });
+      if ((action === "hdistribute" || action === "vdistribute") && entries.length < 3) { showNotice("Distribute needs three or more parts."); return; }
+      const reference = alignToStage ? { left: 0, top: 0, right: W, bottom: H } : stageRectOf(infos);
+      const moves = alignMoves(entries, action, reference);
+      const shifts = infos.map((_, index) => moves.find((move) => move.id === String(index)) || { dx: 0, dy: 0 });
+      if (shifts.every((move) => Math.abs(move.dx) < 1e-6 && Math.abs(move.dy) < 1e-6)) return;
+      const round = (value: number, digits = 2) => Math.round(value * 10 ** digits) / 10 ** digits;
+      const results = infos.map((info, index) => affinePart(info, [1, 0, 0, 1], [0, 0], [shifts[index].dx, shifts[index].dy]));
+      const editor = groupEditor(plans);
+      editor.apply(results.map((r) => ({ scaleX: round(r.scaleX, 4), scaleY: round(r.scaleY, 4), skewX: round(r.skewX), skewY: round(r.skewY), x: round(r.x), y: round(r.y) })));
+      editor.end();
+      return;
+    }
     if (symbolView && pickedProp) {
       // Inside a pose: the picked part lines up with the pose's own stage (Animate's "Align to Stage").
       const info = partInfoRef.current;
@@ -3442,7 +3460,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // the keyframe at the playhead: on a keyframe that keyframe, between keyframes of a tween one is added there first (holding the
   // motion), as in Animate. One drag is one undo step.
   type PartHandle = { move: (dx: number, dy: number, shift: boolean) => void; end: () => void; click?: () => void };
-  const [pickedPart, setPickedPart] = useState<{ objectId: string; prop: string } | null>(null);
+  const [pickedPart, setPickedPartRaw] = useState<{ objectId: string; prop: string } | null>(null);
+  // Several parts picked (Shift+click, a box dragged on the stage, Shift / ⌘ on layer rows): kept apart from the single pick, which every
+  // single-part tool (handles, Transform panel, colours) still works on.
+  const [multiParts, setMultiParts] = useState<{ objectId: string; props: string[] } | null>(null);
+  const setPickedPart = useCallback((value: { objectId: string; prop: string } | null) => { setMultiParts(null); setPickedPartRaw(value); }, []);
   const [partInfo, setPartInfo] = useState<PartInfo | null>(null);
   const symbolLevelNow = symbolView ? symbolView.levels[symbolView.levels.length - 1] : null;
   const symbolObjectNow = symbolView ? draft?.objects.find((item) => item.id === symbolView.objectId) : undefined;
@@ -3509,48 +3531,23 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       end: () => { window.setTimeout(() => { scrubHistoryRef.current = "idle"; partDragging.current = false; setPartRefresh((n) => n + 1); }, 0); },
     };
   }, [setSymbolKeys, setSymbolValue]);
-  const beginSymbolDrag = useCallback((normalizedX: number, normalizedY: number) => new Promise<PartHandle | null>((resolve) => {
-    const view = symbolView, frame = view && frameAccessRef.current?.(view.objectId);
-    if (!view || !frame?.contentWindow) { resolve(null); return; }
-    const token = `drag${Date.now()}${Math.random()}`;
-    let finished = false;
-    const finish = (value: PartHandle | null) => {
-      if (finished) return;
-      finished = true;
-      window.removeEventListener("message", onMessage);
-      window.clearTimeout(timer);
-      resolve(value);
-    };
-    const prepare = (info: { prop: string; ax: number; ay: number; bx: number; by: number; x: number; y: number; W: number; H: number } | null) => {
-      if (!info) return null;
-      const quietPlan = planPartEdit(info.prop, true);
-      let noticed = false;
-      const edit = partEditor(quietPlan || { layer: -1, prop: info.prop, grown: null, target: 0 });
-      return {
-        move: (dx: number, dy: number, shift: boolean) => {
-          if (!quietPlan) { if (!noticed) { noticed = true; planPartEdit(info.prop); } return; }
-          let stageX = dx * info.W, stageY = dy * info.H;
-          if (shift) { if (Math.abs(stageX) >= Math.abs(stageY)) stageY = 0; else stageX = 0; }
-          const det = info.ax * info.by - info.bx * info.ay;
-          if (!det) return;
-          const round = (value: number) => Math.round(value * 100) / 100;
-          edit.apply({ x: round(info.x + (stageX * info.by - info.bx * stageY) / det), y: round(info.y + (info.ax * stageY - stageX * info.ay) / det) });
-        },
-        end: edit.end,
-        click: () => setPickedPart({ objectId: view.objectId, prop: info.prop }),
-      };
-    };
-    const onMessage = (event: MessageEvent) => {
-      const d = event.data;
-      if (d?.source !== "characterbazaarstudio-animate" || d.type !== "SYMBOL_DRAG_INFO" || d.token !== token) return;
-      finish(prepare(d.info || null));
-    };
-    const timer = window.setTimeout(() => finish(null), 1500);
-    window.addEventListener("message", onMessage);
-    frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_DRAG_BEGIN", normalizedX, normalizedY, token }, "*");
-  }), [partEditor, planPartEdit, symbolView]);
   // The picked part's box, read again after every change the stage makes.
   const pickedProp = pickedPart && symbolView?.objectId === pickedPart.objectId ? pickedPart.prop : null;
+  const multiProps = useMemo(() => (multiParts && symbolView?.objectId === multiParts.objectId ? multiParts.props : []), [multiParts, symbolView?.objectId]);
+  const selectedProps = useMemo(() => (multiProps.length ? multiProps : pickedProp ? [pickedProp] : []), [multiProps, pickedProp]);
+  const selectedPropsRef = useRef(selectedProps);
+  selectedPropsRef.current = selectedProps;
+  const setPartSelection = useCallback((props: string[]) => {
+    const objectId = symbolView?.objectId;
+    const list = [...new Set(props)];
+    if (!objectId || !list.length) { setMultiParts(null); setPickedPartRaw(null); }
+    else if (list.length === 1) { setMultiParts(null); setPickedPartRaw({ objectId, prop: list[0] }); }
+    else { setPickedPartRaw(null); setMultiParts({ objectId, props: list }); }
+  }, [symbolView?.objectId]);
+  const toggleOnePart = useCallback((prop: string) => {
+    const now = selectedPropsRef.current;
+    setPartSelection(now.includes(prop) ? now.filter((item) => item !== prop) : [...now, prop]);
+  }, [setPartSelection]);
   const poseScopeNow = pickedProp && symbolLevelNow ? `@${symbolLevelNow.js}/${pickedProp}` : null;
   const poseOwnerNow = pickedProp && symbolView ? symbolView.objectId : null;
   useEffect(() => { setPoseColourScope(poseScopeNow); setPoseOwnerId(poseOwnerNow); }, [poseScopeNow, poseOwnerNow]);
@@ -3575,12 +3572,188 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     askedProp.current = pickedProp;
     return () => { live = false; window.clearTimeout(timer); };
   }, [askPart, partVersion, partRefresh, pickedProp]);
-  useEffect(() => { if (!symbolView) setPickedPart(null); }, [symbolView]);
-  useEffect(() => { setPickedPart(null); }, [symbolLevelNow?.js]);
+  useEffect(() => { if (!symbolView) setPickedPart(null); }, [symbolView, setPickedPart]);
+  useEffect(() => { setPickedPart(null); }, [symbolLevelNow?.js, setPickedPart]);
+  // Several parts picked: each one's reading, kept like the single part's, and the box that holds them all.
+  const [groupInfos, setGroupInfos] = useState<PartInfo[]>([]);
+  const groupInfosRef = useRef<PartInfo[]>([]);
+  groupInfosRef.current = groupInfos;
+  const multiKey = multiProps.join("|");
+  useEffect(() => {
+    if (!multiProps.length) { setGroupInfos([]); return; }
+    let live = true;
+    const timer = window.setTimeout(() => {
+      const read = (tries: number) => void Promise.all(multiProps.map((prop) => askPart(prop))).then((all) => {
+        if (partDragging.current || !live) return;
+        const good = all.filter((info): info is PartInfo => Boolean(info) && isSound(info as PartInfo) && canTransform(info as PartInfo));
+        if (!good.length && tries < 4) { window.setTimeout(() => { if (live) read(tries + 1); }, 80); return; }
+        setGroupInfos(good);
+      });
+      read(0);
+    }, 0);
+    return () => { live = false; window.clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [askPart, partVersion, partRefresh, multiKey]);
+  /** One change for several parts: every part's values are written in one go, and a drag is one undo step. */
+  const groupEditor = useCallback((plans: Array<{ layer: number; prop: string; grown: Array<[number, number]> | null; target: number }>) => {
+    let started = false;
+    return {
+      apply: (patches: Array<Partial<Record<SymbolValueKey, number>>>) => {
+        partDragging.current = true;
+        const writes: Array<(data: EditorData) => void> = [];
+        if (!started) scrubHistoryRef.current = "armed";
+        symbolBatch.current = writes;
+        try {
+          plans.forEach((plan, index) => {
+            if (!started && plan.grown) setSymbolKeys(plan.layer, plan.grown);
+            setSymbolValue(plan.layer, plan.target, patches[index], plan.prop);
+          });
+        } finally { symbolBatch.current = null; }
+        started = true;
+        if (writes.length) mutate((data) => { writes.forEach((write) => write(data)); });
+      },
+      end: () => { window.setTimeout(() => { scrubHistoryRef.current = "idle"; partDragging.current = false; setPartRefresh((n) => n + 1); }, 0); },
+    };
+  }, [mutate, setSymbolKeys, setSymbolValue]);
+  /** What the group's parts take for a stage change (a matrix about a point, then a move), as values to write and as readings to show. */
+  const groupChange = (infos: PartInfo[], L: [number, number, number, number], origin: Pt, shift: Pt = [0, 0]) => {
+    const round = (value: number, digits = 2) => Math.round(value * 10 ** digits) / 10 ** digits;
+    const results = infos.map((info) => affinePart(info, L, origin, shift));
+    return {
+      patches: results.map((r) => ({ scaleX: round(r.scaleX, 4), scaleY: round(r.scaleY, 4), skewX: round(r.skewX), skewY: round(r.skewY), x: round(r.x), y: round(r.y) })),
+      shown: infos.map((info, index) => ({ ...info, sx: results[index].scaleX, sy: results[index].scaleY, skx: results[index].skewX, sky: results[index].skewY, x: results[index].x, y: results[index].y })),
+    };
+  };
+  const groupPlans = (props: string[]) => {
+    const plans = props.map((prop) => planPartEdit(prop, true));
+    return plans.every(Boolean) ? (plans as NonNullable<(typeof plans)[number]>[]) : null;
+  };
   const partEditable = Boolean(pickedProp && partInfo && planPartEdit(pickedProp, true));
-  const symbolBox = useMemo(() => (partInfo ? { ...partBox(partInfo), editable: partEditable } : null), [partInfo, partEditable]);
+  const groupBox = useMemo(() => {
+    if (multiProps.length < 2 || !groupInfos.length) return null;
+    const rect = stageRectOf(groupInfos), W = groupInfos[0].W, H = groupInfos[0].H;
+    return { corners: [[rect.left / W, rect.top / H], [rect.right / W, rect.top / H], [rect.right / W, rect.bottom / H], [rect.left / W, rect.bottom / H]] as Array<[number, number]>, pivot: null, editable: Boolean(groupPlans(groupInfos.map((info) => info.prop))), multi: true };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupInfos, multiProps]);
+  const symbolBox = useMemo(() => (partInfo ? { ...partBox(partInfo), editable: partEditable } : groupBox), [partInfo, partEditable, groupBox]);
+  const beginSymbolDrag = useCallback((normalizedX: number, normalizedY: number, shift = false, context = false) => new Promise<PartHandle | null>((resolve) => {
+    const view = symbolView, frame = view && frameAccessRef.current?.(view.objectId);
+    if (!view || !frame?.contentWindow) { resolve(null); return; }
+    const token = `drag${Date.now()}${Math.random()}`;
+    let finished = false;
+    const finish = (value: PartHandle | null) => {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener("message", onMessage);
+      window.clearTimeout(timer);
+      resolve(value);
+    };
+    // Several parts picked and one of them pressed: they all move together.
+    const groupMove = async (hit: string): Promise<PartHandle | null> => {
+      const read = await Promise.all(multiProps.map((prop) => askPart(prop)));
+      const infos = read.filter((info): info is PartInfo => Boolean(info) && canTransform(info as PartInfo));
+      const plans = groupPlans(infos.map((info) => info.prop));
+      const click = () => setPickedPart({ objectId: view.objectId, prop: hit });
+      if (!infos.length || !plans) return { move: () => undefined, end: () => undefined, click };
+      const editor = groupEditor(plans), W = infos[0].W, H = infos[0].H;
+      return {
+        move: (dx, dy, constrain) => {
+          let sx = dx * W, sy = dy * H;
+          if (constrain) { if (Math.abs(sx) >= Math.abs(sy)) sy = 0; else sx = 0; }
+          const change = groupChange(infos, [1, 0, 0, 1], [0, 0], [sx, sy]);
+          editor.apply(change.patches);
+          setGroupInfos(change.shown);
+        },
+        end: editor.end,
+        click,
+      };
+    };
+    const prepare = (info: { prop: string; ax: number; ay: number; bx: number; by: number; x: number; y: number; W: number; H: number } | null) => {
+      if (!info) return null;
+      // Shift adds the part to the picked ones or takes it out; a drag with Shift does nothing.
+      if (shift && !context) return { move: () => undefined, end: () => undefined, click: () => toggleOnePart(info.prop) };
+      if (multiProps.length > 1 && multiProps.includes(info.prop)) return context ? { move: () => undefined, end: () => undefined } : groupMove(info.prop);
+      const quietPlan = planPartEdit(info.prop, true);
+      let noticed = false;
+      const edit = partEditor(quietPlan || { layer: -1, prop: info.prop, grown: null, target: 0 });
+      return {
+        move: (dx: number, dy: number, constrain: boolean) => {
+          if (!quietPlan) { if (!noticed) { noticed = true; planPartEdit(info.prop); } return; }
+          let stageX = dx * info.W, stageY = dy * info.H;
+          if (constrain) { if (Math.abs(stageX) >= Math.abs(stageY)) stageY = 0; else stageX = 0; }
+          const det = info.ax * info.by - info.bx * info.ay;
+          if (!det) return;
+          const round = (value: number) => Math.round(value * 100) / 100;
+          edit.apply({ x: round(info.x + (stageX * info.by - info.bx * stageY) / det), y: round(info.y + (info.ax * stageY - stageX * info.ay) / det) });
+        },
+        end: edit.end,
+        click: () => setPickedPart({ objectId: view.objectId, prop: info.prop }),
+      };
+    };
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (d?.source !== "characterbazaarstudio-animate" || d.type !== "SYMBOL_DRAG_INFO" || d.token !== token) return;
+      void Promise.resolve(prepare(d.info || null)).then(finish);
+    };
+    const timer = window.setTimeout(() => finish(null), 1500);
+    window.addEventListener("message", onMessage);
+    frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_DRAG_BEGIN", normalizedX, normalizedY, token }, "*");
+  }), [askPart, groupEditor, multiProps, partEditor, planPartEdit, setPickedPart, symbolView, toggleOnePart]);
+  // A box dragged on empty stage: the parts it touches become the picked ones (Shift adds to what is picked).
+  const selectPoseParts = useCallback((rect: { x0: number; y0: number; x1: number; y1: number }, additive: boolean) => {
+    const view = symbolView, frame = view && frameAccessRef.current?.(view.objectId);
+    if (!view || !frame?.contentWindow) return;
+    const token = `rect${Date.now()}${Math.random()}`;
+    const level = symbolLevelNow;
+    const done = (props: string[]) => {
+      window.removeEventListener("message", onMessage);
+      window.clearTimeout(timer);
+      const known = new Set((level?.data.layers || []).flatMap((layer) => layer.props || []));
+      const hit = props.filter((prop) => known.has(prop));
+      setPartSelection(additive ? [...selectedPropsRef.current, ...hit] : hit);
+    };
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (d?.source === "characterbazaarstudio-animate" && d.type === "SYMBOL_PARTS_RECT" && d.token === token) done(Array.isArray(d.props) ? d.props : []);
+    };
+    const timer = window.setTimeout(() => { window.removeEventListener("message", onMessage); }, 1500);
+    window.addEventListener("message", onMessage);
+    frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_PARTS_IN_RECT", token, ...rect }, "*");
+  }, [setPartSelection, symbolLevelNow, symbolView]);
   // A handle of the picked part: turn it around its pivot or scale it from the opposite side.
   const beginSymbolHandle = useCallback(async (handle: string, nx: number, ny: number): Promise<PartHandle | null> => {
+    if (multiProps.length > 1) {
+      // Several parts: turn or scale them all about the box that holds them, as one.
+      const read = await Promise.all(multiProps.map((prop) => askPart(prop)));
+      const infos = read.filter((info): info is PartInfo => Boolean(info) && canTransform(info as PartInfo));
+      const plans = groupPlans(infos.map((info) => info.prop));
+      if (!infos.length || !plans || handle === "pivot" || handle.startsWith("skew-")) return null;
+      const editor = groupEditor(plans), W = infos[0].W, H = infos[0].H, rect = stageRectOf(infos), start: Pt = [nx * W, ny * H];
+      const centre: Pt = [(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2];
+      return {
+        move: (dx, dy, shift) => {
+          const now: Pt = [(nx + dx) * W, (ny + dy) * H];
+          let L: [number, number, number, number], origin: Pt;
+          if (handle === "rotate") {
+            let turn = Math.atan2(now[1] - centre[1], now[0] - centre[0]) - Math.atan2(start[1] - centre[1], start[0] - centre[0]);
+            if (shift) turn = Math.round(turn / (Math.PI / 12)) * (Math.PI / 12);
+            L = [Math.cos(turn), Math.sin(turn), -Math.sin(turn), Math.cos(turn)]; origin = centre;
+          } else {
+            const moveX = handle.includes("e") || handle.includes("w"), moveY = handle.includes("n") || handle.includes("s");
+            const anchor: Pt = [handle.includes("e") ? rect.left : handle.includes("w") ? rect.right : centre[0], handle.includes("s") ? rect.top : handle.includes("n") ? rect.bottom : centre[1]];
+            const ratio = (from: number, to: number, at: number) => (Math.abs(from - at) < 1e-6 ? 1 : (to - at) / (from - at));
+            const clamp = (f: number) => (Math.abs(f) < 0.01 ? (f < 0 ? -0.01 : 0.01) : f);
+            let fx = moveX ? clamp(ratio(start[0], now[0], anchor[0])) : 1, fy = moveY ? clamp(ratio(start[1], now[1], anchor[1])) : 1;
+            if (shift && moveX && moveY) { const f = Math.abs(fx) >= Math.abs(fy) ? fx : fy; fx = f; fy = f; }
+            L = [fx, 0, 0, fy]; origin = anchor;
+          }
+          const change = groupChange(infos, L, origin);
+          editor.apply(change.patches);
+          setGroupInfos(change.shown);
+        },
+        end: editor.end,
+      };
+    }
     if (!pickedProp) return null;
     const info = await askPart(pickedProp);
     if (!info || !canTransform(info)) return null;
@@ -3615,7 +3788,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       },
       end: edit.end,
     };
-  }, [askPart, partEditor, pickedProp, planPartEdit]);
+  }, [askPart, groupEditor, multiProps, partEditor, pickedProp, planPartEdit]);
   // Layers made by Duplicate Layer join the level's layer list (after the file's), so the timeline and every edit see them like any other.
   const clonesKey = symbolView ? JSON.stringify(symbolView.levels.map((level) => symbolObjectNow?.symbolLayers?.[level.js]?.clones || [])) : "";
   useEffect(() => {
@@ -3688,18 +3861,34 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       setLayerEdit((current) => addSymbolLayer(level.data.layers, current, image, above));
     } catch (error) { showNotice(error instanceof Error ? error.message : "Upload failed", "error"); }
   }, [project, setLayerEdit, showNotice, symbolLevelNow]);
-  symbolDuplicateRef.current = () => {
+  /** The layers of the picked part(s), as indexes. */
+  const pickedLayerIds = () => {
     const level = symbolLevelNow;
-    if (!symbolView || !pickedProp || !level) return false;
-    const index = level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp));
-    if (index < 0) return false;
-    duplicateSymbolLayers([index]);
+    if (!level) return [] as number[];
+    const ids = selectedPropsRef.current.map((prop) => level.data.layers.findIndex((layer) => (layer.props || []).includes(prop))).filter((index) => index >= 0);
+    return [...new Set(ids)];
+  };
+  symbolDuplicateRef.current = () => {
+    if (!symbolView || !symbolLevelNow) return false;
+    const ids = pickedLayerIds();
+    if (!ids.length) return false;
+    duplicateSymbolLayers(ids);
     return true;
   };
   // Arrow keys nudge the picked part (as a drag would) and Delete removes its layer from the pose.
   const partInfoRef = useRef(partInfo);
   partInfoRef.current = partInfo;
   symbolNudgeRef.current = (dx, dy) => {
+    if (multiProps.length > 1) {
+      const infos = groupInfosRef.current, plans = groupPlans(infos.map((info) => info.prop));
+      if (!infos.length) return true;
+      if (!plans) { showNotice("Some of these parts can't be moved here."); return true; }
+      const change = groupChange(infos, [1, 0, 0, 1], [0, 0], [dx, dy]), editor = groupEditor(plans);
+      editor.apply(change.patches);
+      editor.end();
+      setGroupInfos(change.shown);
+      return true;
+    }
     const info = partInfoRef.current;
     if (!pickedProp || !info || !canTransform(info)) return false;
     const plan = planPartEdit(pickedProp);
@@ -3717,6 +3906,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // Flip (H left–right, Shift+H top–bottom) turns the picked part over about the middle of its box, as it looks on the stage.
   symbolFlipRef.current = (axis) => {
+    if (multiProps.length > 1) {
+      const infos = groupInfosRef.current, plans = groupPlans(infos.map((info) => info.prop));
+      if (!infos.length || !plans) return true;
+      const rect = stageRectOf(infos), change = groupChange(infos, axis === "h" ? [-1, 0, 0, 1] : [1, 0, 0, -1], [(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2]);
+      const editor = groupEditor(plans);
+      editor.apply(change.patches);
+      editor.end();
+      setGroupInfos(change.shown);
+      return true;
+    }
     const info = partInfoRef.current;
     if (!pickedProp || !info || !canTransform(info)) return false;
     const plan = planPartEdit(pickedProp);
@@ -3747,29 +3946,31 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // Cmd+G puts the picked part's layer in a new folder; Cmd+Shift+G takes it out of its folder (the folder goes).
   symbolGroupRef.current = (ungroup) => {
     const level = symbolLevelNow;
-    if (!symbolView || !pickedProp || !level) return false;
-    const layers = level.data.layers, index = layers.findIndex((layer) => (layer.props || []).includes(pickedProp));
-    if (index < 0) return false;
+    if (!symbolView || !level) return false;
+    const layers = level.data.layers, ids = pickedLayerIds();
+    if (!ids.length) return false;
     const current = symbolObjectNow?.symbolLayers?.[level.js];
     if (ungroup) {
-      const folder = parentOf(layers, current, index);
-      if (folder == null) { showNotice("This layer is not in a folder."); return true; }
-      setLayerEdit((edit) => ungroupLayer(layers, edit, folder));
+      const folders = [...new Set(ids.map((id) => parentOf(layers, current, id)).filter((folder): folder is number => folder != null))];
+      if (!folders.length) { showNotice("This layer is not in a folder."); return true; }
+      setLayerEdit((edit) => folders.reduce((next, folder) => ungroupLayer(layers, next, folder), edit));
       return true;
     }
-    if (symbolObjectNow?.symbolLayers?.[level.js]?.locked?.includes(index)) { showNotice("This layer is locked."); return true; }
+    if (ids.some((id) => current?.locked?.includes(id))) { showNotice("A locked layer can't be put in a folder."); return true; }
     let done = false;
-    setLayerEdit((edit) => { const next = groupLayers(layers, edit, [index]); done = Boolean(next); return next || edit; });
+    setLayerEdit((edit) => { const next = groupLayers(layers, edit, ids); done = Boolean(next); return next || edit; });
     if (!done) showNotice("This layer can't be put in a folder.");
     return true;
   };
   symbolDeleteRef.current = () => {
     const level = symbolLevelNow;
-    if (!symbolView || !pickedProp || !level || frameSelectionRef.current) return false;
-    const index = level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp));
-    if (index < 0) return false;
-    if (symbolObjectNow?.symbolLayers?.[level.js]?.locked?.includes(index)) { showNotice("This layer is locked."); return true; }
-    setLayerEdit((current) => ({ ...current, deleted: [...new Set([...(current.deleted || []), index])] }));
+    if (!symbolView || !level || frameSelectionRef.current) return false;
+    const ids = pickedLayerIds();
+    if (!ids.length) return false;
+    const locked = symbolObjectNow?.symbolLayers?.[level.js]?.locked || [];
+    if (ids.every((id) => locked.includes(id))) { showNotice(ids.length > 1 ? "These layers are locked." : "This layer is locked."); return true; }
+    const free = ids.filter((id) => !locked.includes(id));
+    setLayerEdit((current) => ({ ...current, deleted: [...new Set([...(current.deleted || []), ...free])] }));
     setPickedPart(null);
     return true;
   };
@@ -3802,13 +4003,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       all[js] = entries; item.symbolKeys = all;
     }
   };
-  /** The layers of the picked part(s), as indexes. */
-  const pickedLayerIds = () => {
-    const level = symbolLevelNow;
-    if (!level || !pickedProp) return [] as number[];
-    const index = level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp));
-    return index >= 0 ? [index] : [];
-  };
   const copyPoseLayers = (quiet = false) => {
     const level = symbolLevelNow, object = symbolObjectNow;
     if (!level || !object) return false;
@@ -3829,7 +4023,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (!sources.length) return true;
     setLayerEdit((current) => { const made = duplicateLayers(layers, current, sources, 0, place); pairs = made.pairs; return made.edit; },
       (item) => { pairs.forEach((pair) => { const snap = clip.items.find((entry) => entry.from === pair.from)?.snap; if (snap) writeSnapshot(item, level.js, snap, pair.to, pair.prop); }); });
-    window.setTimeout(() => { const last = pairs[pairs.length - 1]; if (last) setPickedPart({ objectId: symbolView.objectId, prop: last.prop }); }, 0);
+    window.setTimeout(() => { if (pairs.length) setPartSelection(pairs.map((pair) => pair.prop)); }, 0);
     return true;
   };
   const cutPoseLayers = () => { if (copyPoseLayers(true)) symbolDeleteRef.current?.(); else showNotice("Pick a part first to cut it."); return true; };
@@ -5447,17 +5641,19 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onSymbolDoubleClick={symbolDoubleClick}
               onSymbolDragStart={beginSymbolDrag}
               onSymbolHandleStart={beginSymbolHandle}
+              onSymbolBoxSelect={selectPoseParts}
               onSymbolDeselect={() => setPickedPart(null)}
               onSymbolContext={(action) => {
                 if (["cut", "copy", "paste", "pasteFront", "pasteBack", "forward", "backward", "toFront", "toBack"].includes(action)) { symbolContextClipRef.current?.(action); return; }
-                const level = symbolLevelNow, index = level && pickedProp ? level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp)) : -1;
+                const level = symbolLevelNow, ids = pickedLayerIds(), index = ids.length ? ids[0] : -1;
                 if (index < 0) return;
                 if (action === "delete") { symbolDeleteRef.current?.(); return; }
                 if (action === "flipH" || action === "flipV") { symbolFlipRef.current?.(action === "flipH" ? "h" : "v"); return; }
                 if (action === "group" || action === "ungroup") { symbolGroupRef.current?.(action === "ungroup"); return; }
                 if (action === "pivot") { symbolPivotResetRef.current?.(); return; }
-                if (action === "duplicate") { duplicateSymbolLayers([index]); return; }
-                setLayerEdit((current) => (action === "hide" ? { ...current, hidden: toggled(current.hidden, [index]) } : { ...current, locked: toggled(current.locked, [index]) }));
+                if (action === "duplicate") { duplicateSymbolLayers(ids); return; }
+                void level;
+                setLayerEdit((current) => (action === "hide" ? { ...current, hidden: toggled(current.hidden, ids) } : { ...current, locked: toggled(current.locked, ids) }));
               }}
               symbolBox={symbolBox}
               onSymbolPivotReset={() => void symbolPivotResetRef.current?.()}
@@ -5505,6 +5701,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 values={object?.symbolValues?.[current.js]}
                 keyValues={keyValues}
                 pickedProp={pickedProp}
+                pickedProps={selectedProps}
+                onPickLayers={(ids) => {
+                  const level = symbolView ? symbolView.levels[symbolView.levels.length - 1] : null;
+                  setPartSelection(ids.map((index) => level?.data.layers[index]?.props?.[0]).filter((prop): prop is string => Boolean(prop)));
+                }}
                 onFrameOp={runFrameOp}
                 canPaste={clipboardFilled}
                 onSelectLayer={(index) => {

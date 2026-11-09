@@ -1291,6 +1291,23 @@
     }
     cbPost('SYMBOL_DRAG_INFO', { token: d.token, info: info });
   }
+  // Box selection: the named parts of the open symbol whose box (on the stage) meets the rectangle (fractions of the player).
+  function postPartsInRect(d) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, out = [];
+    if (st && node) {
+      var x0 = Math.min(d.x0, d.x1) * W, x1 = Math.max(d.x0, d.x1) * W, y0 = Math.min(d.y0, d.y1) * H, y1 = Math.max(d.y0, d.y1) * H;
+      (node.children || []).forEach(function (kid) {
+        if (!kid || kid.visible === false) return;
+        var id = childId(node, kid); if (!id || id.charAt(0) === '#') return;
+        var o = node[id], b = o && (rawBounds(o) || shapeBounds(o)); if (!b || !(b.width > 0) || !(b.height > 0)) return;
+        var pts = [[b.x, b.y], [b.x + b.width, b.y], [b.x + b.width, b.y + b.height], [b.x, b.y + b.height]].map(function (p) { return o.localToLocal(p[0], p[1], st); });
+        var bx0 = Math.min.apply(null, pts.map(function (p) { return p.x; })), bx1 = Math.max.apply(null, pts.map(function (p) { return p.x; }));
+        var by0 = Math.min.apply(null, pts.map(function (p) { return p.y; })), by1 = Math.max.apply(null, pts.map(function (p) { return p.y; }));
+        if (bx1 >= x0 && bx0 <= x1 && by1 >= y0 && by0 <= y1) out.push(id);
+      });
+    }
+    cbPost('SYMBOL_PARTS_RECT', { token: d.token, props: out });
+  }
   // A part of the open symbol: its own transform, its box, and how its parent sits on the stage (for the handles).
   // A drawn shape has no bounds of its own: take the extent of its path (control points included).
   function shapeBounds(o) {
@@ -1730,6 +1747,7 @@
       else if (d.type === 'SYMBOL_DRAG_BEGIN') { postDragInfo(d); }
       else if (d.type === 'SYMBOL_PART_QUERY') { postPartInfo(d); }
       else if (d.type === 'SYMBOL_LIBRARY_QUERY') { postLibrary(d); }
+      else if (d.type === 'SYMBOL_PARTS_IN_RECT') { postPartsInRect(d); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
       else if (d.type === 'CHARACTER_EDITS') { applySymbolEdits(d.symbolEases, d.symbolKeys, d.symbolValues, d.symbolLayers); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); applyLayerVisibility(d.symbolLayers); if (st && st.update) st.update(); scheduleBounds(); }

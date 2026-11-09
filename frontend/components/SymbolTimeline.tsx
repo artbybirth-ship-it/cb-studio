@@ -99,7 +99,7 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onAddPicture, onUploadPicture, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onAddPicture, onUploadPicture, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, pickedProps, onPickLayers, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -128,6 +128,10 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   keyValues?: { layer: number; frame: number; values: Record<string, number> | null } | null;
   /** The part picked on the stage (its property name in this symbol): the layers that show it are highlighted. */
   pickedProp?: string | null;
+  /** All the parts picked on the stage (several with Shift or a box); the rows of these are lit. */
+  pickedProps?: string[];
+  /** Several rows picked here (Shift / ⌘): the layers' indexes. */
+  onPickLayers?: (ids: number[]) => void;
   /** A frame operation of Animate on the selected frames (insert / remove frames, insert / clear keyframes, copy / cut / paste). */
   onFrameOp: (op: FrameOp, selection: { layers: number[]; from: number; to: number }) => void;
   /** Frames were copied: Paste is available. */
@@ -324,14 +328,19 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   const idsFor = (id: number) => (layerPick.has(id) ? [...layerPick] : [id]);
   const pickLayer = (event: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }, id: number) => {
     const order = rowsRef.current;
+    let next: number[];
     if (event.shiftKey && layerSel != null && order.includes(layerSel)) {
       const a = order.indexOf(layerSel), b = order.indexOf(id);
-      setLayerPick(new Set(order.slice(Math.min(a, b), Math.max(a, b) + 1)));
+      next = order.slice(Math.min(a, b), Math.max(a, b) + 1);
+      setLayerPick(new Set(next));
     } else if (event.metaKey || event.ctrlKey) {
-      setLayerPick((current) => { const next = new Set(current.size ? current : layerSel != null ? [layerSel] : []); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+      const set = new Set(layerPick.size ? layerPick : layerSel != null ? [layerSel] : []);
+      if (set.has(id)) set.delete(id); else set.add(id);
+      next = [...set];
+      setLayerPick(set);
       setLayerSel(id);
-    } else { setLayerPick(new Set([id])); setLayerSel(id); }
-    onSelectLayer(id);
+    } else { next = [id]; setLayerPick(new Set([id])); setLayerSel(id); }
+    if (next.length > 1 && onPickLayers) onPickLayers(next); else onSelectLayer(next.length ? id : null);
   };
   const renameLayer = (id: number, value: string, fileName: string) => {
     setRenaming(null);
@@ -490,7 +499,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
         {rows.map(({ layer, index, depth, name }) => {
           const shown = !hiddenSet.has(index) && !hiddenByFolder(index), locked = lockedSet.has(index);
           return (
-            <div key={index} data-symbol-row={index} className={`cb-symbol-row ${shown ? "" : "is-hidden"} ${locked ? "is-locked" : ""} ${layer.type === "folder" ? "is-folder" : ""} ${layerSel === index || layerPick.has(index) || (pickedProp && layer.props?.includes(pickedProp)) ? "is-selected" : ""} ${dropAt?.id === index ? `drop-${dropAt.where}` : ""}`}>
+            <div key={index} data-symbol-row={index} className={`cb-symbol-row ${shown ? "" : "is-hidden"} ${locked ? "is-locked" : ""} ${layer.type === "folder" ? "is-folder" : ""} ${layerSel === index || layerPick.has(index) || ((pickedProps || (pickedProp ? [pickedProp] : [])).some((prop) => layer.props?.includes(prop))) ? "is-selected" : ""} ${dropAt?.id === index ? `drop-${dropAt.where}` : ""}`}>
               <div className="cb-symbol-layer" style={{ paddingLeft: 6 + depth * 14 }} onPointerDown={(event) => beginLayerDrag(event, index)} onClick={(event) => { if ((event.target as HTMLElement).closest("button,input")) return; pickLayer(event, index); }} title={`${name}${layer.type !== "normal" ? ` (${layer.type} layer)` : ""}${layer.hidden ? " · hidden in Animate" : ""}${layer.locked ? " · locked in Animate" : ""} · drag to reorder, double-click to rename`}>
                 {layer.type === "folder"
                   ? <button type="button" className="cb-symbol-fold" onClick={() => setClosed((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} aria-label={closed.has(index) ? `Open ${name}` : `Close ${name}`} aria-expanded={!closed.has(index)}><LayerIcon type="folder" open={!closed.has(index)} /></button>

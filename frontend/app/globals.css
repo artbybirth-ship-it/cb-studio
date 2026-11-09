@@ -3546,3 +3546,4 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 .cb-symbol-lib-pics img{width:100%;height:52px;object-fit:contain;background:#1d1d1d;border-radius:4px}
 .cb-symbol-lib-pics span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#bbb}
 .cb-symbol-lib-upload{display:block;margin:4px 0;padding:6px 8px;border-radius:6px;color:#e2e2e2;font-size:12px;cursor:pointer}.cb-symbol-lib-upload:hover{background:#3d4675}
+.cb-symbol-marquee{z-index:60;pointer-events:none;border:1px dashed #e8e8e8;background:rgba(120,150,255,.12);box-shadow:0 0 0 1px rgba(0,0,0,.5)}

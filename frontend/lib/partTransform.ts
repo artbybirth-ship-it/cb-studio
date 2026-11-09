@@ -118,3 +118,21 @@ export function flipPart(info: PartInfo, axis: "h" | "v") {
   const centre: Pt = [info.bounds.x + info.bounds.width / 2, info.bounds.y + info.bounds.height / 2];
   return { ...toScaleSkew(next, { sx: flipX, sy: flipY }), ...keepPoint(info, next, centre) };
 }
+
+/** A change made on the stage (a matrix L about the point `origin`, then a move by `shift`) as this part takes it: its new scale, skews and position. */
+export function affinePart(info: PartInfo, L: [number, number, number, number], origin: Pt, shift: Pt = [0, 0]) {
+  const parent = basisOf(info), next = mul(inverse(parent), mul(L, mul(parent, matrixOf(info))));
+  const det = next[0] * next[3] - next[1] * next[2];
+  const flipY = info.sy < 0 ? -1 : 1, flipX = (det < 0 ? -1 : 1) * flipY;
+  const ps = parentToStage(info, [info.x, info.y]);
+  const moved: Pt = [origin[0] + L[0] * (ps[0] - origin[0]) + L[2] * (ps[1] - origin[1]) + shift[0], origin[1] + L[1] * (ps[0] - origin[0]) + L[3] * (ps[1] - origin[1]) + shift[1]];
+  const at = stageToParent(info, moved);
+  return { ...toScaleSkew(next, { sx: flipX, sy: flipY }), x: at[0], y: at[1] };
+}
+
+/** The box that holds all these parts, in stage units (left, top, right, bottom). */
+export function stageRectOf(infos: PartInfo[]) {
+  const xs: number[] = [], ys: number[] = [];
+  infos.forEach((info) => partBox(info).corners.forEach((corner) => { xs.push(corner[0] * info.W); ys.push(corner[1] * info.H); }));
+  return { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
+}
