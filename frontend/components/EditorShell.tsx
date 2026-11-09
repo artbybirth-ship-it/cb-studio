@@ -4060,6 +4060,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const pastePoseAsPictures = async (clip: NonNullable<typeof poseClipboard.current>) => {
     const level = symbolLevelNow;
     if (!level || !project) return;
+    showNotice("Pasting…");
     try {
       const pictures: Array<{ url: string; w: number; h: number; name: string; keep: boolean }> = [];
       for (const item of clip.items) {

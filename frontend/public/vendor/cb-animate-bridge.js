@@ -1303,7 +1303,9 @@
         var pts = [[b.x, b.y], [b.x + b.width, b.y], [b.x + b.width, b.y + b.height], [b.x, b.y + b.height]].map(function (p) { return o.localToLocal(p[0], p[1], st); });
         var bx0 = Math.min.apply(null, pts.map(function (p) { return p.x; })), bx1 = Math.max.apply(null, pts.map(function (p) { return p.x; }));
         var by0 = Math.min.apply(null, pts.map(function (p) { return p.y; })), by1 = Math.max.apply(null, pts.map(function (p) { return p.y; }));
-        if (bx1 >= x0 && bx0 <= x1 && by1 >= y0 && by0 <= y1) out.push(id);
+        // Picked when the box covers most of the part (at least half of it), so parts the box only brushes are left alone.
+        var ow = Math.min(bx1, x1) - Math.max(bx0, x0), oh = Math.min(by1, y1) - Math.max(by0, y0), area = Math.max(1, (bx1 - bx0) * (by1 - by0));
+        if (ow > 0 && oh > 0 && (ow * oh) / area >= 0.5) out.push(id);
       });
     }
     cbPost('SYMBOL_PARTS_RECT', { token: d.token, props: out });
@@ -1490,10 +1492,12 @@
   }
   // New layer from the pose's library (clones: [{ of: '', symbol: <library class>, prop }]): one instance of the symbol, centred on the
   // stage, held by one keyframe for the whole pose, on top of the file's layers.
-  function pictureObject(image) {
+  function pictureObject(image, clip) {
     // A picture is a container with the image inside, sized to fit about 40% of the stage and centred on the container's origin.
     var box = new createjs.Container(), iw = Math.max(1, image.w || 100), ih = Math.max(1, image.h || 100);
     var fit = image.keep ? 1 : Math.min(1, (H * 0.4) / ih, (W * 0.4) / iw), pw = iw * fit, ph = ih * fit;
+    // A pasted part keeps the size it had on the stage: its size is in stage units, so undo the scale of the clip it lands in.
+    if (image.keep && clip && clip.getConcatenatedMatrix) { var cm = clip.getConcatenatedMatrix(), st0 = cbStage(), kk = (st0 && st0.scaleX) || 1, cs = Math.hypot(cm.a, cm.b) / kk; if (cs > 0) { pw /= cs; ph /= (Math.hypot(cm.c, cm.d) / kk) || cs; } }
     box.nominalBounds = new createjs.Rectangle(-pw / 2, -ph / 2, pw, ph);
     box.setBounds(-pw / 2, -ph / 2, pw, ph);
     var img = new Image();
@@ -1510,7 +1514,7 @@
   function addLibraryLayer(w, touched) {
     var obj, Ctor = w.symbol ? libSymbol(w.symbol) : null;
     if (w.symbol && !Ctor) return;
-    obj = w.symbol ? new Ctor() : pictureObject(w.image);
+    obj = w.symbol ? new Ctor() : pictureObject(w.image, w.clip);
     var total = Math.max(1, w.clip.timeline.duration || w.clip.totalFrames || 1), x = 0, y = 0;
     try { var b = obj.nominalBounds || (obj.getBounds && obj.getBounds()); if (b) { x = W / 2 - (b.x + b.width / 2); y = H / 2 - (b.y + b.height / 2); } } catch (e) {}
     var made = createjs.Tween.get(obj).to({ x: x, y: y, scaleX: 1, scaleY: 1, skewX: 0, skewY: 0, alpha: 1 }, 0);
@@ -1529,15 +1533,16 @@
     var st = cbStage(), node = cbSymbolView && cbSymbolView.node, o = node && d.prop ? node[d.prop] : null, out = { token: d.token, url: '', w: 0, h: 0 };
     try {
       var b = o && (rawBounds(o) || shapeBounds(o));
+      out.why = !node ? 'no open symbol' : !o ? 'no part ' + d.prop : !b ? 'no bounds' : 'ok';
       if (b && b.width > 0 && b.height > 0) {
-        var m = o.getConcatenatedMatrix ? o.getConcatenatedMatrix() : null, sx = m ? Math.hypot(m.a, m.b) : 1, sy = m ? Math.hypot(m.c, m.d) : 1;
-        var k = Math.min(4, 2048 / Math.max(b.width * sx, b.height * sy, 1)), cv = document.createElement('canvas');
+        var m = o.getConcatenatedMatrix ? o.getConcatenatedMatrix() : null, kst = (st && Math.hypot(st.scaleX || 1, st.skewX || 0)) || 1, sx = m ? Math.hypot(m.a, m.b) / kst : 1, sy = m ? Math.hypot(m.c, m.d) / kst : 1;
+        var k = Math.min(4, 2048 / Math.max(b.width * sx, b.height * sy, 1)) * kst, cv = document.createElement('canvas');
         cv.width = Math.max(1, Math.ceil(b.width * sx * k)); cv.height = Math.max(1, Math.ceil(b.height * sy * k));
         var ctx = cv.getContext('2d'); ctx.scale(sx * k, sy * k); ctx.translate(-b.x, -b.y);
         o.draw(ctx, true);
         out.url = cv.toDataURL('image/png'); out.w = b.width * sx; out.h = b.height * sy;
       }
-    } catch (e) {}
+    } catch (e) { out.why = 'error ' + e; }
     cbPost('SYMBOL_PART_PICTURE', out);
   }
   function postLibrary(d) {
