@@ -18,7 +18,7 @@ import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, keyframeAt, removeFrames, shownFrames, spanAt, type Anchor } from "@/lib/symbolKeys";
 import { addSymbolLayer, arrangeSymbolLayers, duplicateLayers, groupLayers, parentOf, ungroupLayer, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
 import { affinePart, canTransform, flipPart, stageRectOf, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
-import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolEaseEdit, SymbolKeyEdit, SymbolLayerEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
+import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, PoseForeign, Project, RenderJob, Scene, SymbolEaseEdit, SymbolKeyEdit, SymbolLayerEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
 import { readOpenProjects, recentProjectsOf, removeOpenProject, upsertOpenProject, type OpenProjectTab } from "@/lib/openProjects";
@@ -4007,7 +4007,22 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // values typed or dragged, eases), so a paste looks like the part does now. Paste works inside the same pose.
   type LayerSnap = { values: Array<[number, SymbolValueEdit]>; keys: SymbolKeyEdit | null; eases: Array<[number, SymbolEaseEdit]> };
   type PartPicture = { url: string; w: number; h: number } | null;
-  const poseClipboard = useRef<{ js: string; items: Array<{ from: number; name: string; snap: LayerSnap; picture: Promise<PartPicture> }> } | null>(null);
+  type PartSource = { symbol: string; foreign: PoseForeign } | null;
+  const poseClipboard = useRef<{ js: string; items: Array<{ from: number; name: string; snap: LayerSnap; picture: Promise<PartPicture>; source: Promise<PartSource> }> } | null>(null);
+  /** The part's own symbol and the export file it comes from: pasted into another character it stays vector. */
+  const capturePartSource = (prop: string) => new Promise<PartSource>((resolve) => {
+    const view = symbolView, frame = view && frameAccessRef.current?.(view.objectId);
+    if (!view || !frame?.contentWindow) { resolve(null); return; }
+    const token = `src${Date.now()}${Math.random()}`;
+    const done = (value: PartSource) => { window.removeEventListener("message", onMessage); window.clearTimeout(timer); resolve(value); };
+    const onMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (d?.source === "characterbazaarstudio-animate" && d.type === "SYMBOL_PART_SOURCE" && d.token === token) done(d.symbol && d.lib ? { symbol: d.symbol, foreign: { lib: d.lib, scale: d.scale || 1, frame: d.frame || 0, mode: d.mode, loop: d.loop } } : null);
+    };
+    const timer = window.setTimeout(() => done(null), 3000);
+    window.addEventListener("message", onMessage);
+    frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_PART_SOURCE_QUERY", prop, token }, "*");
+  });
   /** A picture of a part as it looks now, taken from the open pose; it lets the part be pasted into a different character. */
   const capturePartPicture = (prop: string) => new Promise<PartPicture>((resolve) => {
     const view = symbolView, frame = view && frameAccessRef.current?.(view.objectId);
@@ -4052,27 +4067,32 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (!level || !object) return false;
     const ids = pickedLayerIds().filter((id) => level.data.layers[id]?.type === "normal" && level.data.layers[id]?.props?.length);
     if (!ids.length) { if (!quiet) showNotice("Pick a part first to copy it."); return false; }
-    poseClipboard.current = { js: level.js, items: ids.map((from) => ({ from, name: level.data.layers[from].name, snap: snapshotLayer(object, level.js, from, level.data.layers[from].props![0]), picture: capturePartPicture(level.data.layers[from].props![0]) })) };
+    poseClipboard.current = { js: level.js, items: ids.map((from) => ({ from, name: level.data.layers[from].name, snap: snapshotLayer(object, level.js, from, level.data.layers[from].props![0]), picture: capturePartPicture(level.data.layers[from].props![0]), source: capturePartSource(level.data.layers[from].props![0]) })) };
     if (!quiet) showNotice(ids.length > 1 ? `Copied ${ids.length} parts` : `Copied ${level.data.layers[ids[0]].name}`);
     return true;
   };
-  /** Pasting into a different character: the part arrives as a picture layer, keeping the size it had on the stage. */
+  /** Pasting into a different character: the part arrives as its own vector symbol (loaded from the file it came from), or as a
+   *  picture of it when it has no symbol of its own. It keeps the size it had on the stage. */
   const pastePoseAsPictures = async (clip: NonNullable<typeof poseClipboard.current>) => {
     const level = symbolLevelNow;
     if (!level || !project) return;
     showNotice("Pasting…");
     try {
-      const pictures: Array<{ url: string; w: number; h: number; name: string; keep: boolean }> = [];
+      const made: Array<{ symbol: string; name: string; foreign: PoseForeign } | { url: string; w: number; h: number; name: string; keep: boolean }> = [];
+      let pictures = 0;
       for (const item of clip.items) {
+        const source = await item.source;
+        if (source) { made.push({ symbol: source.symbol, name: item.name || source.symbol, foreign: source.foreign }); continue; }
         const shot = await item.picture;
         if (!shot) continue;
         const blob = await (await fetch(shot.url)).blob();
         const asset = await api.uploadAsset(project.id, "background", new File([blob], `${item.name || "part"}.png`, { type: "image/png" }));
-        pictures.push({ url: asset.url, w: shot.w, h: shot.h, name: item.name || "Part", keep: true });
+        made.push({ url: asset.url, w: shot.w, h: shot.h, name: item.name || "Part", keep: true });
+        pictures += 1;
       }
-      if (!pictures.length) { showNotice("This part could not be copied as a picture."); return; }
-      setLayerEdit((current) => pictures.reduce((edit, image) => addSymbolLayer(level.data.layers, edit, image, null), current));
-      showNotice(pictures.length > 1 ? `Pasted ${pictures.length} parts as pictures` : "Pasted as a picture layer");
+      if (!made.length) { showNotice("This part could not be copied."); return; }
+      setLayerEdit((current) => made.reduce((edit, layer) => addSymbolLayer(level.data.layers, edit, layer, null), current));
+      showNotice(pictures ? `Pasted (${pictures} as a picture: it has no symbol of its own)` : made.length > 1 ? `Pasted ${made.length} parts` : "Pasted as a vector part");
     } catch (error) { showNotice(error instanceof Error ? error.message : "Paste failed", "error"); }
   };
   const pastePoseLayers = (place: "above" | "front" | "back") => {
@@ -4155,12 +4175,33 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     };
     const edited = (index: number, fileFrame: number, base: Record<string, number> | null) => (base ? { ...base, ...(object.symbolValues?.[level.js]?.[`${index}:${fileFrame}`]?.v || {}) } as Record<string, number> : null);
     const movers = doable.filter((index) => ready?.moves[index] && !ready.drawn[index]);
+    // A layer made from the library or a pasted part is one object held for the whole pose: Remove Frames shortens how long it shows
+    // (the frames after it are blank), Insert Frame lengthens it again, as the span of a single keyframe does in Animate.
+    const cloneList = object.symbolLayers?.[level.js]?.clones || [], fileCount = layers.length - cloneList.length, totalFrames = Math.max(1, level.data.frames);
+    const heldAt = (index: number) => (index >= fileCount ? cloneList[index - fileCount] : undefined);
+    const held = (op === "insert-frame" || op === "remove-frames") ? rows.filter((index) => { const c = heldAt(index); return Boolean(c && (c.symbol || c.image)); }) : [];
+    if (held.length) {
+      setLayerEdit((current) => ({ ...current, clones: (current.clones || []).map((clone, at) => {
+        const index = fileCount + at;
+        if (!held.includes(index)) return clone;
+        const now = clone.end ?? totalFrames;
+        const next = op === "remove-frames" ? now - Math.max(0, Math.min(sel.to, now - 1) - Math.max(sel.from, 1) + 1) : Math.min(totalFrames, now + count);
+        const { end: _end, ...rest } = clone;
+        return next >= totalFrames ? rest : { ...rest, end: Math.max(1, next) };
+      }) }));
+    }
+    const doableRest = doable.filter((index) => !held.includes(index));
+    if (held.length && !doableRest.length) return;
+    // A blank layer (new empty layer, sound layer) has no keyframes to move: inserting or removing frames there changes nothing, as in
+    // Animate, so it is not an error; frames of the other layers in the selection still move.
+    const blankOnly = sel.layers.length > 0 && sel.layers.every((index) => !layers[index] || (layers[index].type !== "folder" && !layers[index].props?.length));
+    if (!doable.length && blankOnly && (op === "insert-frame" || op === "remove-frames" || op === "insert-keyframe" || op === "clear-keyframe")) return;
     if (op !== "paste" && !doable.length) { showNotice("The keyframes of these layers can't be edited here."); return; }
     const noRoom = () => showNotice("There is no room: a pose's timeline can't be made longer, so frames can only slide into free frames after them.");
 
     if (op === "insert-frame" || op === "remove-frames") {
       let skipped = 0;
-      batch(() => doable.forEach((index) => {
+      batch(() => doableRest.forEach((index) => {
         const next = op === "insert-frame" ? insertFrames(anchorsOf(index), sel.from, count) : removeFrames(anchorsOf(index), sel.from, sel.to);
         if (next) commit(index, next); else skipped += 1;
       }));

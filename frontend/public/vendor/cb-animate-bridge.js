@@ -451,6 +451,8 @@
     var x = b.x * W, y = b.y * H, r = (b.x + b.width) * W, bt = (b.y + b.height) * H;
     g.f('#ffffff').dr(0, 0, W, y).dr(0, bt, W, H - bt).dr(0, y, x, bt - y).dr(r, y, W - r, bt - y);
   }
+  var cbLastEdits = null;
+  function handleEdits(d) { cbLastEdits = d; var st = cbStage(); applySymbolEdits(d.symbolEases, d.symbolKeys, d.symbolValues, d.symbolLayers); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); applyLayerVisibility(d.symbolLayers); if (st && st.update) st.update(); scheduleBounds(); }
   function applyEdits(d) { discover(); cbSelectedPart = String(d.selectedPart || ''); cbOnlyParts = (d.onlyParts || []).map(String).filter(Boolean); var ov = d.partOverrides || {}; var ruleScopes = (d.colorReplacements || []).map(function (r) { return String(r && r.scope || ''); }); resolveNested(Object.keys(ov).concat([cbSelectedPart, String(d.focusPart || '')], ruleScopes, cbOnlyParts)); refreshBounds(ov); Object.keys(cbParts).forEach(function (k) { applyOne(k, ov[k] || {}); }); Object.keys(cbNestedKeys).forEach(function (k) { if (!ov[k] && k !== cbSelectedPart && k !== String(d.focusPart || '') && ruleScopes.indexOf(k) < 0) delete cbNestedKeys[k]; }); refreshBounds(ov); applyFallbackMasks(ov, d.colorOverrides || {}); cbColorRules = d.colorReplacements || []; applyRecolor(cbColorRules); cbFocusPart = String(d.focusPart || ''); applyOnly(); applyFocus(); var st = cbStage(); if (st && st.update) st.update(); }
   // ---- Tight part bounds: the part alone is drawn off-screen (unedited, in stage units) and its
   // opaque pixels measured, so the box hugs the artwork instead of the symbol's nominal bounds.
@@ -1292,6 +1294,22 @@
     cbPost('SYMBOL_DRAG_INFO', { token: d.token, info: info });
   }
   // Box selection: the named parts of the open symbol whose box (on the stage) meets the rectangle (fractions of the player).
+  // Parts under a box (SYMBOL_PARTS_IN_RECT): a part is picked when some of its drawn pixels lie inside the box, so the box is
+  // matched against the artwork itself, not the rectangle around it (Animate's marquee).
+  function partTouchesRect(o, x0, y0, x1, y1) {
+    var st = cbStage(), rw = x1 - x0, rh = y1 - y0;
+    if (!st || !(rw > 0) || !(rh > 0) || !o.getConcatenatedMatrix) return false;
+    var k = Math.min(1, 320 / Math.max(rw, rh)), cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.ceil(rw * k)); cv.height = Math.max(1, Math.ceil(rh * k));
+    var ctx = cv.getContext('2d'), m = o.getConcatenatedMatrix(), inv = st.getMatrix ? st.getMatrix() : null;
+    if (inv) { try { inv.invert(); m = m.clone().prependMatrix(inv); } catch (e) {} }
+    ctx.setTransform(k, 0, 0, k, -x0 * k, -y0 * k);
+    ctx.transform(m.a, m.b, m.c, m.d, m.tx, m.ty);
+    try { o.draw(ctx, true); } catch (e) { return false; }
+    var px = ctx.getImageData(0, 0, cv.width, cv.height).data;
+    for (var n = 3; n < px.length; n += 4) if (px[n] > 8) return true;
+    return false;
+  }
   function postPartsInRect(d) {
     var st = cbStage(), node = cbSymbolView && cbSymbolView.node, out = [];
     if (st && node) {
@@ -1303,9 +1321,7 @@
         var pts = [[b.x, b.y], [b.x + b.width, b.y], [b.x + b.width, b.y + b.height], [b.x, b.y + b.height]].map(function (p) { return o.localToLocal(p[0], p[1], st); });
         var bx0 = Math.min.apply(null, pts.map(function (p) { return p.x; })), bx1 = Math.max.apply(null, pts.map(function (p) { return p.x; }));
         var by0 = Math.min.apply(null, pts.map(function (p) { return p.y; })), by1 = Math.max.apply(null, pts.map(function (p) { return p.y; }));
-        // Picked when the box covers most of the part (at least half of it), so parts the box only brushes are left alone.
-        var ow = Math.min(bx1, x1) - Math.max(bx0, x0), oh = Math.min(by1, y1) - Math.max(by0, y0), area = Math.max(1, (bx1 - bx0) * (by1 - by0));
-        if (ow > 0 && oh > 0 && (ow * oh) / area >= 0.5) out.push(id);
+        if (bx1 >= x0 && bx0 <= x1 && by1 >= y0 && by0 <= y1 && partTouchesRect(o, x0, y0, x1, y1)) out.push(id);
       });
     }
     cbPost('SYMBOL_PARTS_RECT', { token: d.token, props: out });
@@ -1511,21 +1527,61 @@
     img.src = image.url;
     return box;
   }
+  // Another character's export file, loaded into this page when one of its parts is pasted here: its symbols are real vector symbols
+  // and draw as they do in their own file. Returns its library once loaded (null while loading); the layers are added when it arrives.
+  var cbExtLibs = {};
+  function extLib(url) {
+    var got = cbExtLibs[url];
+    if (got && typeof got === 'object') return got;
+    if (got) return null;
+    cbExtLibs[url] = 'loading';
+    var an = window.AdobeAn, before = Object.keys((an && an.compositions) || {}), el = document.createElement('script');
+    el.onload = function () {
+      var now = window.AdobeAn, added = Object.keys((now && now.compositions) || {}).filter(function (id) { return before.indexOf(id) < 0; }), lib = null;
+      try { if (added.length) lib = now.compositions[added[0]].getLibrary(); } catch (e) {}
+      cbExtLibs[url] = lib || 'failed';
+      if (cbLastEdits) { cbEasesKey = ''; try { handleEdits(cbLastEdits); } catch (e) { } }
+    };
+    el.onerror = function () { cbExtLibs[url] = 'failed'; };
+    el.src = url;
+    document.head.appendChild(el);
+    return null;
+  }
   function addLibraryLayer(w, touched) {
-    var obj, Ctor = w.symbol ? libSymbol(w.symbol) : null;
+    var obj, ext = null, Ctor = null, sc = 1;
+    if (w.foreign) { ext = extLib(w.foreign.lib); if (!ext) return; Ctor = ext[w.symbol]; if (typeof Ctor !== 'function') return; }
+    else Ctor = w.symbol ? libSymbol(w.symbol) : null;
     if (w.symbol && !Ctor) return;
-    obj = w.symbol ? new Ctor() : pictureObject(w.image, w.clip);
-    var total = Math.max(1, w.clip.timeline.duration || w.clip.totalFrames || 1), x = 0, y = 0;
-    try { var b = obj.nominalBounds || (obj.getBounds && obj.getBounds()); if (b) { x = W / 2 - (b.x + b.width / 2); y = H / 2 - (b.y + b.height / 2); } } catch (e) {}
-    var made = createjs.Tween.get(obj).to({ x: x, y: y, scaleX: 1, scaleY: 1, skewX: 0, skewY: 0, alpha: 1 }, 0);
-    if (total > 1) made.wait(total - 1);
+    obj = w.symbol ? (w.foreign ? new Ctor(w.foreign.mode, w.foreign.frame, w.foreign.loop) : new Ctor()) : pictureObject(w.image, w.clip);
+    if (w.foreign) {
+      // It keeps the size it had on the stage: undo the scale of the clip it lands in.
+      try { var cm = w.clip.getConcatenatedMatrix(), st0 = cbStage(), kk = (st0 && st0.scaleX) || 1, cs = Math.hypot(cm.a, cm.b) / kk; if (cs > 0) sc = (w.foreign.scale || 1) / cs; } catch (e) {}
+    }
+    var total = Math.max(1, w.clip.timeline.duration || w.clip.totalFrames || 1), shown = w.end > 0 ? Math.min(total, w.end) : total, x = 0, y = 0;
+    try { var b = obj.nominalBounds || (obj.getBounds && obj.getBounds()); if (b) { x = W / 2 - (b.x + b.width / 2) * sc; y = H / 2 - (b.y + b.height / 2) * sc; } } catch (e) {}
+    var made = createjs.Tween.get(obj).to({ x: x, y: y, scaleX: sc, scaleY: sc, skewX: 0, skewY: 0, alpha: 1 }, 0);
+    if (shown > 1) made.wait(shown - 1);
+    if (shown < total) { made.to({ _off: true }, 0); if (total - shown > 1) made.wait(total - shown - 1); }
     w.clip.timeline.addTween(made);
     var list = w.clip.timeline.tweens, from = list.indexOf(made);
     if (from >= 0) list.splice(from, 1);
     list.unshift(made);
     w.clip[w.prop] = obj;
-    cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: w.symbol, image: w.image ? w.image.url : '', obj: obj, tweens: [made] });
+    cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: w.symbol, image: w.image ? w.image.url : '', lib: w.foreign ? w.foreign.lib : '', end: w.end || 0, obj: obj, tweens: [made] });
     touched.add(w.clip);
+  }
+  // The part of the open symbol as another character's pose can take it: its symbol, the export file it comes from, how it stands.
+  function postPartSource(d) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, o = node && d.prop ? node[d.prop] : null, out = { token: d.token, symbol: '' };
+    try {
+      var name = o && protoNames().get(Object.getPrototypeOf(o));
+      var scripts = [].slice.call(document.querySelectorAll('script[src]')).map(function (e) { return e.getAttribute('src'); }).filter(function (u) { return !/\/vendor\//.test(u) && /\.js(\?|$)/.test(u); });
+      if (name && scripts.length) {
+        var m = o.getConcatenatedMatrix(), kst = (st && st.scaleX) || 1;
+        out.symbol = name; out.lib = scripts[0]; out.scale = Math.hypot(m.a, m.b) / kst; out.frame = o.currentFrame || 0; out.mode = o.mode; out.loop = o.loop;
+      }
+    } catch (e) {}
+    cbPost('SYMBOL_PART_SOURCE', out);
   }
   // A picture of one part of the open symbol, as it looks now (colour edits included), for pasting into another character's pose.
   // w / h are its size on the stage, so the paste keeps the size it had.
@@ -1556,11 +1612,11 @@
     var want = [];
     Object.keys(specs || {}).forEach(function (name) {
       var list = (specs[name] || {}).clones || [];
-      if (list.length) clipsOfClass(name).forEach(function (clip) { list.forEach(function (c) { want.push({ clip: clip, of: c.of, prop: c.prop, symbol: c.symbol || '', image: c.image || null }); }); });
+      if (list.length) clipsOfClass(name).forEach(function (clip) { list.forEach(function (c) { want.push({ clip: clip, of: c.of, prop: c.prop, symbol: c.symbol || '', image: c.image || null, foreign: c.foreign || null, end: c.end || 0 }); }); });
     });
     var changed = false;
     cbClones = cbClones.filter(function (made) {
-      if (want.some(function (w) { return w.clip === made.clip && w.prop === made.prop && w.of === made.of && w.symbol === made.symbol && (w.image ? w.image.url : '') === (made.image || ''); })) return true;
+      if (want.some(function (w) { return w.clip === made.clip && w.prop === made.prop && w.of === made.of && w.symbol === made.symbol && (w.image ? w.image.url : '') === (made.image || '') && (w.foreign ? w.foreign.lib : '') === (made.lib || '') && (w.end || 0) === (made.end || 0); })) return true;
       var list = made.clip.timeline.tweens;
       made.tweens.forEach(function (tw) { var at = list.indexOf(tw); if (at >= 0) list.splice(at, 1); });
       try { made.clip.removeChild(made.obj); if (made.clip._managed) delete made.clip._managed[made.obj.id]; } catch (e) {}
@@ -1770,10 +1826,11 @@
       else if (d.type === 'SYMBOL_PART_QUERY') { postPartInfo(d); }
       else if (d.type === 'SYMBOL_LIBRARY_QUERY') { postLibrary(d); }
       else if (d.type === 'SYMBOL_PART_PICTURE_QUERY') { postPartPicture(d); }
+      else if (d.type === 'SYMBOL_PART_SOURCE_QUERY') { postPartSource(d); }
       else if (d.type === 'SYMBOL_PARTS_IN_RECT') { postPartsInRect(d); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
-      else if (d.type === 'CHARACTER_EDITS') { applySymbolEdits(d.symbolEases, d.symbolKeys, d.symbolValues, d.symbolLayers); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); applyLayerVisibility(d.symbolLayers); if (st && st.update) st.update(); scheduleBounds(); }
+      else if (d.type === 'CHARACTER_EDITS') { handleEdits(d); }
       else if (d.type === 'SYMBOL_VIEW') { restoreSymbolView(); cbSymbolView = d.view || null; applySymbolView(); if (st && st.update) st.update(); scheduleBounds(); }
       else if (d.type === 'SYMBOL_HIT') { cbPost('SYMBOL_HIT', { prop: symbolHit(Number(d.normalizedX || 0), Number(d.normalizedY || 0)) }); }
       else if (d.type === 'HIT_TEST_PART') { selectAt(Number(d.normalizedX || 0), Number(d.normalizedY || 0)); }

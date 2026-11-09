@@ -20,6 +20,9 @@ export type SymbolKeyEdit = { props: string[]; anchors: Array<[number, number]> 
 export type SymbolValueKey = "x" | "y" | "scaleX" | "scaleY" | "skewX" | "skewY" | "alpha" | "regX" | "regY";
 export type SymbolValueEdit = { props: string[]; frame: number; v: Partial<Record<SymbolValueKey, number>> };
 
+/** A part copied from another character: its symbol (named in the clone), the export file that holds it, and how it stood. */
+export type PoseForeign = { lib: string; scale: number; frame: number; mode?: number; loop?: boolean };
+
 /** How the layers of a symbol inside a character were arranged (step inside): see lib/symbolLayers.ts. */
 export type SymbolLayerEdit = {
   order?: number[];
@@ -30,9 +33,9 @@ export type SymbolLayerEdit = {
   parents?: Record<string, number | null>;
   extras?: Array<{ id: number; name: string; type: "normal" | "folder" }>;
   /** Layers made by Duplicate Layer: a new copy (named `prop` in the player) of the layer `of` (its index, a duplicate's index follows the file's layers). */
-  clones?: Array<{ of: number; prop: string; symbol?: string; image?: { url: string; w: number; h: number; name: string; keep?: boolean } }>;
+  clones?: Array<{ of: number; prop: string; symbol?: string; image?: { url: string; w: number; h: number; name: string; keep?: boolean }; foreign?: PoseForeign; end?: number; name?: string }>;
   /** What the player gets (made from the above): the objects of each layer top to bottom, and the objects to hide. */
-  spec?: { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string; symbol?: string; image?: { url: string; w: number; h: number; name: string; keep?: boolean } }> };
+  spec?: { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string; symbol?: string; image?: { url: string; w: number; h: number; name: string; keep?: boolean }; foreign?: PoseForeign; end?: number; name?: string }> };
 };
 
 export type ColorReplacement = {
