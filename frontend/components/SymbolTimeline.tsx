@@ -30,7 +30,9 @@ export type FlaLayer = {
 export type FlaSymbol = { version: number; js: string; fps: number; name: string; frames: number; layers: FlaLayer[] };
 
 export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "copy" | "cut" | "paste";
-const CELL = 11;
+const DEFAULT_ZOOM = 27; // about 11 px per frame, as in the scene's timeline
+let lastZoom = DEFAULT_ZOOM; // kept while stepping in and out of symbols
+const cellFor = (zoom: number) => 4 + (Math.max(1, Math.min(100, zoom)) / 100) * 26;
 const ROW = 26;
 const LAYER_PANEL = 230;
 const short = (name: string) => name.split("/").pop() || name;
@@ -157,6 +159,9 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   const [keySel, setKeySel] = useState<{ layer: number; frame: number } | null>(null);
   const selectKey = (sel: { layer: number; frame: number } | null) => { setKeySel(sel); onSelectKey(sel?.layer ?? 0, sel ? sel.frame : null); };
   const [layerSel, setLayerSel] = useState<number | null>(null);
+  const [zoom, setZoomState] = useState(lastZoom);
+  const setZoom = (change: (value: number) => number) => setZoomState((value) => { const next = change(value); lastZoom = next; return next; });
+  const CELL = cellFor(zoom);
   const [libMenu, setLibMenu] = useState<{ x: number; y: number } | null>(null);
   const [libNames, setLibNames] = useState<string[]>([]);
   const [libFilter, setLibFilter] = useState("");
@@ -414,6 +419,13 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
             {pickedFrame?.tween === "shape" ? "Shape tween: view only" : "Click a purple tween: edit its ease, drag its keyframes"}
           </span>
         )}
+        <div className="cb-frame-view">
+          Frame View
+          <button type="button" onClick={() => setZoom((value) => Math.max(1, value - 8))} aria-label="Narrower frames">−</button>
+          <input type="range" min="1" max="100" value={zoom} onChange={(event) => { const next = Number(event.target.value); setZoom(() => next); }} aria-label="Frame width" />
+          <button type="button" onClick={() => setZoom((value) => Math.min(100, value + 8))} aria-label="Wider frames">＋</button>
+          <button type="button" className="cb-frame-view-reset" onClick={() => setZoom(() => DEFAULT_ZOOM)} title="Reset frame width" aria-label="Reset frame width">⟳</button>
+        </div>
         <span className="cb-symbol-fps">{symbol.fps.toFixed(2)} FPS</span>
         <div className="cb-symbol-transport">
           <button type="button" onClick={() => onSeek(0)} aria-label="First frame" title="First frame"><TransportIcon kind="first" /></button>
