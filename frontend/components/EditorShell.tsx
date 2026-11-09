@@ -16,9 +16,9 @@ import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsert
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, keyframeAt, removeFrames, shownFrames, spanAt, type Anchor } from "@/lib/symbolKeys";
-import { addSymbolLayer, duplicateLayers, groupLayers, parentOf, ungroupLayer, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
+import { addSymbolLayer, arrangeSymbolLayers, duplicateLayers, groupLayers, parentOf, ungroupLayer, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
 import { canTransform, flipPart, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
-import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolLayerEdit, SymbolValueKey } from "@/types";
+import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, Project, RenderJob, Scene, SymbolEaseEdit, SymbolKeyEdit, SymbolLayerEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
 import StageCanvas, { type TransformPatch } from "./StageCanvas";
 import { readOpenProjects, recentProjectsOf, removeOpenProject, upsertOpenProject, type OpenProjectTab } from "@/lib/openProjects";
@@ -1701,6 +1701,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const symbolNudgeRef = useRef<((dx: number, dy: number) => boolean) | null>(null);
   const symbolDeleteRef = useRef<(() => boolean) | null>(null);
   const symbolDuplicateRef = useRef<(() => boolean) | null>(null);
+  const symbolPoseKeyRef = useRef<((event: KeyboardEvent) => boolean) | null>(null);
+  const symbolContextClipRef = useRef<((action: string) => void) | null>(null);
   const symbolFlipRef = useRef<((axis: "h" | "v") => boolean) | null>(null);
   const symbolGroupRef = useRef<((ungroup: boolean) => boolean) | null>(null);
   const symbolPivotResetRef = useRef<(() => boolean) | null>(null);
@@ -2012,6 +2014,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
       if (!commandOrControl || isEditableTarget(event.target)) return;
 
+      if (symbolPoseKeyRef.current?.(event)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
       const key = event.key.toLowerCase();
       // Copy / Cut / Paste layers (in text boxes these stay normal text copy and paste, above).
       if (!event.altKey && (event.code === "KeyC" || event.code === "KeyX" || event.code === "KeyV") && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
@@ -3423,7 +3426,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (symbolBatch.current) symbolBatch.current.push(write); else mutate(write);
   }, [mutate, symbolView]);
   // Layers arranged inside the character (order, hide, lock, rename, delete, folders): one change, one undo step.
-  const setLayerEdit = useCallback((change: (edit: SymbolLayerEdit) => SymbolLayerEdit | null) => {
+  const setLayerEdit = useCallback((change: (edit: SymbolLayerEdit) => SymbolLayerEdit | null, also?: (item: EditorObject) => void) => {
     if (!symbolView) return;
     const level = symbolView.levels[symbolView.levels.length - 1];
     mutate((data) => {
@@ -3432,6 +3435,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       const symbols = { ...(item.symbolLayers || {}) }, next = change({ ...(symbols[level.js] || {}) });
       if (!next || isLayerEditEmpty(next)) delete symbols[level.js]; else symbols[level.js] = { ...next, spec: playerSpec(withClones(level.fileData || level.data, next.clones).layers, next) };
       item.symbolLayers = symbols;
+      also?.(item);
     });
   }, [mutate, symbolView]);
   // Parts on the stage inside the character: press and drag to move, click to pick (then rotate / scale with handles). All of it edits
@@ -3640,7 +3644,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const usable = copyable.filter((id) => !ready?.drawn[id]);
     if (!usable.length) { showNotice("This layer is drawn frame by frame: it can't be duplicated yet."); return; }
     if (usable.length < copyable.length) showNotice("Layers drawn frame by frame were left out: they can't be duplicated yet.");
-    setLayerEdit((current) => duplicateLayers(layers, current, usable, 0).edit);
+    let pairs: Array<{ from: number; to: number; prop: string }> = [];
+    setLayerEdit((current) => { const made = duplicateLayers(layers, current, usable, 0); pairs = made.pairs; return made.edit; },
+      (item) => pairs.forEach((pair) => writeSnapshot(item, level.js, snapshotLayer(item, level.js, pair.from, layers[pair.from].props![0]), pair.to, pair.prop)));
   }, [keysEditable, setLayerEdit, showNotice, symbolLevelNow]);
   /** The pose's library symbols (asked of the player). */
   const listPoseLibrary = useCallback(() => new Promise<string[]>((resolve) => {
@@ -3766,6 +3772,93 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     setLayerEdit((current) => ({ ...current, deleted: [...new Set([...(current.deleted || []), index])] }));
     setPickedPart(null);
     return true;
+  };
+  // ---- Copy / Cut / Paste (and in Front / in Back), Arrange: a part's layer is copied with the edits made on it (keyframes moved,
+  // values typed or dragged, eases), so a paste looks like the part does now. Paste works inside the same pose.
+  type LayerSnap = { values: Array<[number, SymbolValueEdit]>; keys: SymbolKeyEdit | null; eases: Array<[number, SymbolEaseEdit]> };
+  const poseClipboard = useRef<{ js: string; items: Array<{ from: number; name: string; snap: LayerSnap }> } | null>(null);
+  const snapshotLayer = (item: EditorObject, js: string, index: number, prop: string): LayerSnap => {
+    const pick = <T extends { props: string[]; frame: number }>(map: Record<string, T> | undefined) => Object.entries(map || {}).filter(([key]) => {
+      const [layer, , part] = key.split(":");
+      return Number(layer) === index && (!part || part === prop);
+    }).map(([, value]): [number, T] => [value.frame, JSON.parse(JSON.stringify(value)) as T]);
+    const keys = item.symbolKeys?.[js]?.[String(index)];
+    return { values: pick(item.symbolValues?.[js]), keys: keys ? JSON.parse(JSON.stringify(keys)) : null, eases: pick(item.symbolEases?.[js]) };
+  };
+  const writeSnapshot = (item: EditorObject, js: string, snap: LayerSnap, index: number, prop: string) => {
+    if (snap.values.length) {
+      const all = { ...(item.symbolValues || {}) }, entries = { ...(all[js] || {}) };
+      snap.values.forEach(([frame, value]) => { entries[`${index}:${frame}`] = { ...value, props: [prop] }; });
+      all[js] = entries; item.symbolValues = all;
+    }
+    if (snap.eases.length) {
+      const all = { ...(item.symbolEases || {}) }, entries = { ...(all[js] || {}) };
+      snap.eases.forEach(([frame, value]) => { entries[`${index}:${frame}`] = { ...value, props: [prop] }; });
+      all[js] = entries; item.symbolEases = all;
+    }
+    if (snap.keys) {
+      const all = { ...(item.symbolKeys || {}) }, entries = { ...(all[js] || {}) };
+      entries[String(index)] = { ...snap.keys, props: [prop] };
+      all[js] = entries; item.symbolKeys = all;
+    }
+  };
+  /** The layers of the picked part(s), as indexes. */
+  const pickedLayerIds = () => {
+    const level = symbolLevelNow;
+    if (!level || !pickedProp) return [] as number[];
+    const index = level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp));
+    return index >= 0 ? [index] : [];
+  };
+  const copyPoseLayers = (quiet = false) => {
+    const level = symbolLevelNow, object = symbolObjectNow;
+    if (!level || !object) return false;
+    const ids = pickedLayerIds().filter((id) => level.data.layers[id]?.type === "normal" && level.data.layers[id]?.props?.length);
+    if (!ids.length) { if (!quiet) showNotice("Pick a part first to copy it."); return false; }
+    poseClipboard.current = { js: level.js, items: ids.map((from) => ({ from, name: level.data.layers[from].name, snap: snapshotLayer(object, level.js, from, level.data.layers[from].props![0]) })) };
+    if (!quiet) showNotice(ids.length > 1 ? `Copied ${ids.length} parts` : `Copied ${level.data.layers[ids[0]].name}`);
+    return true;
+  };
+  const pastePoseLayers = (place: "above" | "front" | "back") => {
+    const level = symbolLevelNow, clip = poseClipboard.current;
+    if (!level || !symbolView) return false;
+    if (!clip) { showNotice("Nothing copied yet. Pick a part and press ⌘C."); return true; }
+    if (clip.js !== level.js) { showNotice("Paste works inside the pose the part was copied from."); return true; }
+    const layers = level.data.layers;
+    let pairs: Array<{ from: number; to: number; prop: string }> = [];
+    const sources = clip.items.map((item) => item.from).filter((from) => layers[from]);
+    if (!sources.length) return true;
+    setLayerEdit((current) => { const made = duplicateLayers(layers, current, sources, 0, place); pairs = made.pairs; return made.edit; },
+      (item) => { pairs.forEach((pair) => { const snap = clip.items.find((entry) => entry.from === pair.from)?.snap; if (snap) writeSnapshot(item, level.js, snap, pair.to, pair.prop); }); });
+    window.setTimeout(() => { const last = pairs[pairs.length - 1]; if (last) setPickedPart({ objectId: symbolView.objectId, prop: last.prop }); }, 0);
+    return true;
+  };
+  const cutPoseLayers = () => { if (copyPoseLayers(true)) symbolDeleteRef.current?.(); else showNotice("Pick a part first to cut it."); return true; };
+  const arrangePoseLayers = (how: "forward" | "backward" | "front" | "back") => {
+    const level = symbolLevelNow;
+    if (!level) return false;
+    const ids = pickedLayerIds();
+    if (!ids.length) return false;
+    if (ids.some((id) => symbolObjectNow?.symbolLayers?.[level.js]?.locked?.includes(id))) { showNotice("This layer is locked."); return true; }
+    setLayerEdit((current) => arrangeSymbolLayers(level.data.layers, current, ids, how) || current);
+    return true;
+  };
+  // Duplicate Layer keeps what was edited on the layer too.
+  symbolPoseKeyRef.current = (event) => {
+    if (!symbolView || (event.metaKey === false && event.ctrlKey === false) || event.altKey) return false;
+    if (event.code === "KeyC" && !event.shiftKey) return pickedLayerIds().length ? copyPoseLayers() : false;
+    if (event.code === "KeyX" && !event.shiftKey) return pickedLayerIds().length ? cutPoseLayers() : false;
+    if (event.code === "KeyV") return pastePoseLayers("above");
+    if ((event.code === "KeyF" || event.code === "KeyB") && !event.shiftKey) return pastePoseLayers(event.code === "KeyF" ? "front" : "back");
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") return arrangePoseLayers(event.shiftKey ? (event.key === "ArrowUp" ? "front" : "back") : (event.key === "ArrowUp" ? "forward" : "backward"));
+    return false;
+  };
+  symbolContextClipRef.current = (action) => {
+    if (action === "copy") copyPoseLayers();
+    else if (action === "cut") cutPoseLayers();
+    else if (action === "paste") pastePoseLayers("above");
+    else if (action === "pasteFront") pastePoseLayers("front");
+    else if (action === "pasteBack") pastePoseLayers("back");
+    else arrangePoseLayers(action === "toFront" ? "front" : action === "toBack" ? "back" : action === "forward" ? "forward" : "backward");
   };
   // ---- Frame operations, as in Animate: insert / remove frames, insert / clear keyframes, copy / cut / paste frames.
   // The pose's timeline keeps its length, so frames slide inside it. One operation is one undo step.
@@ -5356,6 +5449,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onSymbolHandleStart={beginSymbolHandle}
               onSymbolDeselect={() => setPickedPart(null)}
               onSymbolContext={(action) => {
+                if (["cut", "copy", "paste", "pasteFront", "pasteBack", "forward", "backward", "toFront", "toBack"].includes(action)) { symbolContextClipRef.current?.(action); return; }
                 const level = symbolLevelNow, index = level && pickedProp ? level.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp)) : -1;
                 if (index < 0) return;
                 if (action === "delete") { symbolDeleteRef.current?.(); return; }

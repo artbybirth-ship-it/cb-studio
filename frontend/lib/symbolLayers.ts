@@ -156,26 +156,52 @@ export function addSymbolLayer(layers: FlaLayer[], edit: SymbolLayerEdit | undef
   return { ...base, clones, order: [...order.slice(0, at), index, ...order.slice(at)], parents };
 }
 
-/** A copy of each of these layers, put above the layer it copies (folders, masks and layers with no objects are left out). */
-export function duplicateLayers(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, ids: number[], fileCount: number): { edit: SymbolLayerEdit; made: number } {
-  const base = edit || {}, clones = [...(base.clones || [])];
-  let order = orderOf(layers, edit), made = 0;
+/** A copy of each of these layers: just above the layer it copies, or on top of all layers, or at the bottom (folders, masks and layers with no objects are left out). */
+export function duplicateLayers(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, ids: number[], fileCount: number, place: "above" | "front" | "back" = "above"): { edit: SymbolLayerEdit; made: number; pairs: Array<{ from: number; to: number; prop: string }> } {
+  const base = edit || {}, clones = [...(base.clones || [])], pairs: Array<{ from: number; to: number; prop: string }> = [];
+  let order = orderOf(layers, edit), made = 0, top = 0;
   const parents = { ...(base.parents || {}) };
-  let used = clones.reduce((top, clone) => Math.max(top, Number(clone.prop.replace(/\D+/g, "")) || 0), 0);
+  let used = clones.reduce((most, clone) => Math.max(most, Number(clone.prop.replace(/\D+/g, "")) || 0), 0);
   let count = layers.length;
   order.filter((id) => ids.includes(id)).forEach((id) => {
     const layer = layers[id];
     if (id >= EXTRA_BASE || !layer || layer.type !== "normal" || !layer.props?.length) return;
     used += 1;
-    clones.push({ of: id, prop: `cbdup${used}` });
+    const prop = `cbdup${used}`;
+    clones.push({ of: id, prop });
     const index = count;
     count += 1;
     made += 1;
-    order = [...order.slice(0, order.indexOf(id)), index, ...order.slice(order.indexOf(id))];
-    parents[String(index)] = parentOf(layers, edit, id);
+    pairs.push({ from: id, to: index, prop });
+    if (place === "front") { order = [...order.slice(0, top), index, ...order.slice(top)]; top += 1; parents[String(index)] = null; }
+    else if (place === "back") { order = [...order, index]; parents[String(index)] = null; }
+    else { order = [...order.slice(0, order.indexOf(id)), index, ...order.slice(order.indexOf(id))]; parents[String(index)] = parentOf(layers, edit, id); }
   });
   void fileCount;
-  return { edit: { ...base, clones, order, parents }, made };
+  return { edit: { ...base, clones, order, parents }, made, pairs };
+}
+
+/** Moves layers one step up / down among their neighbours, or to the top / bottom (Bring Forward, Send Backward, to Front, to Back). Null when nothing moves. */
+export function arrangeSymbolLayers(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, ids: number[], how: "forward" | "backward" | "front" | "back"): SymbolLayerEdit | null {
+  const deleted = new Set(edit?.deleted || []);
+  const order = orderOf(layers, edit).filter((id) => !deleted.has(id));
+  const picked = order.filter((id) => ids.includes(id));
+  if (!picked.length) return null;
+  let next: SymbolLayerEdit | null = edit || {};
+  const sameParent = (id: number) => order.filter((other) => parentOf(layers, edit, other) === parentOf(layers, edit, id));
+  const group = how === "forward" || how === "front" ? picked : [...picked].reverse();
+  for (const id of group) {
+    const siblings = sameParent(id).filter((other) => !ids.includes(other) || other === id), at = siblings.indexOf(id);
+    let target: number | undefined, where: "before" | "after" = "before";
+    if (how === "front") target = siblings.find((other) => !ids.includes(other)), where = "before";
+    else if (how === "back") { target = [...siblings].reverse().find((other) => !ids.includes(other)); where = "after"; }
+    else if (how === "forward") { target = siblings.slice(0, at).reverse().find((other) => !ids.includes(other)); where = "before"; }
+    else { target = siblings.slice(at + 1).find((other) => !ids.includes(other)); where = "after"; }
+    if (target == null) continue;
+    const moved = moveLayers(layers, next, [id], target, where);
+    if (moved) next = moved;
+  }
+  return next && next !== (edit || {}) ? next : null;
 }
 
 /** Nothing in the edit changes the layers: it can be dropped. */
