@@ -1282,7 +1282,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       } catch { /* player not reachable */ }
     }
     if (items.every((item) => item.type === "character" && !palettes[item.id])) { showNotice("The character is still loading. Try again in a moment."); return; }
-    const label = items.length > 1 ? `${items.length} layers` : scope.startsWith("@") ? `${items[0].name} · ${symbolLevelNow?.data.layers.find((layer) => (layer.props || []).includes(scope.split("/").pop() || ""))?.name || "part"}` : scope !== "*" ? `${items[0].name} · ${partLabel(items[0], scope)}` : items[0].type === "text" ? (items[0].text || items[0].name || "Text").slice(0, 32) : items[0].name;
+    const label = items.length > 1 ? `${items.length} layers` : scope.startsWith("@") ? `${items[0].name} · ${scope.includes("+") ? `${scope.split("+").length} parts` : symbolLevelNow?.data.layers.find((layer) => (layer.props || []).includes(scope.split("/").pop() || ""))?.name || "part"}` : scope !== "*" ? `${items[0].name} · ${partLabel(items[0], scope)}` : items[0].type === "text" ? (items[0].text || items[0].name || "Text").slice(0, 32) : items[0].name;
     setAdjust({ ids: items.map((item) => item.id), label, hasShadow: items.some((item) => item.type === "text"), base, palettes });
   };
   const adjustPatches = (state: AdjustState, settings: AdjustSettings) => {
@@ -2860,6 +2860,14 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   const transformReadRef = useRef<() => TransformReading | null>(() => null);
   transformReadRef.current = () => {
+    if (symbolView && multiProps.length > 1) {
+      // Several parts: the box that holds them (its reference point, its size); Rotate turns them all by the number typed.
+      const infos = groupInfosRef.current;
+      if (!infos.length) return null;
+      const rect = stageRectOf(infos), at = { x: rect.left + transformReference.rx * (rect.right - rect.left), y: rect.top + transformReference.ry * (rect.bottom - rect.top) };
+      return { mode: "layer", targetLabel: `${symbolObjectNow?.name || "Character"} › ${multiProps.length} parts`, scaleStrokesAvailable: false,
+        values: { x: at.x, y: at.y, w: rect.right - rect.left, h: rect.bottom - rect.top, rotation: 0, skew: 0 } };
+    }
     if (symbolView && pickedProp) {
       // Inside a pose: the picked part's own numbers (position in the pose, size in %, turn and skew in degrees).
       const info = partInfoRef.current, level = symbolLevelNow;
@@ -2889,6 +2897,27 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const readTransform = useCallback(() => transformReadRef.current(), []);
   const transformChangeRef = useRef<(field: TransformField, value: number) => void>(() => undefined);
   transformChangeRef.current = (field, value) => {
+    if (symbolView && multiProps.length > 1) {
+      const infos = groupInfosRef.current, plans = groupPlans(infos.map((info) => info.prop));
+      if (!infos.length || !plans || !Number.isFinite(value)) return;
+      const rect = stageRectOf(infos), width = rect.right - rect.left, height = rect.bottom - rect.top;
+      const anchor: Pt = [rect.left + transformReference.rx * width, rect.top + transformReference.ry * height];
+      let L: [number, number, number, number] = [1, 0, 0, 1], shift: Pt = [0, 0];
+      if (field === "x") shift = [value - anchor[0], 0];
+      else if (field === "y") shift = [0, value - anchor[1]];
+      else if (field === "w" || field === "h") {
+        const now = field === "w" ? width : height;
+        if (!(value > 0) || !(now > 0)) return;
+        const f = value / now;
+        L = transformLinked ? [f, 0, 0, f] : field === "w" ? [f, 0, 0, 1] : [1, 0, 0, f];
+      } else if (field === "rotation") { const turn = (value * Math.PI) / 180; L = [Math.cos(turn), Math.sin(turn), -Math.sin(turn), Math.cos(turn)]; }
+      else return;
+      const change = groupChange(infos, L, anchor, shift), editor = groupEditor(plans);
+      editor.apply(change.patches);
+      editor.end();
+      setGroupInfos(change.shown);
+      return;
+    }
     if (symbolView && pickedProp) {
       const info = partInfoRef.current;
       if (!info || !canTransform(info) || !Number.isFinite(value)) return;
@@ -3548,8 +3577,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const now = selectedPropsRef.current;
     setPartSelection(now.includes(prop) ? now.filter((item) => item !== prop) : [...now, prop]);
   }, [setPartSelection]);
-  const poseScopeNow = pickedProp && symbolLevelNow ? `@${symbolLevelNow.js}/${pickedProp}` : null;
-  const poseOwnerNow = pickedProp && symbolView ? symbolView.objectId : null;
+  const poseScopeNow = selectedProps.length && symbolLevelNow ? `@${symbolLevelNow.js}/${selectedProps.join("+")}` : null;
+  const poseOwnerNow = selectedProps.length && symbolView ? symbolView.objectId : null;
   useEffect(() => { setPoseColourScope(poseScopeNow); setPoseOwnerId(poseOwnerNow); }, [poseScopeNow, poseOwnerNow]);
   const partVersion = JSON.stringify([symbolLevelNow?.frame, symbolLevelNow?.js, symbolObjectNow?.symbolValues, symbolObjectNow?.symbolKeys, symbolObjectNow?.symbolEases]);
   useEffect(() => {

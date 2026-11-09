@@ -820,16 +820,16 @@
   }
   // Shapes of the character (or one part), including timeline instances not on the current frame
   // (Animate names them shape, shape_1, instance_3…) and swapped-in variants. fn(shape, partKey).
-  // A pose part is a scope of its own: "@<pose class>/<object name>" (e.g. "@Sardar_01/instance_9"). Its shapes get that tag, next to
-  // the character part they belong to.
+  // A pose part is a scope of its own: "@<pose class>/<object name>" (e.g. "@Sardar_01/instance_9"), several parts joined by "+".
+  // Its shapes get that tag, next to the character part they belong to.
   var cbTagNodes = new Map();
   function refreshTagNodes(extra) {
     cbTagNodes = new Map();
     var scopes = (cbColorRules || []).map(function (r) { return String(r && r.scope || ''); }).concat(extra ? [String(extra)] : []);
     scopes.forEach(function (sc) {
       if (sc.charAt(0) !== '@') return;
-      var cut = sc.indexOf('/'), cls = sc.slice(1, cut), prop = sc.slice(cut + 1);
-      try { clipsOfClass(cls).forEach(function (clip) { var node = clip[prop]; if (node && typeof node === 'object') cbTagNodes.set(node, sc); }); } catch (e) {}
+      var cut = sc.indexOf('/'), cls = sc.slice(1, cut), props = sc.slice(cut + 1).split('+');
+      try { clipsOfClass(cls).forEach(function (clip) { props.forEach(function (prop) { var node = clip[prop]; if (node && typeof node === 'object') cbTagNodes.set(node, sc); }); }); } catch (e) {}
     });
   }
   function scopeNodes(scope) {
