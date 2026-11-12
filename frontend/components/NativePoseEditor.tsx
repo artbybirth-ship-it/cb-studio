@@ -13,7 +13,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { FlaDocument, FlaElement, Layer, Matrix, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
 import { clearKeyframe, commit, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setMatrix, undo, type History } from "../lib/native/ops";
-import { layerStateAt } from "../lib/native/evaluate";
+import { innerFrame, layerStateAt } from "../lib/native/evaluate";
 import { applyEdits, editsOf, parseEdits, serializeEdits, type NativeEdits } from "../lib/native/store";
 import { IDENTITY, importElements, invert, mul, poseScale, registerLibrary } from "../lib/native/library";
 import { copyClip, readClip } from "../lib/native/clipboard";
@@ -58,6 +58,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const [view, setView] = useState({ x: 0, y: 0, w: 500, h: 900 });
   const [note, setNote] = useState("");
   const canvas = useRef<HTMLCanvasElement>(null);
+  /** Set when a double-click steps into a part: the frame it was playing and the point clicked, in its own space, to select what lies under it once the new level is open. */
+  const arriving = useRef<{ frame: number; at: [number, number] } | null>(null);
 
   const working = hist.present;
   const base = working.get(symbol) ?? doc.symbols.get(symbol)?.timeline;
@@ -175,6 +177,14 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     if (x1 < 0) { setView({ x: -250, y: -450, w: 500, h: 900 }); return; }
     setView({ x: (x0 - SIZE / 2) / S, y: (y0 - SIZE / 2) / S, w: (x1 - x0) / S, h: (y1 - y0) / S });
     setFrame(0); setRange([0, 0]); setLayerIndex(0); setElIndex(null);
+    const landed = arriving.current;
+    arriving.current = null;
+    if (landed) {
+      const level = working.get(symbol) ?? doc.symbols.get(symbol)?.timeline;
+      const hit = level && pickAt(level, landed.frame, landed.at[0], landed.at[1], 4);
+      setFrame(landed.frame);
+      if (hit) { setLayerIndex(hit.layer); setElIndex(hit.el); }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layoutKey, renderer]);
 
@@ -210,22 +220,23 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     }
   }, [renderer, working, shown, symbol, frame, fit, layerIndex, elIndex]);
 
-  /** Topmost layer, and part of it, drawn at the pointer. */
-  function pick(cx: number, cy: number): { layer: number; el: number } | null {
-    if (!shown || !canvas.current) return null;
-    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
+  /** Topmost layer, and part of it, drawn at the point (x, y) of `timeline`'s own space, probed at `scale` pixels per unit. */
+  function pickAt(timeline: Timeline, at: number, x: number, y: number, scale: number): { layer: number; el: number } | null {
+    renderer.overrides.clear();
+    for (const [name, t] of working) renderer.overrides.set(name, t);
+    renderer.overrides.set(symbol, timeline);
     const test = (layer: Layer): boolean => {
       const probe = new OffscreenCanvas(1, 1), ctx = probe.getContext("2d", { willReadFrequently: true })!;
-      ctx.setTransform(s, 0, 0, s, tx - cx, ty - cy);
-      renderer.drawTimeline(ctx, { name: "", layers: [{ ...layer, parent: null, type: "normal" }], length: shown.length }, frame);
+      ctx.setTransform(scale, 0, 0, scale, -x * scale, -y * scale);
+      renderer.drawTimeline(ctx, { name: "", layers: [{ ...layer, parent: null, type: "normal" }], length: timeline.length }, at);
       return ctx.getImageData(0, 0, 1, 1).data[3] > 8;
     };
-    for (let i = 0; i < shown.layers.length; i += 1) {
-      const layer = shown.layers[i];
+    for (let i = 0; i < timeline.layers.length; i += 1) {
+      const layer = timeline.layers[i];
       if (layer.type === "folder" || layer.type === "guide" || layer.type === "mask") continue;
-      const state = layerStateAt(layer, frame);
+      const state = layerStateAt(layer, at);
       if (!state || !test(layer)) continue;
-      const parts = resolveElements(layer, frame);
+      const parts = resolveElements(layer, at);
       for (let j = parts.length - 1; j >= 0; j -= 1) {
         const only: Layer = { ...layer, frames: [{ i: state.key.i, d: state.key.d, elements: [parts[j] as FlaElement] }] };
         if (test(only)) return { layer: i, el: j };
@@ -234,6 +245,33 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     }
     return null;
   }
+  /** The part at the pointer on the stage. */
+  function pick(cx: number, cy: number): { layer: number; el: number } | null {
+    if (!shown || !canvas.current) return null;
+    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
+    return pickAt(shown, frame, (cx - tx) / s, (cy - ty) / s, s);
+  }
+
+  /** Double-click: step into the symbol under the pointer (and select what lies under it there); on empty stage, step back out. */
+  const onStageDouble = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!shown || !canvas.current) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cx = (e.clientX - rect.left) * (e.currentTarget.width / rect.width), cy = (e.clientY - rect.top) * (e.currentTarget.height / rect.height);
+    const hit = pick(cx, cy);
+    if (!hit) {
+      if (stack.length > 1) setStack((st) => st.slice(0, -1));
+      return;
+    }
+    const layer = shown.layers[hit.layer];
+    const part = resolveElements(layer, frame)[hit.el];
+    const inner = part?.k === "instance" ? doc.symbols.get(part.item)?.timeline : undefined;
+    if (!part || part.k !== "instance" || !inner) { setNote("Nothing to step into here: this is plain artwork"); return; }
+    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
+    const back = invert(part.m);
+    const x = (cx - tx) / s, y = (cy - ty) / s;
+    arriving.current = { frame: innerFrame(part, layerStateAt(layer, frame)?.offset ?? 0, inner.length), at: [back[0] * x + back[2] * y + back[4], back[1] * x + back[3] * y + back[5]] };
+    setStack((st) => [...st, { item: part.item, m: [...part.m] as Matrix }]);
+  };
 
   const toCanvas = (e: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -308,7 +346,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     } catch (error) { setNote(error instanceof Error ? error.message : String(error)); }
   };
 
-  const part = shown && elIndex != null ? resolveElements(shown.layers[layerIndex], frame)[elIndex] : undefined;
+  const part = shown && elIndex != null && shown.layers[layerIndex] ? resolveElements(shown.layers[layerIndex], frame)[elIndex] : undefined;
   const parts = shown?.layers[layerIndex] ? resolveElements(shown.layers[layerIndex], frame) : [];
   const btn: React.CSSProperties = { padding: "3px 8px", font: "12px system-ui" };
 
@@ -335,7 +373,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       </div>
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
         <canvas data-testid="stage" ref={canvas} width={760} height={560} style={{ border: "1px solid #ccc", width: 570, height: 420, touchAction: "none", cursor: drag?.kind === "part" ? "grabbing" : "default" }}
-          onPointerDown={onStageDown} onPointerMove={onStageMove} onPointerUp={onStageUp} />
+          onPointerDown={onStageDown} onPointerMove={onStageMove} onPointerUp={onStageUp} onDoubleClick={onStageDouble} />
         <div style={{ font: "12px system-ui", minWidth: 240 }}>
           <div><b>frame {frame + 1}</b> of {length}{range[1] > range[0] ? ` (selected ${range[0] + 1}–${range[1] + 1})` : ""} · layer {shown?.layers[layerIndex]?.name || "—"}</div>
           <div style={{ marginTop: 6 }}>Parts here:</div>
@@ -346,7 +384,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
             </div>
           ))}
           {part && <div style={{ marginTop: 6 }}>x {part.m[4].toFixed(1)} · y {part.m[5].toFixed(1)}</div>}
-          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move. ⌥-drag a keyframe in the timeline to move it. ⇧-click extends the frame selection. , and . step frames.</div>
+          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move; double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it. ⇧-click extends the frame selection. , and . step frames.</div>
         </div>
       </div>
       {shown && (
