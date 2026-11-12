@@ -358,6 +358,7 @@ button{cursor:pointer}
   z-index:0;
 }
 .cb-stage-character>.cb-character-source-frame{position:relative;z-index:1}
+.cb-native-character-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:2;pointer-events:none;background:transparent}
 
 /* v35 — Prompt-driven deterministic animation */
 .cb-ai-animate-top-button{border-color:#5d7bef!important;background:linear-gradient(180deg,#263a86,#1d2f70)!important;color:#fff!important;font-weight:700}
@@ -3314,7 +3315,9 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 /* ---- Step inside a character: its own Animate timeline (SymbolTimeline, view only). */
 .cb-symbol-timeline{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0;height:100%;background:#151515;border:1px solid #262626;color:#bdbdbd;font:12px/1.2 system-ui,sans-serif}
 .cb-symbol-toolbar{display:flex;align-items:center;gap:14px;min-height:44px;padding:0 12px;background:#232323;border-bottom:1px solid #4d4d4d}
-.cb-symbol-crumbs{display:flex;align-items:center;min-width:0;flex:1;overflow:hidden;white-space:nowrap}
+.cb-symbol-crumbs{display:flex;align-items:center;min-width:220px;flex:1;overflow:hidden;white-space:nowrap}
+.cb-symbol-native{flex:none;border:1px solid #5b6fb5;background:#2b3358;color:#cfdbff;font:inherit;font-size:12px;padding:3px 9px;border-radius:5px;cursor:pointer}
+.cb-symbol-native:hover{background:#38437a}
 .cb-symbol-crumbs span{display:inline-flex;align-items:center;min-width:0}
 .cb-symbol-crumbs i{margin:0 7px;color:#6f6f6f;font-style:normal}
 .cb-symbol-crumbs button{border:0;background:transparent;color:#8fb1ff;font:inherit;padding:2px 3px;border-radius:4px;cursor:pointer}
@@ -3376,6 +3379,9 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 .cb-symbol-value{display:inline-flex;align-items:center;gap:5px}.cb-symbol-value span{color:#9a9a9a}
 .cb-symbol-value input{width:64px;height:22px;box-sizing:border-box;border:1px solid #3a3a3a;border-radius:4px;background:#111;color:#fff;font-size:11px;text-align:center;cursor:ew-resize}
 .cb-symbol-value input:focus{cursor:text;border-color:#5468ff;outline:0}
+.cb-symbol-copycell{position:absolute;top:0;bottom:0;background:rgba(255,64,160,.28);outline:2px solid #ff40a0;outline-offset:-2px;pointer-events:none;z-index:6;box-shadow:0 0 10px 2px rgba(255,64,160,.8)}
+.cb-symbol-copycell b{position:absolute;left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:#ff40a0;border:2px solid #fff;box-shadow:0 0 8px 2px #ff40a0}
+.cb-symbol-copysrc{position:absolute;top:0;bottom:0;outline:2px dashed #ffd166;outline-offset:-2px;pointer-events:none;z-index:6}
 .cb-symbol-key.added{background:#ffd166}
 .cb-symbol-span.is-moved.is-picked{box-shadow:inset 0 0 0 1px #fff}
 .cb-symbol-span.is-moved{box-shadow:inset 0 0 0 1px rgba(255,209,102,.7)}

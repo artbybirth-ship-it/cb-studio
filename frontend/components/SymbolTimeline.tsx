@@ -21,7 +21,7 @@ import { addAnchor, fileAnchors, isUnchanged, keyframeAt, moveAnchor, removeAnch
  */
 export type FlaFrame = {
   i: number; d: number; tween?: "classic" | "shape" | "motion"; ease?: number | string; label?: string; sound?: string;
-  symbols?: Array<{ name: string; js?: string }>; shapes?: number; texts?: number; bitmaps?: number; blank?: boolean;
+  symbols?: Array<{ name: string; js?: string }>; shapes?: number; texts?: number; bitmaps?: number; blank?: boolean; ended?: boolean;
 };
 export type FlaLayer = {
   name: string; type: "normal" | "folder" | "mask" | "guide" | string; parent?: number; color?: string;
@@ -29,7 +29,7 @@ export type FlaLayer = {
 };
 export type FlaSymbol = { version: number; js: string; fps: number; name: string; frames: number; layers: FlaLayer[] };
 
-export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "copy" | "cut" | "paste";
+export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste";
 const DEFAULT_ZOOM = 27; // about 11 px per frame, as in the scene's timeline
 let lastZoom = DEFAULT_ZOOM; // kept while stepping in and out of symbols
 const cellFor = (zoom: number) => 4 + (Math.max(1, Math.min(100, zoom)) / 100) * 26;
@@ -99,7 +99,9 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onAddPicture, onUploadPicture, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, pickedProps, onPickLayers, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onAddPicture, onUploadPicture, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, pickedProps, onPickLayers, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys, onSetTweenEase, onPreviewTweenEase, onCopyKey, onNative }: {
+  /** Opens the native pose editor for this character's pose (beta). */
+  onNative?: () => void;
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
   crumbs: string[];
   symbol: FlaSymbol;
@@ -154,12 +156,22 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   onSetKeys: (layerIndex: number, anchors: Anchor[] | null) => void;
   /** The keyframes during a drag, then null when the drag ends. */
   onPreviewKeys: (layerIndex: number, anchors: Anchor[] | null) => void;
+  /** The ease of a tween made here (it starts at the keyframe with this file frame), and the same during a drag on the Ease box (null: the drag ended). */
+  onSetTweenEase?: (layerIndex: number, fileFrame: number, value: number) => void;
+  onPreviewTweenEase?: (layerIndex: number, fileFrame: number, value: number | null) => void;
+  /** ⌥-drag of a keyframe: a copy of the keyframe (its file frame, on its layer) dropped on a frame of a layer (the same or another). */
+  onCopyKey?: (fromLayer: number, fromFileFrame: number, toLayer: number, toFrame: number) => void;
 }) {
   const [closed, setClosed] = useState<Set<number>>(new Set());
   const rowsRef = useRef<number[]>([]);
   const selectionRef = useRef<{ layers: number[]; from: number; to: number } | null>(null);
-  const opRef = useRef(onFrameOp);
-  opRef.current = onFrameOp;
+  // Frames removed from a layer's end leave nothing selected (the frames are gone).
+  const doFrameOp = (op: FrameOp, sel: { layers: number[]; from: number; to: number }) => {
+    onFrameOp(op, sel);
+    if (op === "remove-frames" && sel.to >= Math.max(0, symbol.frames - 1)) setFrameSel(null);
+  };
+  const opRef = useRef(doFrameOp);
+  opRef.current = doFrameOp;
   const [keySel, setKeySel] = useState<{ layer: number; frame: number } | null>(null);
   const selectKey = (sel: { layer: number; frame: number } | null) => { setKeySel(sel); onSelectKey(sel?.layer ?? 0, sel ? sel.frame : null); };
   const [layerSel, setLayerSel] = useState<number | null>(null);
@@ -173,6 +185,9 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   const [frameSel, setFrameSel] = useState<{ a: { layer: number; frame: number }; b: { layer: number; frame: number } } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [picked, setPicked] = useState<{ layer: number; i: number } | null>(null);
+  // Where a ⌥-dragged copy of a keyframe would land.
+  const [copyGhost, setCopyGhost] = useState<{ layer: number; frame: number } | null>(null);
+  const [copySource, setCopySource] = useState<{ layer: number; frame: number } | null>(null);
   const viewRows = useMemo(() => layerRows(symbol.layers, layerEdit), [symbol.layers, layerEdit]);
   const layerAt = (id: number) => (id < EXTRA_BASE ? symbol.layers[id] : viewRows.find((row) => row.id === id)?.layer);
   const hiddenSet = new Set(layerEdit?.hidden || []), lockedSet = new Set(layerEdit?.locked || []);
@@ -180,10 +195,13 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   const editable: Record<number, boolean> | undefined = editableProp && Object.fromEntries(Object.entries(editableProp).map(([id, value]) => [id, Boolean(value) && !lockedSet.has(Number(id))]));
   const anchorsOf = (index: number): Anchor[] => keys?.[index]?.anchors || fileAnchors(layerAt(index) as FlaLayer);
   const pickedLayer = picked ? layerAt(picked.layer) : undefined;
-  const pickedShown = picked && pickedLayer ? shownFrames(pickedLayer, anchorsOf(picked.layer)).find((item) => item.i === picked.i) : undefined;
+  const pickedShown = picked && pickedLayer ? shownFrames(pickedLayer, anchorsOf(picked.layer), keys?.[picked.layer]).find((item) => item.i === picked.i) : undefined;
   const pickedFrame = pickedShown?.source;
-  const pickedEdit = picked && pickedFrame ? eases?.[`${picked.layer}:${pickedFrame.i}`] : undefined;
-  const pickedClassic = (pickedFrame?.tween === "classic" || pickedFrame?.tween === "motion") && Boolean(pickedLayer?.props?.length);
+  const pickedEdit = picked && pickedFrame && !pickedShown?.made ? eases?.[`${picked.layer}:${pickedFrame.i}`] : undefined;
+  const pickedClassic = (pickedShown?.tween === "classic" || pickedShown?.tween === "motion") && Boolean(pickedLayer?.props?.length);
+  // A tween made here (Create Classic Tween) keeps its ease with the layer's keyframes, not among the file's eases.
+  const pickedMade = Boolean(pickedShown?.made && picked);
+  const pickedMadeFrame = pickedMade && picked ? anchorsOf(picked.layer)[pickedShown!.anchor][0] : 0;
   const pickedMovable = Boolean(picked && editable?.[picked.layer]);
   const pickedAnchors = picked ? anchorsOf(picked.layer) : [];
   // The playhead is inside the picked tween (not on its first frame): a keyframe can be added there.
@@ -240,6 +258,26 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
     window.addEventListener("pointerup", up);
   };
   // Dragging a keyframe: it follows the pointer between its neighbours, live on the stage, one undo step.
+  /** While a drag runs, the grid scrolls by itself when the pointer is near its edge (faster the nearer), so a keyframe can be taken to frames out of view; `after` runs on each scroll step to re-read where the pointer is now. */
+  const edgeScroll = (after: () => void) => {
+    let raf = 0, x = 0, y = 0, on = true;
+    const speed = (over: number) => Math.max(-32, Math.min(32, Math.round(over / 3)));
+    const tick = () => {
+      const box = scrollRef.current;
+      if (box && on) {
+        const r = box.getBoundingClientRect(), zone = 70, left = r.left + LAYER_PANEL + zone, top = r.top + zone / 2;
+        const dx = x > r.right - zone ? speed(x - (r.right - zone)) : x < left ? speed(x - left) : 0;
+        const dy = y > r.bottom - zone / 2 ? speed(y - (r.bottom - zone / 2)) : y < top ? speed(y - top) : 0;
+        const before = [box.scrollLeft, box.scrollTop];
+        if (dx) box.scrollLeft += dx;
+        if (dy) box.scrollTop += dy;
+        if (box.scrollLeft !== before[0] || box.scrollTop !== before[1]) after();
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return { point: (event: PointerEvent) => { x = event.clientX; y = event.clientY; }, stop: () => { on = false; cancelAnimationFrame(raf); } };
+  };
   const beginKeyDrag = (event: ReactPointerEvent<HTMLElement>, layerIndex: number, anchor: number) => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -252,10 +290,40 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
     setLayerSel(layerIndex);
     onSeek(start[anchor][1]);
     setFrameSel((current) => (event.shiftKey && current ? { a: current.a, b: { layer: layerIndex, frame: start[anchor][1] } } : { a: { layer: layerIndex, frame: start[anchor][1] }, b: { layer: layerIndex, frame: start[anchor][1] } }));
+    // ⌥ held: the keyframe stays and a copy follows the pointer, to be dropped on a frame (an empty one gets a keyframe, a keyframe takes its values).
+    if (event.altKey && onCopyKey) {
+      const spot = (moveEvent: PointerEvent) => {
+        const row = (document.elementFromPoint(moveEvent.clientX, moveEvent.clientY) as HTMLElement | null)?.closest("[data-symbol-row]");
+        const lane = row?.querySelector<HTMLElement>(".cb-symbol-lane");
+        return row && lane ? { layer: Number(row.getAttribute("data-symbol-row")), frame: frameAt(moveEvent.clientX, lane) } : null;
+      };
+      let drop: { layer: number; frame: number } | null = null, lastMove: PointerEvent | null = null;
+      const scroller = edgeScroll(() => { if (lastMove) { drop = spot(lastMove); setCopyGhost(drop); } });
+      setCopySource({ layer: layerIndex, frame: start[anchor][1] });
+      setCopyGhost({ layer: layerIndex, frame: start[anchor][1] });
+      scroller.point(event.nativeEvent);
+      const moveCopy = (moveEvent: PointerEvent) => { lastMove = moveEvent; scroller.point(moveEvent); drop = spot(moveEvent); setCopyGhost(drop); };
+      const upCopy = () => {
+        window.removeEventListener("pointermove", moveCopy);
+        window.removeEventListener("pointerup", upCopy);
+        scroller.stop();
+        setCopyGhost(null);
+        setCopySource(null);
+        if (drop && (drop.layer !== layerIndex || drop.frame !== start[anchor][1])) onCopyKey(layerIndex, start[anchor][0], drop.layer, drop.frame);
+      };
+      window.addEventListener("pointermove", moveCopy);
+      window.addEventListener("pointerup", upCopy);
+      return;
+    }
     if (anchor === 0) return;
-    let latest = start;
+    let latest = start, lastMove: PointerEvent | null = null;
+    const startScroll = scrollRef.current?.scrollLeft ?? 0;
+    const scroller = edgeScroll(() => { if (lastMove) move(lastMove); });
+    scroller.point(event.nativeEvent);
     const move = (moveEvent: PointerEvent) => {
-      const next = moveAnchor(start, anchor, start[anchor][1] + Math.round((moveEvent.clientX - startX) / CELL));
+      lastMove = moveEvent;
+      scroller.point(moveEvent);
+      const next = moveAnchor(start, anchor, start[anchor][1] + Math.round((moveEvent.clientX - startX + ((scrollRef.current?.scrollLeft ?? 0) - startScroll)) / CELL));
       if (!next || next === latest) return;
       latest = next;
       setPicked({ layer: layerIndex, i: next[anchor][1] });
@@ -264,6 +332,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      scroller.stop();
       if (latest !== start) { commitKeys(layerIndex, latest); onPreviewKeys(layerIndex, null); }
     };
     window.addEventListener("pointermove", move);
@@ -300,6 +369,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
       let op: FrameOp | null = null;
       if (event.key === "F5") op = event.shiftKey ? "remove-frames" : "insert-frame";
       else if (event.key === "F6") op = event.shiftKey ? "clear-keyframe" : "insert-keyframe";
+      else if (event.key === "F7") op = "blank-keyframe";
       else if ((event.key === "Delete" || event.key === "Backspace") && !command) op = "clear-keyframe";
       else if (command && event.altKey && event.code === "KeyC") op = "copy";
       else if (command && event.altKey && event.code === "KeyX") op = "cut";
@@ -407,14 +477,15 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
             </span>
           ))}
         </nav>
+        {onNative && <button type="button" className="cb-symbol-native" data-testid="open-native" onClick={onNative} title="Edit this pose natively, straight from the character's Animate file (beta)">Native (beta)</button>}
         {picked && pickedLayer && pickedFrame && (pickedClassic || pickedMovable || keysEdited) ? (
           <div className="cb-symbol-ease">
             <span className="cb-symbol-ease-where" title={pickedLayer.name}>{pickedLayer.name} · {pickedShown!.i + 1}–{pickedShown!.i + pickedShown!.d}</span>
             {pickedClassic && <>
               <span className="cb-symbol-ease-label">Ease</span>
-              <EaseControl key={`${picked.layer}:${picked.i}`} value={pickedEdit?.value ?? easeValue(pickedFrame.ease)}
-                onCommit={(value) => onSetEase(picked.layer, pickedFrame, value)}
-                onPreview={(value) => onPreviewEase(picked.layer, pickedFrame, value)} />
+              <EaseControl key={`${picked.layer}:${picked.i}`} value={pickedMade ? easeValue(pickedShown!.ease) : pickedEdit?.value ?? easeValue(pickedFrame.ease)}
+                onCommit={(value) => (pickedMade ? onSetTweenEase?.(picked.layer, pickedMadeFrame, value) : onSetEase(picked.layer, pickedFrame, value))}
+                onPreview={(value) => (pickedMade ? onPreviewTweenEase?.(picked.layer, pickedMadeFrame, value) : onPreviewEase(picked.layer, pickedFrame, value))} />
               {!pickedEdit && typeof pickedFrame.ease === "string" && <span className="cb-symbol-ease-custom">{easeText(pickedFrame.ease)}</span>}
               {pickedEdit && <button type="button" className="cb-symbol-ease-reset" onClick={() => onSetEase(picked.layer, pickedFrame, null)} title={`Back to the file's ${easeText(pickedFrame.ease) || "no easing"}`}>Reset</button>}
             </>}
@@ -518,7 +589,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
               <div className="cb-symbol-lane" style={{ width: cells * CELL }}
                 onPointerDown={(event) => {
                   const at = frameAt(event.clientX, event.currentTarget);
-                  const keyframe = shownFrames(layer, anchorsOf(index)).find((item) => at >= item.i && at < item.i + item.d);
+                  const keyframe = shownFrames(layer, anchorsOf(index), keys?.[index]).find((item) => at >= item.i && at < item.i + item.d);
                   setPicked(keyframe && layer.type !== "folder" ? { layer: index, i: keyframe.i } : null);
                   if (keyframe && layer.type !== "folder" && !keyframe.added) { setLayerSel(index); selectKey({ layer: index, frame: keyframe.source.i }); }
                   if (layer.type !== "folder" && !locked) beginFrameSelect(event, index); else scrub(event);
@@ -536,8 +607,10 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
                   const target = keyframe?.symbols?.find((item) => item.js);
                   if (target?.js) onStepInto(index, at, target.js);
                 }}>
+                {copyGhost?.layer === index && <i className="cb-symbol-copycell" aria-hidden="true" style={{ left: copyGhost.frame * CELL, width: CELL }}><b /></i>}
+                {copySource?.layer === index && <i className="cb-symbol-copysrc" aria-hidden="true" style={{ left: copySource.frame * CELL, width: CELL }} />}
                 {selection && selection.layers.includes(index) && <i className="cb-symbol-sel" style={{ left: selection.from * CELL, width: (selection.to - selection.from + 1) * CELL }} aria-hidden="true" />}
-                {layer.type !== "folder" && shownFrames(layer, anchorsOf(index)).map((item) => {
+                {layer.type !== "folder" && shownFrames(layer, anchorsOf(index), keys?.[index]).map((item) => {
                   const kind = item.tween === "classic" || item.tween === "motion" ? "classic" : item.tween === "shape" ? "shape" : item.blank ? "blank" : "frames";
                   const edit = eases?.[`${index}:${item.source.i}`];
                   const movable = Boolean(editable?.[index]) && item.anchor > 0;
@@ -545,7 +618,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
                   return (
                     <span key={item.i} className={`cb-symbol-span ${kind} ${edit ? "is-edited" : ""} ${item.added || item.i !== item.source.i ? "is-moved" : ""} ${picked?.layer === index && picked.i === item.i ? "is-picked" : ""}`} style={{ left: item.i * CELL, width: item.d * CELL }} title={info}>
                       <i className={`cb-symbol-key ${item.blank ? "blank" : ""} ${item.added ? "added" : ""} ${movable ? "movable" : ""} ${editable?.[index] && !item.added ? "pickable" : ""} ${values?.[`${index}:${item.source.i}`] ? "valued" : ""} ${keySel?.layer === index && keySel.frame === item.source.i && !item.added ? "chosen" : ""}`} aria-hidden="true"
-                        onPointerDown={editable?.[index] && !item.added ? (event) => beginKeyDrag(event, index, item.anchor) : undefined} />
+                        onPointerDown={editable?.[index] && (!item.added || onCopyKey) ? (event) => { if (!item.added || event.altKey) beginKeyDrag(event, index, item.anchor); } : undefined} />
                       {item.tween && item.d > 2 && <em className="cb-symbol-arrow" aria-hidden="true" />}
                       {!item.tween && item.d > 1 && <u className="cb-symbol-hold" aria-hidden="true" />}
                       {item.label && <small className="cb-symbol-label">⚑ {item.label}</small>}
@@ -558,7 +631,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
           );
         })}
         {menu && selection && (() => {
-          const run = (op: FrameOp) => { setMenu(null); onFrameOp(op, selection); };
+          const run = (op: FrameOp) => { setMenu(null); doFrameOp(op, selection); };
           const onKeyframe = selection.layers.some((layerIndex) => { const anchors = anchorsOf(layerIndex); for (let f = selection.from; f <= selection.to; f += 1) if (keyframeAt(anchors, f) > 0) return true; return false; });
           return (
             <div className="cb-frame-menu cb-symbol-framemenu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(event) => event.stopPropagation()}>
@@ -566,7 +639,11 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
               <button type="button" role="menuitem" onClick={() => run("remove-frames")}>Remove Frames<kbd>⇧F5</kbd></button>
               <span className="cb-frame-menu-sep" aria-hidden="true" />
               <button type="button" role="menuitem" onClick={() => run("insert-keyframe")}>Insert Keyframe<kbd>F6</kbd></button>
+              <button type="button" role="menuitem" onClick={() => run("blank-keyframe")}>Insert Blank Keyframe<kbd>F7</kbd></button>
               <button type="button" role="menuitem" disabled={!onKeyframe} onClick={() => run("clear-keyframe")}>Clear Keyframe<kbd>⇧F6</kbd></button>
+              <span className="cb-frame-menu-sep" aria-hidden="true" />
+              <button type="button" role="menuitem" onClick={() => run("create-tween")}>Create Classic Tween</button>
+              <button type="button" role="menuitem" onClick={() => run("remove-tween")}>Remove Tween</button>
               <span className="cb-frame-menu-sep" aria-hidden="true" />
               <button type="button" role="menuitem" onClick={() => run("copy")}>Copy Frames<kbd>⌥⌘C</kbd></button>
               <button type="button" role="menuitem" onClick={() => run("cut")}>Cut Frames<kbd>⌥⌘X</kbd></button>

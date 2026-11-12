@@ -133,7 +133,7 @@ export function withClones(data: FlaSymbol, clones?: SymbolClone[]): FlaSymbol {
       const name = clone.name || (clone.image ? clone.image.name || "Picture" : clone.symbol!.replace(/(?:copy\d*|_\d+)+$/i, "") || "Layer");
       const shown = Math.max(1, Math.min(data.frames, clone.end ?? data.frames));
       const body = clone.image ? { bitmaps: 1 } : { symbols: [{ name: clone.symbol! }] };
-      layers.push({ name, type: "normal", props: [clone.prop], frames: shown < data.frames ? [{ i: 0, d: shown, ...body }, { i: shown, d: data.frames - shown, blank: true }] : [{ i: 0, d: shown, ...body }] });
+      layers.push({ name, type: "normal", props: [clone.prop], frames: shown < data.frames ? [{ i: 0, d: shown, ...body }, { i: shown, d: data.frames - shown, blank: true, ended: true }] : [{ i: 0, d: shown, ...body }] });
       return;
     }
     const source = layers[clone.of];

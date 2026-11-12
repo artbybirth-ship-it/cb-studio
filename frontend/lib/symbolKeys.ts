@@ -32,16 +32,62 @@ export function fileOf(anchors: Anchor[], now: number): number {
 }
 
 /** The layer's spans as they are now: file frames moved to their new place, an added keyframe splitting its span. */
-export type ShownFrame = FlaFrame & { source: FlaFrame; added: boolean; anchor: number };
-export function shownFrames(layer: FlaLayer, anchors: Anchor[]): ShownFrame[] {
+export type ShownFrame = FlaFrame & { source: FlaFrame; added: boolean; anchor: number; made?: boolean };
+export function shownFrames(layer: FlaLayer, anchors: Anchor[], marks?: { tweens?: Tween[]; blanks?: number[]; cut?: number }): ShownFrame[] {
   const out: ShownFrame[] = [];
   for (let k = 0; k + 1 < anchors.length; k += 1) {
     if (anchors[k + 1][1] <= anchors[k][1]) continue; // a keyframe that was cleared or removed has no frames left
     const source = [...layer.frames].reverse().find((frame) => frame.i <= anchors[k][0]) || layer.frames[0];
+    if (source.ended) continue; // where a pasted layer was cut short: no frames there
+    const cut = marks?.cut;
+    if (cut != null && anchors[k][1] >= cut) continue; // frames removed from the layer's end
     const added = anchors[k][0] !== source.i;
-    const base: FlaFrame = added ? { i: 0, d: 0, tween: source.tween, ease: source.ease, symbols: source.symbols } : { ...source };
-    out.push({ ...base, i: anchors[k][1], d: anchors[k + 1][1] - anchors[k][1], source, added, anchor: k });
+    const blank = Boolean(source.blank) || Boolean(marks?.blanks?.includes(anchors[k][0]));
+    const base: FlaFrame = blank ? { i: 0, d: 0, blank: true } : added ? { i: 0, d: 0, tween: source.tween, ease: source.ease, symbols: source.symbols } : { ...source };
+    const made = !base.tween && !blank && madeTween(anchors, k, marks?.tweens);
+    out.push({ ...base, ...(made ? { tween: "classic" as const, ease: -made[1] } : {}), i: anchors[k][1], d: Math.min(anchors[k + 1][1], cut ?? Infinity) - anchors[k][1], source, added, anchor: k, made: Boolean(made) });
   }
+  return out;
+}
+
+/** A classic tween made in the editor: [file frame it starts at, ease −100…100]. */
+export type Tween = [number, number];
+
+/** The tween made on the span starting at anchor k, when a keyframe follows it (the last anchor is the end of the layer, not a keyframe). */
+export function madeTween(anchors: Anchor[], k: number, tweens?: Tween[]): Tween | undefined {
+  if (!tweens?.length) return undefined;
+  let next = k + 1;
+  while (next < anchors.length - 1 && anchors[next][1] <= anchors[k][1]) next += 1;
+  return next < anchors.length - 1 ? tweens.find((tween) => tween[0] === anchors[k][0]) : undefined;
+}
+
+/** A keyframe added inside a blank span is blank too (as in Animate). */
+export function grownBlanks(before: Anchor[], after: Anchor[], blanks?: number[]): number[] | undefined {
+  if (!blanks?.length) return blanks;
+  const out = [...blanks];
+  after.forEach((anchor) => {
+    if (before.some((old) => old[0] === anchor[0])) return;
+    for (let k = 0; k + 1 < before.length; k += 1) {
+      if (anchor[0] > before[k][0] && anchor[0] < before[k + 1][0]) { if (blanks.includes(before[k][0])) out.push(anchor[0]); break; }
+    }
+  });
+  return out;
+}
+
+/** A keyframe added inside a span with a made tween splits it: both halves keep the tween (and its ease). */
+export function grownTweens(before: Anchor[], after: Anchor[], tweens?: Tween[]): Tween[] | undefined {
+  if (!tweens?.length) return tweens;
+  const out = [...tweens];
+  after.forEach((anchor) => {
+    if (before.some((old) => old[0] === anchor[0])) return;
+    for (let k = 0; k + 1 < before.length; k += 1) {
+      if (anchor[0] > before[k][0] && anchor[0] < before[k + 1][0]) {
+        const made = tweens.find((tween) => tween[0] === before[k][0]);
+        if (made) out.push([anchor[0], made[1]]);
+        break;
+      }
+    }
+  });
   return out;
 }
 

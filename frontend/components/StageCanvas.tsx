@@ -9,6 +9,7 @@ import RenderDiagnostics, { type RenderDiagnosticsInfo } from "@/components/Rend
 import type { LayerGeometry } from "@/lib/layerTransform";
 import { type CharacterTransform } from "@/lib/keyframes";
 import { groupPivotAtTime, resolveObjectTransformAtTime } from "@/lib/groupMotion";
+import NativeCharacterCanvas from "./NativeCharacterCanvas";
 import { resolvePartOverridesAtTime, resolvePartTransformAtTime, resolveSourceSeekMs, type PartTransform } from "@/lib/partKeyframes";
 import { isMultiPartKey, memberPatches, parentPartKey, partMembers } from "@/lib/partSelection";
 import { inLayerSpan } from "@/lib/layerRows";
@@ -287,6 +288,11 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
 export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolBoxSelect, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, onSymbolPivotReset, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
+  // Characters drawn natively (those with edits from the native editor): the canvas that stands in for the player's, and whether it is showing yet.
+  const nativeCanvases = useRef(new Map<string, HTMLCanvasElement>());
+  const [nativeReady, setNativeReady] = useState<ReadonlySet<string>>(new Set());
+  const onNativeCanvas = useCallback((id: string, node: HTMLCanvasElement | null) => { if (node) nativeCanvases.current.set(id, node); else nativeCanvases.current.delete(id); }, []);
+  const onNativeReady = useCallback((id: string, ready: boolean) => setNativeReady((current) => (current.has(id) === ready ? current : new Set(ready ? [...current, id] : [...current].filter((item) => item !== id)))), []);
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const [readyCharacterIds, setReadyCharacterIds] = useState<Set<string>>(() => new Set());
   const [characterVisualBounds, setCharacterVisualBounds] = useState<Record<string, VisualBounds>>({});
@@ -775,11 +781,11 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const up = (event: KeyboardEvent) => {
       if (event.code === "Space") setSpacePanning(false);
     };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
+    window.addEventListener("keydown", down, true);
+    window.addEventListener("keyup", up, true);
     return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
+      window.removeEventListener("keydown", down, true);
+      window.removeEventListener("keyup", up, true);
     };
   }, [renderMode, selectedObjectId]);
 
@@ -1790,13 +1796,14 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const frame = frameRefs.current.get(object.id);
     if (!frame) return true;
     try {
-      const canvas = frame.contentDocument?.querySelector("canvas");
+      const native = nativeReady.has(object.id) ? nativeCanvases.current.get(object.id) : null;
+      const canvas = native ?? frame.contentDocument?.querySelector("canvas");
       if (!canvas || !canvas.width || !canvas.height) return true;
       const rotation = resolveObjectTransformAtTime(object, playhead).rotation || 0;
       const point = playerPointFromClient(frame, rotation, skewOf(object), Boolean(object.flipX), clientX, clientY);
       if (!point) return false;
-      // The canvas may cover only the visible part of the player (sharp rendering).
-      const canvasRect = canvas.getBoundingClientRect();
+      // The player's canvas may cover only the visible part of the player (sharp rendering); the native canvas always covers the whole box.
+      const canvasRect = native ? { left: 0, top: 0, width: frame.offsetWidth, height: frame.offsetHeight } : canvas.getBoundingClientRect();
       if (canvasRect.width <= 0 || canvasRect.height <= 0) return true;
       const px = Math.floor(((point.x - canvasRect.left) / canvasRect.width) * canvas.width);
       const py = Math.floor(((point.y - canvasRect.top) / canvasRect.height) * canvas.height);
@@ -3073,7 +3080,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         if (spacePanning) { beginPan(event); return; }
         // Rotate tool (R): hand the press to the selection's own rotate handle (pose part, character part, then whole object),
         // so the drag turns it exactly as dragging beside a corner does.
-        if (rotateHeld && !renderMode && event.button === 0 && selectedObjectId) {
+        if (rotateHeld && !renderMode && event.button === 0 && event.nativeEvent.isTrusted) {
           const host = hostRef.current;
           const rotate = host?.querySelector<HTMLElement>(".cb-symbol-turn") || host?.querySelector<HTMLElement>(".cb-part-rotate-handle") || host?.querySelector<HTMLElement>(".cb-corner-rotate-handle");
           if (rotate) {
@@ -3315,9 +3322,22 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                   style={{
                     filter: `hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)`,
                     pointerEvents: "none",
+                    opacity: nativeReady.has(object.id) && !(symbolView && symbolView.objectId === object.id) ? 0 : undefined,
                   }}
                   tabIndex={-1}
                 />
+                {object.nativePose && Object.keys(object.nativePose).length > 0 && !(symbolView && symbolView.objectId === object.id) && (
+                  <NativeCharacterCanvas
+                    object={object}
+                    seekMs={resolveSourceSeekMs(object, playhead)}
+                    hueFilter={`hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)`}
+                    onCanvas={onNativeCanvas}
+                    onReady={onNativeReady}
+                    playerFrame={() => frameRefs.current.get(object.id)}
+                    playerReady={readyCharacterIds.has(object.id)}
+                    savedFit={object.nativePoseFit}
+                  />
+                )}
                 {renderSourcePartReplacements(object)}
                 {renderCharacterPartHitArea(object, selected)}
                 {renderSelectionGizmo(object, selected)}

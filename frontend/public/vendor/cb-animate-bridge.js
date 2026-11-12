@@ -1291,7 +1291,9 @@
         info = { prop: prop, ax: px.x - p0.x, ay: px.y - p0.y, bx: py.x - p0.x, by: py.y - p0.y, x: o.x, y: o.y, W: W, H: H };
       }
     }
-    cbPost('SYMBOL_DRAG_INFO', { token: d.token, info: info });
+    // The part's box comes with the press, so a pick shows its selection box without asking again.
+    var part = null; try { part = info ? partInfoOf(info.prop) : null; } catch (e) {}
+    cbPost('SYMBOL_DRAG_INFO', { token: d.token, info: info, part: part });
   }
   // Box selection: the named parts of the open symbol whose box (on the stage) meets the rectangle (fractions of the player).
   // Parts under a box (SYMBOL_PARTS_IN_RECT): a part is picked when some of its drawn pixels lie inside the box, so the box is
@@ -1337,8 +1339,9 @@
     try { o.graphics.draw(ctx); } catch (e) { return null; }
     return x1 > x0 && y1 > y0 ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
   }
-  function postPartInfo(d) {
-    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, prop = String(d.prop || ''), info = null;
+  // A part's transform and box, as the editor's selection box needs them (null when it has none to give).
+  function partInfoOf(prop) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, info = null;
     var o = st && node && prop && prop.charAt(0) !== '#' ? node[prop] : null;
     if (o && o.localToLocal) {
       var b = rawBounds(o) || shapeBounds(o);
@@ -1349,7 +1352,10 @@
           bounds: { x: b.x, y: b.y, width: b.width, height: b.height }, W: W, H: H };
       }
     }
-    cbPost('SYMBOL_PART_INFO', { token: d.token, info: info });
+    return info;
+  }
+  function postPartInfo(d) {
+    cbPost('SYMBOL_PART_INFO', { token: d.token, info: partInfoOf(String(d.prop || '')) });
   }
   function postKeyValues(d) {
     var clip = clipsOfClass(d.js)[0], values = null;
@@ -1560,8 +1566,9 @@
     var total = Math.max(1, w.clip.timeline.duration || w.clip.totalFrames || 1), shown = w.end > 0 ? Math.min(total, w.end) : total, x = 0, y = 0;
     try { var b = obj.nominalBounds || (obj.getBounds && obj.getBounds()); if (b) { x = W / 2 - (b.x + b.width / 2) * sc; y = H / 2 - (b.y + b.height / 2) * sc; } } catch (e) {}
     var made = createjs.Tween.get(obj).to({ x: x, y: y, scaleX: sc, scaleY: sc, skewX: 0, skewY: 0, alpha: 1 }, 0);
-    if (shown > 1) made.wait(shown - 1);
-    if (shown < total) { made.to({ _off: true }, 0); if (total - shown > 1) made.wait(total - shown - 1); }
+    // It shows on frames 0 … shown - 1, so the step that hides it sits on frame `shown` (where the layer's blank keyframe is).
+    if (shown < total) { made.wait(shown); made.to({ _off: true }, 0); if (total - shown > 1) made.wait(total - shown - 1); }
+    else if (shown > 1) made.wait(shown - 1);
     w.clip.timeline.addTween(made);
     var list = w.clip.timeline.tweens, from = list.indexOf(made);
     if (from >= 0) list.splice(from, 1);
@@ -1641,7 +1648,8 @@
       touched.add(w.clip);
       changed = true;
     });
-    if (changed) cbClipsByClass = null;
+    // The editor asked which layers are editable before these existed (a pasted part's file loads late): it asks again.
+    if (changed) { cbClipsByClass = null; cbPost('SYMBOL_CLONES_CHANGED', {}); }
   }
   function restoreLayerOrder(touched) {
     cbLayerState.orig.forEach(function (tweens, clip) { var list = clip.timeline.tweens; list.length = 0; tweens.forEach(function (tw) { list.push(tw); }); touched.add(clip); });
@@ -1679,12 +1687,109 @@
       });
     });
   }
+  // ---- Tweens made in the editor (symbolKeys[class][layer].tweens: [[file frame of the keyframe it starts at, ease −100…100], …]).
+  // Create Classic Tween on a span that holds still: the hold up to the next keyframe becomes a tween step toward that keyframe's
+  // values. A keyframe inside a run of such tweens that has no value of its own gets the tweened one (so a keyframe added there
+  // holds where the motion is); the eased value is worked out between the nearest keyframes that do.
+  var cbTweenSteps = [], cbBlankProps = [];
+  // ---- Blank keyframes made in the editor (symbolKeys[class][layer].blanks: file frames of the keyframes that show nothing).
+  // The layer's object is hidden from a blank keyframe up to the next keyframe: the values of every step say whether it shows (_off),
+  // so it holds whichever way the timeline is seeked. A step that tweens takes the state of the keyframe it ends on.
+  function applyBlanks(clip, edit, touched) {
+    var blanks = edit.blanks || [], anchors = edit.anchors || [], keys = [], q;
+    if (!blanks.length) return;
+    for (q = 0; q + 1 < anchors.length; q++) if (anchors[q + 1][1] > anchors[q][1]) keys.push(q);
+    var spans = [];
+    keys.forEach(function (i, pos) {
+      if (blanks.some(function (b) { return Math.abs(b - anchors[i][0]) < 1e-9; })) spans.push([anchors[i][0], pos + 1 < keys.length ? anchors[keys[pos + 1]][0] : Infinity]);
+    });
+    if (!spans.length) return;
+    function hiddenAt(time) { return spans.some(function (sp) { return time >= sp[0] - 1e-6 && time < sp[1] - 1e-6; }); }
+    var seen = new Set();
+    function mark(props, hidden) {
+      if (!props || props.state || seen.has(props)) return;
+      seen.add(props);
+      // An object the file (or a layer's end) already hides stays hidden.
+      if (!hidden && Object.prototype.hasOwnProperty.call(props, '_off')) return;
+      cbBlankProps.push({ props: props, had: Object.prototype.hasOwnProperty.call(props, '_off'), old: props._off });
+      props._off = hidden;
+    }
+    tweensFor(clip, edit.props).forEach(function (tween) {
+      if (tween._stepHead) mark(tween._stepHead.props, hiddenAt(0));
+      // The tween's own records of the properties it drives (initial, and where it ends up) know _off too.
+      [['_initQueueProps', hiddenAt(0)], ['_curQueueProps', spans.some(function (sp) { return sp[1] === Infinity; })]].forEach(function (pair) {
+        var rec = tween[pair[0]];
+        if (!rec || typeof rec !== 'object') return;
+        cbBlankProps.push({ props: rec, had: Object.prototype.hasOwnProperty.call(rec, '_off'), old: rec._off });
+        rec._off = pair[1];
+      });
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var tweens = step.d > 0 && step.prev && step.props !== step.prev.props;
+        mark(step.props, hiddenAt(tweens ? step.t + step.d : step.t));
+      }
+      touched.add(clip);
+    });
+  }
+  function easeAmount(v) {
+    var a = Math.max(-1, Math.min(1, (v || 0) / 100));
+    return function (t) { return !a ? t : a < 0 ? t * (t * -a + 1 + a) : t * ((2 - t) * a + (1 - a)); };
+  }
+  function applyMadeTweens(clip, edit, entries, touched) {
+    var made = edit.tweens || [], anchors = edit.anchors || [], keys = [], q;
+    if (!made.length || anchors.length < 3) return;
+    for (q = 0; q + 1 < anchors.length; q++) if (anchors[q + 1][1] > anchors[q][1]) keys.push(q);
+    var frames = keys.map(function (i) { return anchors[i][0]; });
+    function easeOf(pos) { var m = made.filter(function (e) { return Math.abs(e[0] - frames[pos]) < 1e-9; })[0]; return m ? m[1] : null; }
+    var tweened = frames.map(function (f, pos) { return pos + 1 < frames.length && easeOf(pos) != null; });
+    function explicit(frame, prop) {
+      return Object.keys(entries || {}).some(function (k) { var e = entries[k]; return e && e.props && e.props[0] === edit.props[0] && Math.abs(e.frame - frame) < 1e-6 && e.v && typeof e.v[prop] === 'number'; });
+    }
+    tweensFor(clip, edit.props).forEach(function (tween) {
+      var list = [], step;
+      for (step = tween._stepHead && tween._stepHead.next; step; step = step.next) list.push(step);
+      function plain(s2) { return s2.props && !s2.props.state; }
+      function zeroAt(f) { return list.filter(function (s2) { return s2.d === 0 && plain(s2) && Math.abs(s2.t - f) < 1e-6; })[0]; }
+      function holdStarting(f) { return list.filter(function (s2) { return s2.d > 0 && plain(s2) && s2.prev && s2.props === s2.prev.props && Math.abs(s2.t - f) < 1e-6; })[0]; }
+      function holdTo(f) { return list.filter(function (s2) { return s2.d > 0 && plain(s2) && s2.prev && s2.props === s2.prev.props && Math.abs(s2.t + s2.d - f) < 1e-6 && s2.next && s2.next.d === 0 && plain(s2.next) && s2.next.props !== s2.props && Math.abs(s2.next.t - f) < 1e-6; })[0]; }
+      function valuesAt(pos) { var z = zeroAt(frames[pos]), h = z || holdStarting(frames[pos]); return h ? h.props : null; }
+      var owner = clip[(edit.props || [])[0]];
+      for (var pos = 1; pos + 1 < frames.length; pos++) {
+        if (!(tweened[pos - 1] && tweened[pos])) continue;
+        var z = zeroAt(frames[pos]); if (!z) continue;
+        VALUE_KEYS.forEach(function (prop) {
+          if (explicit(frames[pos], prop)) return;
+          var l = pos - 1, r = pos + 1;
+          while (l > 0 && tweened[l - 1] && !explicit(frames[l], prop)) l--;
+          while (r + 1 < frames.length && tweened[r] && !explicit(frames[r], prop)) r++;
+          var pl = valuesAt(l), pr = valuesAt(r);
+          if (!pl || !pr || typeof pl[prop] !== 'number' || typeof pr[prop] !== 'number' || pl[prop] === pr[prop]) return;
+          var f = (frames[pos] - frames[l]) / ((frames[r] - frames[l]) || 1), v = pl[prop] + (pr[prop] - pl[prop]) * easeAmount(easeOf(l))(f);
+          cbValueSteps.push({ step: z, clip: clip, k: prop, old: z.props[prop], had: Object.prototype.hasOwnProperty.call(z.props, prop), target: owner, targetOld: owner ? owner[prop] : undefined });
+          z.props[prop] = v;
+        });
+      }
+      for (pos = 0; pos + 1 < frames.length; pos++) {
+        if (!tweened[pos]) continue;
+        var hold = holdTo(frames[pos + 1]), end = hold && hold.next;
+        if (!hold || !end) continue;
+        cbTweenSteps.push({ step: hold, props: hold.props, ease: hold.ease });
+        hold.props = end.props;
+        var amount = easeOf(pos);
+        hold.ease = amount ? createjs.Ease.get(amount / 100) : null;
+        touched.add(clip);
+      }
+    });
+  }
   function applySymbolEdits(eases, keys, values, layerSpecs) {
     var key = JSON.stringify([eases || {}, keys || {}, values || {}, layerSpecs || {}]), root = cbRoot();
     if (key === cbEasesKey || !root) return;
     cbEasesKey = key;
     var clips = new Set();
     cbRetimedSteps.reverse().forEach(function (r) { r.step.t = r.t; r.step.d = r.d; r.step.ease = r.ease; delete r.step.__ot; delete r.step.__od; clips.add(r.clip); });
+    cbTweenSteps.reverse().forEach(function (r) { r.step.props = r.props; r.step.ease = r.ease; });
+    cbTweenSteps = [];
+    cbBlankProps.reverse().forEach(function (r) { if (r.had) r.props._off = r.old; else delete r.props._off; });
+    cbBlankProps = [];
     cbValueSteps.reverse().forEach(function (v) {
       if (v.item) {
         if (!v.hadP) delete v.item.p; else if (v.old === undefined) delete v.item.p[v.k]; else v.item.p[v.k] = v.old;
@@ -1752,6 +1857,10 @@
           });
         });
       });
+    });
+    Object.keys(keys || {}).forEach(function (name) {
+      var layers = keys[name] || {};
+      clipsOfClass(name).forEach(function (clip) { Object.keys(layers).forEach(function (index) { applyBlanks(clip, layers[index], clips); applyMadeTweens(clip, layers[index], (values || {})[name], clips); }); });
     });
     Object.keys(keys || {}).forEach(function (name) {
       var layers = keys[name] || {};

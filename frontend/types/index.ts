@@ -14,7 +14,10 @@ export type CharacterPartKey = string;
 export type SymbolEaseEdit = { props: string[]; frame: number; frames: number; value: number };
 
 /** A layer's keyframes inside a character after editing: [frame in the file, frame now] for each one (an added keyframe has no frame in the file: it takes the one it was added at). */
-export type SymbolKeyEdit = { props: string[]; anchors: Array<[number, number]> };
+/** `cut`: the layer ends at this frame (Remove Frames at its end): it has no frames from there on.
+ *  `blanks`: blank keyframes made in the editor (F7), as the file frame of the keyframe: the layer shows nothing from there to its next keyframe.
+ *  `tweens`: classic tweens made in the editor on spans that hold still in the file, as [file frame of the keyframe it starts at, ease −100…100]; each runs to the next keyframe. */
+export type SymbolKeyEdit = { props: string[]; anchors: Array<[number, number]>; tweens?: Array<[number, number]>; blanks?: number[]; cut?: number };
 
 /** The values edited on one keyframe inside a character (x, y, scale, skew in degrees, alpha 0–1), by layer and file frame. */
 export type SymbolValueKey = "x" | "y" | "scaleX" | "scaleY" | "skewX" | "skewY" | "alpha" | "regX" | "regY";
@@ -298,6 +301,10 @@ export type EditorObject = {
   symbolValues?: Record<string, Record<string, SymbolValueEdit>>;
   /** Layers arranged inside this character (reordered, hidden, locked, renamed, deleted, folders), by symbol class. */
   symbolLayers?: Record<string, SymbolLayerEdit>;
+  /** Native pose editor (beta): edited timelines of the character's Animate file, by the stepped-into symbol's class. */
+  nativePose?: Record<string, import("@/lib/native/store").NativeEdits>;
+  /** Where the character's pose stands in its 720 × 960 box (its Animate player's own placement), read when native edits are saved: lets the video renderer draw it without starting the player. */
+  nativePoseFit?: { s: number; tx: number; ty: number };
   /** Runtime-detected source body parts for Archive/CreateJS actions. */
   sourceParts?: CharacterPartDescriptor[];
   /** User-supplied image replacements for selected body parts. */
