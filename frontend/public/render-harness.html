@@ -22,6 +22,7 @@
 <body>
   <div id="stage"></div>
   <div id="fatal"></div>
+<script src="/vendor/cb-native.js"></script>
 <script>
 (function(){
   'use strict';
@@ -40,6 +41,8 @@
   var timedLayers = [];
   var readySources = new Set();
   var pendingImages = 0;
+  var nativeEntries = []; // characters drawn natively with no player behind them (their placement was saved with the edits)
+  var nativePending = 0; // characters edited in the native editor that are still loading their Animate file
   var pendingSeek = null;
   var seekCounter = 0;
   var stageZoomed = false;
@@ -128,11 +131,14 @@
     timedLayers.push({el:el,object:object});
   }
 
-  // Layers draw only inside their time span (StageCanvas): from startTime for actionDurationMs.
+  // Layers draw only inside their time span, on the timeline's 30 fps frame grid: from the start
+  // frame to the frame before start + length (lib/layerRows.ts inLayerSpan, the same rule).
   function inTimeSpan(object, seconds){
     var start = Math.max(0, Number(object.startTime || 0));
-    var length = object.actionDurationMs ? Math.max(0.1, Number(object.actionDurationMs) / 1000) : null;
-    return seconds + 0.0001 >= start && (length == null || seconds <= start + length + 0.0001);
+    var frame = Math.floor(seconds * 30 + 1e-4), startFrame = Math.round(start * 30);
+    if (frame < startFrame) return false;
+    if (!object.actionDurationMs) return true;
+    return frame < Math.max(startFrame + 1, Math.round((start + object.actionDurationMs / 1000) * 30));
   }
   function updateVisibility(seconds){
     timedLayers.forEach(function(entry){
@@ -332,6 +338,19 @@
     return transform;
   }
 
+  // Draws a natively drawn character at the layer's own source time, at the captured resolution.
+  function drawNative(entry, seconds){
+    var native = entry.native;
+    if(!native || !native.ready) return;
+    var boxWidth = parseFloat(entry.layer.style.width) || 720;
+    var resolution = Math.min(4, Math.max(1, boxWidth * captureScale * Math.max(1, Number(window.devicePixelRatio || 1)) / 720));
+    // Placed exactly where the player placed the pose (its exportRoot), so edits never move the character.
+    var root = null;
+    try{ root = entry.frame && entry.frame.contentWindow && entry.frame.contentWindow.exportRoot; }catch(e){}
+    var fit = native.fit || (root && isFinite(root.scaleX) && root.scaleX > 0 ? {s:root.scaleX, tx:root.x, ty:root.y} : null);
+    native.handle.draw(native.canvas, resolveSourceSeekMs(entry.object, seconds == null ? currentTimeSeconds : seconds), resolution, fit);
+  }
+
   function sendEdits(entry, seconds){
     if(!entry.frame.contentWindow) return;
     var object = entry.object, time = seconds == null ? currentTimeSeconds : seconds;
@@ -342,6 +361,10 @@
       partOverrides:resolvePartOverrides(object, time),
       colorOverrides:object.colorOverrides || {},
       colorReplacements:object.colorReplacements || [],
+      symbolEases:object.symbolEases || {},
+      symbolKeys:object.symbolKeys || {},
+      symbolValues:object.symbolValues || {},
+      symbolLayers:Object.keys(object.symbolLayers || {}).reduce(function(all,name){ all[name] = (object.symbolLayers[name] && object.symbolLayers[name].spec) || {}; return all; }, {}),
       strokeScale:object.strokeScale == null ? 1 : object.strokeScale,
       selectedPart:'',
       focusPart:'',
@@ -366,6 +389,26 @@
     layer.className = 'char-layer';
     layer.style.zIndex = String(z);
     layer.style.opacity = String(object.opacity == null ? 1 : object.opacity);
+    var savedFit = object.nativePoseFit && isFinite(object.nativePoseFit.s) && object.nativePoseFit.s > 0 ? object.nativePoseFit : null;
+    if(window.CBNative && savedFit && object.nativePose && Object.keys(object.nativePose).length){
+      // No player at all: it would only compete for the page's one thread. If the native drawing cannot load, the render fails with that reason.
+      var only = document.createElement('canvas');
+      only.width = 720; only.height = 960;
+      only.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;filter:hue-rotate(' + Number(object.characterHue == null ? 0 : object.characterHue) + 'deg) saturate(' + Number(object.characterSaturation == null ? 100 : object.characterSaturation) + '%) brightness(' + Number(object.characterBrightness == null ? 100 : object.characterBrightness) + '%)';
+      layer.appendChild(only);
+      var solo = {frame:null,layer:layer,object:object,native:{canvas:only,handle:window.CBNative.createNativeCharacter(object),ready:false,fit:savedFit}};
+      nativePending++;
+      solo.native.handle.load().then(function(ok){
+        if(!ok) throw new Error('the character ' + (object.name || '') + ' could not load its Animate file');
+        solo.native.ready = true;
+        drawNative(solo, currentTimeSeconds);
+      }).catch(function(error){ fail('Native character: ' + (error && error.message ? error.message : error)); }).then(function(){ nativePending--; markReadyWhenPossible(); });
+      stage.appendChild(layer);
+      placeCharacter(solo, 0);
+      nativeEntries.push(solo);
+      timedLayers.push({el:layer,object:object});
+      return;
+    }
     var frame = document.createElement('iframe');
     var assetUrl = object.assetUrl || '/characters/talking/men/player.html';
     var src = new URL(resolveUrl(assetUrl));
@@ -382,8 +425,24 @@
     var bright = Number(object.characterBrightness == null ? 100 : object.characterBrightness);
     frame.style.filter = 'hue-rotate(' + hue + 'deg) saturate(' + sat + '%) brightness(' + bright + '%)';
     layer.appendChild(frame);
+    var entry = {frame:frame,layer:layer,object:object,native:null};
+    // A character with edits from the native editor (lib/native, built into /vendor/cb-native.js) is drawn
+    // natively over its player: its edited timelines, pasted symbols and all. The player stays underneath
+    // (it still takes its seeks) and is hidden once the native drawing is ready; if that cannot load, the player's drawing stays.
+    if(object.nativePose && Object.keys(object.nativePose).length && window.CBNative){
+      var canvas = document.createElement('canvas');
+      canvas.width = 720; canvas.height = 960;
+      canvas.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;visibility:hidden;filter:' + frame.style.filter;
+      layer.appendChild(canvas);
+      var handle = window.CBNative.createNativeCharacter(object);
+      entry.native = {canvas:canvas,handle:handle,ready:false};
+      nativePending++;
+      handle.load().then(function(ok){
+        entry.native.ready = !!ok;
+        if(ok){ frame.style.visibility = 'hidden'; canvas.style.visibility = 'visible'; drawNative(entry, currentTimeSeconds); }
+      }, function(error){ console.error('[native character] ' + (error && error.message ? error.message : error)); }).then(function(){ nativePending--; markReadyWhenPossible(); });
+    }
     stage.appendChild(layer);
-    var entry = {frame:frame,layer:layer,object:object};
     placeCharacter(entry, 0);
     characterFrames.push(entry);
     timedLayers.push({el:layer,object:object});
@@ -392,10 +451,12 @@
   function markReadyWhenPossible(){
     if(window.__CBS_RENDER_ERROR__) return;
     if(pendingImages > 0) return;
+    if(nativePending > 0) return;
     if(readySources.size < characterFrames.length) return;
     // Text fonts must be loaded before capture (Google fonts arrive asynchronously).
     if(document.fonts && document.fonts.status !== 'loaded' && !markReadyWhenPossible.fontsWaited){ markReadyWhenPossible.fontsWaited = true; document.fonts.ready.then(markReadyWhenPossible, markReadyWhenPossible); return; }
-    characterFrames.forEach(function(entry){sendEdits(entry,currentTimeSeconds);});
+    characterFrames.forEach(function(entry){sendEdits(entry,currentTimeSeconds); drawNative(entry,currentTimeSeconds);});
+    nativeEntries.forEach(function(entry){ placeCharacter(entry,currentTimeSeconds); drawNative(entry,currentTimeSeconds); });
     requestAnimationFrame(function(){requestAnimationFrame(function(){window.__CBS_RENDER_READY__ = true;});});
   }
 
@@ -431,6 +492,8 @@
       var token = 'seek-' + (++seekCounter);
       if(pendingSeek){ clearTimeout(pendingSeek.timer); pendingSeek.resolve(); pendingSeek = null; }
       updateVisibility(safeSeconds);
+      // The layer's own movement over time (position, scale, rotation keyframes), then its native drawing.
+      nativeEntries.forEach(function(entry){ placeCharacter(entry, safeSeconds); drawNative(entry, safeSeconds); });
       if(characterFrames.length === 0){ requestAnimationFrame(function(){requestAnimationFrame(resolve);}); return; }
       var timer = setTimeout(function(){
         if(pendingSeek && pendingSeek.token === token){
@@ -446,6 +509,7 @@
           // Each layer plays its own source time (start time, clips) and loop mode, as in the editor.
           entry.frame.contentWindow.postMessage({source:'characterbazaarstudio-editor',type:'SEEK',seekMs:resolveSourceSeekMs(entry.object, safeSeconds),loop:entry.object.loopMode === 'loop',token:token}, '*');
         }
+        drawNative(entry, safeSeconds);
       });
     });
   };
@@ -483,10 +547,11 @@
       updateVisibility(0);
       if(characterFrames.length === 0){
         markReadyWhenPossible();
+        if(nativeEntries.length) setTimeout(function(){ if(!window.__CBS_RENDER_READY__ && !window.__CBS_RENDER_ERROR__) fail('The native characters did not finish loading'); }, 50000);
       } else {
         setTimeout(function(){
           if(!window.__CBS_RENDER_READY__ && !window.__CBS_RENDER_ERROR__) fail('Only ' + readySources.size + '/' + characterFrames.length + ' character runtimes became ready');
-        }, 20000);
+        }, (nativeEntries.length || characterFrames.some(function(entry){ return entry.native; })) ? 50000 : 20000);
       }
     }catch(error){ fail(error && error.message ? error.message : String(error)); }
   }

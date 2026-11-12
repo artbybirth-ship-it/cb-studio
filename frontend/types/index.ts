@@ -10,6 +10,37 @@ export type CharacterPartKey = string;
  * rules never chain; for a colour the last matching rule wins, and part rules beat whole-character ones.
  * "shades" moves the whole colour family (its lighter/darker shades keep their offset).
  */
+/** One classic tween's ease edited inside a character: the objects its layer creates, its keyframe and length, and the ease (−100 ease in … 100 ease out). */
+export type SymbolEaseEdit = { props: string[]; frame: number; frames: number; value: number };
+
+/** A layer's keyframes inside a character after editing: [frame in the file, frame now] for each one (an added keyframe has no frame in the file: it takes the one it was added at). */
+/** `cut`: the layer ends at this frame (Remove Frames at its end): it has no frames from there on.
+ *  `blanks`: blank keyframes made in the editor (F7), as the file frame of the keyframe: the layer shows nothing from there to its next keyframe.
+ *  `tweens`: classic tweens made in the editor on spans that hold still in the file, as [file frame of the keyframe it starts at, ease −100…100]; each runs to the next keyframe. */
+export type SymbolKeyEdit = { props: string[]; anchors: Array<[number, number]>; tweens?: Array<[number, number]>; blanks?: number[]; cut?: number };
+
+/** The values edited on one keyframe inside a character (x, y, scale, skew in degrees, alpha 0–1), by layer and file frame. */
+export type SymbolValueKey = "x" | "y" | "scaleX" | "scaleY" | "skewX" | "skewY" | "alpha" | "regX" | "regY";
+export type SymbolValueEdit = { props: string[]; frame: number; v: Partial<Record<SymbolValueKey, number>> };
+
+/** A part copied from another character: its symbol (named in the clone), the export file that holds it, and how it stood. */
+export type PoseForeign = { lib: string; scale: number; frame: number; mode?: number; loop?: boolean };
+
+/** How the layers of a symbol inside a character were arranged (step inside): see lib/symbolLayers.ts. */
+export type SymbolLayerEdit = {
+  order?: number[];
+  names?: Record<string, string>;
+  hidden?: number[];
+  locked?: number[];
+  deleted?: number[];
+  parents?: Record<string, number | null>;
+  extras?: Array<{ id: number; name: string; type: "normal" | "folder" }>;
+  /** Layers made by Duplicate Layer: a new copy (named `prop` in the player) of the layer `of` (its index, a duplicate's index follows the file's layers). */
+  clones?: Array<{ of: number; prop: string; symbol?: string; image?: { url: string; w: number; h: number; name: string; keep?: boolean }; foreign?: PoseForeign; end?: number; name?: string }>;
+  /** What the player gets (made from the above): the objects of each layer top to bottom, and the objects to hide. */
+  spec?: { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string; symbol?: string; image?: { url: string; w: number; h: number; name: string; keep?: boolean }; foreign?: PoseForeign; end?: number; name?: string }> };
+};
+
 export type ColorReplacement = {
   id: string;
   from: string;
@@ -262,6 +293,18 @@ export type EditorObject = {
   colorOverrides?: CharacterColorOverrides;
   /** Vector recolour rules (Recolour panel: palette + find & replace), applied in order by the player. */
   colorReplacements?: ColorReplacement[];
+  /** Tween eases edited inside this character (step inside), by symbol class, then "<layer>:<frame>". */
+  symbolEases?: Record<string, Record<string, SymbolEaseEdit>>;
+  /** Keyframes moved or added inside this character, by symbol class, then layer index. */
+  symbolKeys?: Record<string, Record<string, SymbolKeyEdit>>;
+  /** Values edited on keyframes inside this character, by symbol class, then "<layer>:<file frame>". */
+  symbolValues?: Record<string, Record<string, SymbolValueEdit>>;
+  /** Layers arranged inside this character (reordered, hidden, locked, renamed, deleted, folders), by symbol class. */
+  symbolLayers?: Record<string, SymbolLayerEdit>;
+  /** Native pose editor (beta): edited timelines of the character's Animate file, by the stepped-into symbol's class. */
+  nativePose?: Record<string, import("@/lib/native/store").NativeEdits>;
+  /** Where the character's pose stands in its 720 × 960 box (its Animate player's own placement), read when native edits are saved: lets the video renderer draw it without starting the player. */
+  nativePoseFit?: { s: number; tx: number; ty: number };
   /** Runtime-detected source body parts for Archive/CreateJS actions. */
   sourceParts?: CharacterPartDescriptor[];
   /** User-supplied image replacements for selected body parts. */

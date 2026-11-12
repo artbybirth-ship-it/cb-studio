@@ -1,0 +1,11 @@
+{
+  "enabledPlugins": {
+    "sales@synced": false,
+    "figma@synced": false,
+    "data@synced": false,
+    "legal@synced": false,
+    "marketing@synced": false,
+    "cowork-plugin-management@synced": false,
+    "youtube-transcriber@synced": false
+  }
+}

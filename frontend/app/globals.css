@@ -358,6 +358,7 @@ button{cursor:pointer}
   z-index:0;
 }
 .cb-stage-character>.cb-character-source-frame{position:relative;z-index:1}
+.cb-native-character-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:2;pointer-events:none;background:transparent}
 
 /* v35 — Prompt-driven deterministic animation */
 .cb-ai-animate-top-button{border-color:#5d7bef!important;background:linear-gradient(180deg,#263a86,#1d2f70)!important;color:#fff!important;font-weight:700}
@@ -898,13 +899,13 @@ button{cursor:pointer}
 
 /* Keep rotate slightly outside the corner while remaining screen-fixed. */
 .cb-whole-corner-control.cb-corner-nw .cb-corner-rotate-handle,
-.cb-part-corner-control.cb-corner-nw .cb-part-rotate-handle{left:0!important;top:0!important;transform:translate(-55%,-55%)!important}
+.cb-part-corner-control.cb-corner-nw .cb-part-rotate-handle{left:0!important;top:0!important;transform:translate(-115%,-115%)!important}
 .cb-whole-corner-control.cb-corner-ne .cb-corner-rotate-handle,
-.cb-part-corner-control.cb-corner-ne .cb-part-rotate-handle{right:0!important;top:0!important;transform:translate(55%,-55%)!important}
+.cb-part-corner-control.cb-corner-ne .cb-part-rotate-handle{right:0!important;top:0!important;transform:translate(115%,-115%)!important}
 .cb-whole-corner-control.cb-corner-se .cb-corner-rotate-handle,
-.cb-part-corner-control.cb-corner-se .cb-part-rotate-handle{right:0!important;bottom:0!important;transform:translate(55%,55%)!important}
+.cb-part-corner-control.cb-corner-se .cb-part-rotate-handle{right:0!important;bottom:0!important;transform:translate(115%,115%)!important}
 .cb-whole-corner-control.cb-corner-sw .cb-corner-rotate-handle,
-.cb-part-corner-control.cb-corner-sw .cb-part-rotate-handle{left:0!important;bottom:0!important;transform:translate(-55%,55%)!important}
+.cb-part-corner-control.cb-corner-sw .cb-part-rotate-handle{left:0!important;bottom:0!important;transform:translate(-115%,115%)!important}
 
 /* Part flip button is a direct child of the zoomed group, so counter-scale it. */
 .cb-character-part-hitbox .cb-part-flip-handle,
@@ -3314,13 +3315,25 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 /* ---- Step inside a character: its own Animate timeline (SymbolTimeline, view only). */
 .cb-symbol-timeline{display:grid;grid-template-rows:auto minmax(0,1fr);min-height:0;height:100%;background:#151515;border:1px solid #262626;color:#bdbdbd;font:12px/1.2 system-ui,sans-serif}
 .cb-symbol-toolbar{display:flex;align-items:center;gap:14px;min-height:44px;padding:0 12px;background:#232323;border-bottom:1px solid #4d4d4d}
-.cb-symbol-crumbs{display:flex;align-items:center;min-width:0;flex:1;overflow:hidden;white-space:nowrap}
+.cb-symbol-crumbs{display:flex;align-items:center;min-width:220px;flex:1;overflow:hidden;white-space:nowrap}
+.cb-symbol-native{flex:none;border:1px solid #5b6fb5;background:#2b3358;color:#cfdbff;font:inherit;font-size:12px;padding:3px 9px;border-radius:5px;cursor:pointer}
+.cb-symbol-native:hover{background:#38437a}
 .cb-symbol-crumbs span{display:inline-flex;align-items:center;min-width:0}
 .cb-symbol-crumbs i{margin:0 7px;color:#6f6f6f;font-style:normal}
 .cb-symbol-crumbs button{border:0;background:transparent;color:#8fb1ff;font:inherit;padding:2px 3px;border-radius:4px;cursor:pointer}
 .cb-symbol-crumbs button:hover{background:#2f3550;color:#c9d7ff}
 .cb-symbol-crumbs b{color:#fff;font-weight:600;overflow:hidden;text-overflow:ellipsis}
 .cb-symbol-note{padding:3px 8px;border-radius:999px;background:#3a3320;color:#e8cf86;font-size:11px}
+.cb-symbol-ease{display:flex;align-items:center;gap:7px;min-width:0;color:#cfcfcf;font-size:11px}
+.cb-symbol-ease-where{max-width:180px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#9a9a9a}
+.cb-symbol-ease-label{color:#fff}
+.cb-symbol-ease .cb-ease-word{font-style:normal;color:#9a9a9a}
+.cb-symbol-ease .cb-ease-input{width:46px;height:20px;box-sizing:border-box;border:1px solid #5468ff;border-radius:4px;background:#111;color:#fff;font-size:11px;text-align:center}
+.cb-symbol-ease-custom{color:#e8cf86}
+.cb-symbol-ease-reset{height:20px;padding:0 8px;border:0;border-radius:4px;background:#333;color:#ddd;font:inherit;cursor:pointer}
+.cb-symbol-ease-reset:hover{background:#444;color:#fff}
+.cb-symbol-span.is-picked{box-shadow:inset 0 0 0 1px #fff}
+.cb-symbol-span.is-edited::after{content:"";position:absolute;right:2px;top:2px;width:5px;height:5px;border-radius:50%;background:#ffd166}
 .cb-symbol-fps{color:#8b8b8b;font-size:11px}
 .cb-symbol-transport{display:flex;align-items:center;gap:4px}
 .cb-symbol-transport button{display:grid;place-items:center;width:28px;height:28px;border:0;border-radius:5px;background:transparent;color:#d3d3d3;cursor:pointer}
@@ -3337,6 +3350,8 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 .cb-symbol-end{position:absolute;top:0;bottom:0;width:1px;background:#5f5f5f}
 .cb-symbol-row{height:var(--cb-sym-row);border-bottom:1px solid #222}
 .cb-symbol-layer{position:sticky;left:0;z-index:3;display:flex;align-items:center;gap:6px;min-width:0;padding-right:6px;background:#171717;border-right:1px solid #2a2a2a}
+.cb-symbol-row.is-selected .cb-symbol-layer{background:#27304f}.cb-symbol-row.is-selected .cb-symbol-layer-name{color:#fff}
+.cb-symbol-layer{cursor:default}
 .cb-symbol-row.is-folder .cb-symbol-layer{background:#1c1c1c}
 .cb-symbol-type,.cb-symbol-fold{display:grid;place-items:center;flex:0 0 18px;width:18px;height:18px;padding:0;border:0;background:transparent;color:#9a9a9a}
 .cb-symbol-fold{cursor:pointer;border-radius:4px}.cb-symbol-fold:hover{background:#2b2b2b;color:#ddd}
@@ -3354,6 +3369,23 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 .cb-symbol-span.classic{background:#7059a8}
 .cb-symbol-span.shape{background:#4f8f4c}
 .cb-symbol-key{position:absolute;left:calc(var(--cb-sym-cell) / 2);bottom:4px;width:6px;height:6px;margin-left:-3px;border-radius:50%;background:#000;box-shadow:0 0 0 1px rgba(255,255,255,.35)}
+.cb-symbol-key.movable{cursor:ew-resize}.cb-symbol-key.movable::before{content:"";position:absolute;left:-5px;right:-5px;top:-6px;bottom:-6px}
+.cb-symbol-key.pickable{cursor:pointer}.cb-symbol-key.pickable::before{content:"";position:absolute;left:-5px;right:-5px;top:-6px;bottom:-6px}
+.cb-symbol-key.movable.pickable{cursor:ew-resize}
+.cb-symbol-key.valued{box-shadow:0 0 0 2px #ffd166}
+.cb-symbol-key.chosen{box-shadow:0 0 0 2px #fff}
+.cb-symbol-values{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:34px;padding:4px 12px;background:#1d1d1d;border-bottom:1px solid #2c2c2c;color:#cfcfcf;font-size:11px}
+.cb-symbol-values-where{max-width:200px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#9a9a9a}
+.cb-symbol-value{display:inline-flex;align-items:center;gap:5px}.cb-symbol-value span{color:#9a9a9a}
+.cb-symbol-value input{width:64px;height:22px;box-sizing:border-box;border:1px solid #3a3a3a;border-radius:4px;background:#111;color:#fff;font-size:11px;text-align:center;cursor:ew-resize}
+.cb-symbol-value input:focus{cursor:text;border-color:#5468ff;outline:0}
+.cb-symbol-copycell{position:absolute;top:0;bottom:0;background:rgba(255,64,160,.28);outline:2px solid #ff40a0;outline-offset:-2px;pointer-events:none;z-index:6;box-shadow:0 0 10px 2px rgba(255,64,160,.8)}
+.cb-symbol-copycell b{position:absolute;left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:#ff40a0;border:2px solid #fff;box-shadow:0 0 8px 2px #ff40a0}
+.cb-symbol-copysrc{position:absolute;top:0;bottom:0;outline:2px dashed #ffd166;outline-offset:-2px;pointer-events:none;z-index:6}
+.cb-symbol-key.added{background:#ffd166}
+.cb-symbol-span.is-moved.is-picked{box-shadow:inset 0 0 0 1px #fff}
+.cb-symbol-span.is-moved{box-shadow:inset 0 0 0 1px rgba(255,209,102,.7)}
+.cb-symbol-ease-reset:disabled{opacity:.4;cursor:default}
 .cb-symbol-key.blank{background:#fff;box-shadow:inset 0 0 0 1.4px #000}
 .cb-symbol-arrow{position:absolute;left:calc(var(--cb-sym-cell) + 2px);right:calc(var(--cb-sym-cell) / 2);top:50%;height:1px;background:#111}
 .cb-symbol-arrow::after{content:"";position:absolute;right:-1px;top:-3px;border:3.5px solid transparent;border-left:6px solid #111;border-right:0}
@@ -3379,6 +3411,33 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 /* a ⌘G group's registration point (white circle, as on a single object) */
 .cb-group-pivot{position:absolute;width:calc(13px / var(--cb-gz,1));height:calc(13px / var(--cb-gz,1));padding:0;transform:translate(-50%,-50%);box-sizing:border-box;border:calc(1.5px / var(--cb-gz,1)) solid #141414;border-radius:50%;background:#fff;pointer-events:auto;cursor:move;touch-action:none}
 .cb-symbol-viewing .cb-character-tight-hitbox,.cb-symbol-viewing .cb-selection-gizmo{display:none!important}
+.cb-symbol-handles{position:absolute;inset:0;z-index:2001;pointer-events:none}
+.cb-symbol-box{position:absolute;pointer-events:none}
+.cb-symbol-box-lines{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.cb-symbol-box-lines polygon{fill:none;stroke:#1d1d1d;stroke-width:1.2;filter:drop-shadow(0 0 .6px rgba(255,255,255,.85))}
+.cb-symbol-handle{position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;box-sizing:border-box;background:#161616;border:1px solid #f5f5f5;box-shadow:0 0 0 1px rgba(0,0,0,.45);border-radius:0;pointer-events:auto;cursor:nwse-resize;touch-action:none}
+.cb-symbol-handle.n,.cb-symbol-handle.s{cursor:ns-resize}.cb-symbol-handle.e,.cb-symbol-handle.w{cursor:ew-resize}.cb-symbol-handle.ne,.cb-symbol-handle.sw{cursor:nesw-resize}
+.cb-symbol-turn{position:absolute;width:26px;height:26px;margin:-13px 0 0 -13px;display:grid;place-items:center;pointer-events:auto;touch-action:none;cursor:grab;background:transparent;border:0;font-style:normal}
+.cb-symbol-turn::before{content:"↻";width:18px;height:18px;display:grid;place-items:center;border-radius:50%;border:1px solid #1b1d24;background:#fff;color:#111;font-size:12px;line-height:1;box-shadow:0 1px 3px rgba(0,0,0,.35);opacity:0;transition:opacity .08s linear}
+.cb-symbol-turn:hover::before,.cb-symbol-turn:active::before{opacity:1}
+.cb-symbol-turn:active{cursor:grabbing}
+.cb-symbol-edge{position:absolute;height:9px;pointer-events:auto;touch-action:none}
+.cb-symbol-box-note{position:absolute;transform:translate(0,-130%);padding:1px 6px;border-radius:999px;background:#3a3320;color:#e8cf86;font-size:10px;font-weight:600;pointer-events:none;white-space:nowrap}
+.cb-symbol-sel{position:absolute;top:0;bottom:0;z-index:4;background:rgba(77,99,255,.28);border:1px solid rgba(124,142,255,.85);box-sizing:border-box;pointer-events:none}
+.cb-symbol-framemenu{position:fixed;z-index:3000}
+.cb-symbol-head-name{justify-content:space-between;gap:6px}
+.cb-symbol-layer-tools{display:inline-flex;align-items:center;gap:2px}
+.cb-symbol-layer-tools button{display:grid;place-items:center;width:20px;height:20px;padding:0;border:0;border-radius:4px;background:transparent;color:#a9a9a9;font-size:12px;cursor:pointer}
+.cb-symbol-layer-tools button:hover:not(:disabled){background:#333;color:#fff}.cb-symbol-layer-tools button:disabled{opacity:.35;cursor:default}
+.cb-symbol-layer-tools svg{width:14px;height:14px}
+.cb-symbol-lock{display:grid;place-items:center;flex:0 0 20px;width:20px;height:20px;padding:0;border:0;border-radius:4px;background:transparent;color:#6f6f6f;cursor:pointer}
+.cb-symbol-lock:hover{background:#2b2b2b;color:#ddd}.cb-symbol-lock.on{color:#ffd166}.cb-symbol-lock svg{width:14px;height:14px}
+.cb-symbol-row.is-locked .cb-symbol-layer-name{color:#8a8a8a}.cb-symbol-row.is-locked .cb-symbol-lane{opacity:.7}
+.cb-symbol-rename{flex:1;min-width:0;height:20px;box-sizing:border-box;border:1px solid #5468ff;border-radius:4px;background:#111;color:#fff;font-size:11px;padding:0 5px;outline:0}
+.cb-symbol-row.drop-before{box-shadow:inset 0 2px 0 #5468ff}.cb-symbol-row.drop-after{box-shadow:inset 0 -2px 0 #5468ff}.cb-symbol-row.drop-into{box-shadow:inset 0 0 0 2px #5468ff}
+body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none}
+.cb-symbol-pivot{position:absolute;width:13px;height:13px;margin:-6.5px 0 0 -6.5px;box-sizing:border-box;border:3px solid #161616;border-radius:50%;background:#fff;box-shadow:0 0 0 1px #fff;pointer-events:none}
+.cb-symbol-pivot.movable{pointer-events:auto;cursor:move;touch-action:none}
 .cb-symbol-overlay{position:absolute;inset:0;z-index:2000;cursor:default}
 .cb-symbol-menu{min-width:200px}
 
@@ -3479,3 +3538,21 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 .cb-fla-import-actions button{min-width:110px;height:30px;margin:0;padding:0 16px;font-size:13px}
 .cb-fla-import-actions .cb-fs-create{background:#4285f4}
 .cb-fla-import-actions button:disabled{opacity:.45;cursor:not-allowed}
+
+.cb-symbol-lib-shade{position:fixed;inset:0;z-index:2099}
+.cb-symbol-lib{min-width:220px;padding:6px}
+.cb-symbol-lib input{width:100%;height:28px;margin-bottom:4px;padding:0 8px;border:1px solid #555;border-radius:6px;background:#1d1d1d;color:#e2e2e2;font-size:12px}
+.cb-symbol-lib-list{max-height:280px;overflow:auto}
+.cb-symbol-lib-list button{height:28px;padding:0 8px}
+.cb-symbol-lib-empty{display:block;padding:8px;color:#8a8a8a;font-size:12px}
+
+.cb-symbol-lib-title{margin:6px 4px 2px;color:#8a8a8a;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.cb-symbol-lib-pics{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;max-height:220px;overflow:auto}
+.cb-frame-menu .cb-symbol-lib-pics button{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:2px;height:auto;padding:4px}
+.cb-symbol-lib-pics img{width:100%;height:52px;object-fit:contain;background:#1d1d1d;border-radius:4px}
+.cb-symbol-lib-pics span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:#bbb}
+.cb-symbol-lib-upload{display:block;margin:4px 0;padding:6px 8px;border-radius:6px;color:#e2e2e2;font-size:12px;cursor:pointer}.cb-symbol-lib-upload:hover{background:#3d4675}
+.cb-symbol-marquee{z-index:60;pointer-events:none;border:1px dashed #e8e8e8;background:rgba(120,150,255,.12);box-shadow:0 0 0 1px rgba(0,0,0,.5)}
+
+/* Rotate tool (R, Illustrator): the whole stage shows the rotate cursor; a drag turns the selection. */
+.studio-stage-host.cb-rotate-held,.studio-stage-host.cb-rotate-held *{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M18.5 9.5A7 7 0 1 0 19 15' fill='none' stroke='%23fff' stroke-width='4'/%3E%3Cpath d='M18.5 9.5A7 7 0 1 0 19 15' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M21 4v6h-6' fill='none' stroke='%23fff' stroke-width='4'/%3E%3Cpath d='M21 4v6h-6' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E") 12 12,crosshair!important}

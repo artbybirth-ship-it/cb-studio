@@ -7,6 +7,22 @@ import type { CharacterKeyframe, EditorObject } from "@/types";
  */
 export const layerKeyOf = (object: EditorObject) => object.layer || object.id;
 
+/** The timeline's frame grid (Timeline.tsx FPS). */
+const GRID_FPS = 30;
+/**
+ * Is a layer drawn at this time? The same frames the timeline shows as its span: from its start
+ * frame up to the frame before start + length (the next frame is a blank frame, as in Animate).
+ * public/render-harness.html repeats this rule for export.
+ */
+export function inLayerSpan(object: EditorObject, seconds: number): boolean {
+  const start = Math.max(0, Number(object.startTime || 0));
+  const frame = Math.floor(seconds * GRID_FPS + 1e-4);
+  const startFrame = Math.round(start * GRID_FPS);
+  if (frame < startFrame) return false;
+  if (!object.actionDurationMs) return true;
+  return frame < Math.max(startFrame + 1, Math.round((start + object.actionDurationMs / 1000) * GRID_FPS));
+}
+
 /** The objects on a layer, bottom to top (scene order). */
 export const layerMembers = (objects: EditorObject[], key: string) => objects.filter((item) => layerKeyOf(item) === key);
 

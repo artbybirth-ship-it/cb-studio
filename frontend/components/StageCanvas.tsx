@@ -1,5 +1,6 @@
 "use client";
 
+import { createPortal } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, MutableRefObject, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
 import type { CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject } from "@/types";
@@ -8,8 +9,10 @@ import RenderDiagnostics, { type RenderDiagnosticsInfo } from "@/components/Rend
 import type { LayerGeometry } from "@/lib/layerTransform";
 import { type CharacterTransform } from "@/lib/keyframes";
 import { groupPivotAtTime, resolveObjectTransformAtTime } from "@/lib/groupMotion";
+import NativeCharacterCanvas from "./NativeCharacterCanvas";
 import { resolvePartOverridesAtTime, resolvePartTransformAtTime, resolveSourceSeekMs, type PartTransform } from "@/lib/partKeyframes";
 import { isMultiPartKey, memberPatches, parentPartKey, partMembers } from "@/lib/partSelection";
+import { inLayerSpan } from "@/lib/layerRows";
 
 type Props = {
   data: EditorData;
@@ -75,10 +78,25 @@ type Props = {
    *  path inside it (cb-animate-bridge SYMBOL_VIEW levels) and the objects of hidden layers. The
    *  rest of the scene is dimmed and the stage only answers double-clicks. */
   symbolView?: { objectId: string; levels: Array<{ props?: string[]; frame: number }>; hidden: string[] } | null;
+  /** Inside a character: a press on a part starts dragging it; the handle moves it by the pointer's travel (fractions of the player) and ends. */
+  onSymbolDragStart?: (normalizedX: number, normalizedY: number, shift?: boolean, context?: boolean) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void; click?: () => void } | null>;
+  /** A box dragged on empty stage inside a pose (fractions of the player): the parts it touches; additive with Shift. */
+  onSymbolBoxSelect?: (rect: { x0: number; y0: number; x1: number; y1: number }, additive: boolean) => void;
+  /** A handle of the picked part (a scale handle's side or corner, or "rotate") was pressed, at a point of the player. */
+  onSymbolHandleStart?: (handle: string, normalizedX: number, normalizedY: number) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void } | null>;
+  /** A click on nothing inside a character: the picked part is dropped. */
+  onSymbolDeselect?: () => void;
+  /** The right-click menu inside a pose: what to do to the part picked there. */
+  onSymbolContext?: (action: "hide" | "lock" | "delete" | "duplicate" | "flipH" | "flipV" | "group" | "ungroup" | "pivot" | "cut" | "copy" | "paste" | "pasteFront" | "pasteBack" | "forward" | "backward" | "toFront" | "toBack") => void;
+  onSymbolPivotReset?: () => void;
+  /** The picked part's box (its four corners, top left first, and its pivot) as fractions of the player. */
+  symbolBox?: { corners: Array<[number, number]>; pivot: [number, number] | null; editable: boolean; multi?: boolean } | null;
   /** Inside a character: a double-click on one of its objects (its property name), or elsewhere (null). */
   onSymbolDoubleClick?: (prop: string | null) => void;
-  /** ⌥ Option + double-click a character, or right-click › Edit Symbol: step inside it. */
+  /** Double-click a character with an Animate timeline, or right-click › Edit Symbol: step inside it. */
   onEnterSymbol?: (objectId: string) => void;
+  /** Does this character have an Animate timeline to step inside (imported from an .fla)? Then a plain double-click steps inside. */
+  canEnterSymbol?: (objectId: string) => boolean;
   /** Right-click › Distribute to Layers (animated part layers) / Distribute as Still (vector pictures). */
   onDistributeParts?: (mode: "animated" | "still") => void;
   /** Inside the selected character with no part selected (Illustrator's isolation mode). */
@@ -267,9 +285,14 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolBoxSelect, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, onSymbolPivotReset, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
+  // Characters drawn natively (those with edits from the native editor): the canvas that stands in for the player's, and whether it is showing yet.
+  const nativeCanvases = useRef(new Map<string, HTMLCanvasElement>());
+  const [nativeReady, setNativeReady] = useState<ReadonlySet<string>>(new Set());
+  const onNativeCanvas = useCallback((id: string, node: HTMLCanvasElement | null) => { if (node) nativeCanvases.current.set(id, node); else nativeCanvases.current.delete(id); }, []);
+  const onNativeReady = useCallback((id: string, ready: boolean) => setNativeReady((current) => (current.has(id) === ready ? current : new Set(ready ? [...current, id] : [...current].filter((item) => item !== id)))), []);
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   const [readyCharacterIds, setReadyCharacterIds] = useState<Set<string>>(() => new Set());
   const [characterVisualBounds, setCharacterVisualBounds] = useState<Record<string, VisualBounds>>({});
@@ -282,6 +305,9 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [spacePanning, setSpacePanning] = useState(false);
   const [rotationToolActive, setRotationToolActive] = useState(false);
+  // R (Illustrator's Rotate tool): stays on after the key is released; a drag anywhere turns the selection about its
+  // registration point. R again, V or Esc puts the normal tool back.
+  const [rotateHeld, setRotateHeld] = useState(false);
   const panDragRef = useRef<{ pointerId: number; startClientX: number; startClientY: number; startPanX: number; startPanY: number } | null>(null);
   // Part selected when the current click gesture began, and characters whose pending
   // HIT_TEST_PART answer came from a double-click.
@@ -747,16 +773,19 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         setSpacePanning(true);
         return;
       }
-      if (event.key === "Escape") setRotationToolActive(false);
+      if (event.key === "Escape") { setRotationToolActive(false); setRotateHeld(false); }
+      const plain = !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.repeat && !isEditableTarget(event.target);
+      if (plain && event.code === "KeyR") setRotateHeld((on) => !on);
+      else if (plain && event.code === "KeyV") setRotateHeld(false);
     };
     const up = (event: KeyboardEvent) => {
       if (event.code === "Space") setSpacePanning(false);
     };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
+    window.addEventListener("keydown", down, true);
+    window.addEventListener("keyup", up, true);
     return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
+      window.removeEventListener("keydown", down, true);
+      window.removeEventListener("keyup", up, true);
     };
   }, [renderMode, selectedObjectId]);
 
@@ -1014,6 +1043,12 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       colorOverrides: object.colorOverrides || {},
       // Colour rules (Fill/Stroke, Light/Dark, Find/Replace, Adjust colour).
       colorReplacements: object.colorReplacements || [],
+      // Tween eases edited inside the character (step inside → Ease).
+      symbolEases: object.symbolEases || {},
+      symbolKeys: object.symbolKeys || {},
+      symbolValues: object.symbolValues || {},
+      // Layers arranged inside the character (order, hidden): what the player needs of them.
+      symbolLayers: Object.fromEntries(Object.entries(object.symbolLayers || {}).map(([name, edit]) => [name, edit.spec || {}])),
       strokeScale: object.strokeScale ?? 1,
       selectedPart: object.id === selectedObjectId ? (activeCharacterPart || "") : "",
       onlyParts: object.onlyParts || [],
@@ -1375,6 +1410,61 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     symbolViewObjectRef.current = symbolView?.objectId ?? null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbolView, postSymbolView]);
+  const [poseMarquee, setPoseMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  // Follows the pointer from a press inside a character: the handle made by begin gets its travel (fractions of the player) once
+  // it is ready; a press with no travel is a click on the part (or on nothing).
+  const trackSymbolPointer = (
+    event: { clientX: number; clientY: number },
+    begin: (normalizedX: number, normalizedY: number, shift: boolean) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void; click?: () => void } | null>,
+    onEmptyClick?: () => void,
+    onMarquee?: (rect: { x0: number; y0: number; x1: number; y1: number }, additive: boolean) => void,
+  ) => {
+    if (!symbolView) return;
+    const frame = frameRefs.current.get(symbolView.objectId), rect = frame?.getBoundingClientRect();
+    if (!rect || event.clientX < rect.left - 40 || event.clientX > rect.right + 40 || event.clientY < rect.top - 40 || event.clientY > rect.bottom + 40) return;
+    const startX = event.clientX, startY = event.clientY;
+    let handle: Awaited<ReturnType<typeof begin>> = null, ready = false, ended = false, moved = false, latest = { x: startX, y: startY, shift: false };
+    const startShift = Boolean((event as { shiftKey?: boolean }).shiftKey);
+    const apply = () => {
+      if (handle && moved) handle.move((latest.x - startX) / rect.width, (latest.y - startY) / rect.height, latest.shift);
+      else if (!handle && ready && moved && onMarquee) setPoseMarquee({ left: Math.min(startX, latest.x), top: Math.min(startY, latest.y), width: Math.abs(latest.x - startX), height: Math.abs(latest.y - startY) });
+    };
+    const finish = () => {
+      if (!ready || !ended) return;
+      setPoseMarquee(null);
+      if (moved) {
+        if (handle) handle.end();
+        else if (onMarquee) onMarquee({ x0: (startX - rect.left) / rect.width, y0: (startY - rect.top) / rect.height, x1: (latest.x - rect.left) / rect.width, y1: (latest.y - rect.top) / rect.height }, startShift || latest.shift);
+      }
+      else if (handle) { handle.click?.(); handle.end(); }
+      else if (!startShift) onEmptyClick?.();
+    };
+    void begin((startX - rect.left) / rect.width, (startY - rect.top) / rect.height, startShift).then((created) => { handle = created; ready = true; apply(); finish(); });
+    const move = (moveEvent: PointerEvent) => {
+      latest = { x: moveEvent.clientX, y: moveEvent.clientY, shift: moveEvent.shiftKey };
+      if (!moved && Math.hypot(latest.x - startX, latest.y - startY) < 3) return;
+      moved = true;
+      apply();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      ended = true;
+      finish();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  // Where the player's frame lies inside the stage, for drawing the picked part's handles over it.
+  const handlesRef = useRef<HTMLDivElement>(null);
+  const [handleFrame, setHandleFrame] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const wrap = handlesRef.current, frame = symbolView && symbolBox ? frameRefs.current.get(symbolView.objectId) : null;
+    if (!wrap || !frame) { if (handleFrame) setHandleFrame(null); return; }
+    const w = wrap.getBoundingClientRect(), f = frame.getBoundingClientRect(), k = w.width / (wrap.offsetWidth || 1) || 1;
+    const next = { left: (f.left - w.left) / k, top: (f.top - w.top) / k, width: f.width / k, height: f.height / k };
+    if (!handleFrame || Math.abs(next.left - handleFrame.left) > 0.5 || Math.abs(next.top - handleFrame.top) > 0.5 || Math.abs(next.width - handleFrame.width) > 0.5 || Math.abs(next.height - handleFrame.height) > 0.5) setHandleFrame(next);
+  });
   const doubleClickInsideSymbol = (event: ReactMouseEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -1383,6 +1473,27 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const rect = frame?.getBoundingClientRect();
     if (!frame || !rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) { onSymbolDoubleClick?.(null); return; }
     frame.contentWindow?.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_HIT", normalizedX: (event.clientX - rect.left) / rect.width, normalizedY: (event.clientY - rect.top) / rect.height }, "*");
+  };
+  // Right-click inside a pose: the part under the pointer is picked and a small menu offers what Animate does with it.
+  const [partMenu, setPartMenu] = useState<{ x: number; y: number; hasPart: boolean } | null>(null);
+  useEffect(() => {
+    if (!partMenu) return;
+    const close = () => setPartMenu(null);
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", close);
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("keydown", close); };
+  }, [partMenu]);
+  const openPartMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!symbolView || !onSymbolDragStart) return;
+    const rect = frameRefs.current.get(symbolView.objectId)?.getBoundingClientRect();
+    if (!rect) return;
+    const at = { x: event.clientX, y: event.clientY };
+    void onSymbolDragStart((at.x - rect.left) / rect.width, (at.y - rect.top) / rect.height, false, true).then((handle) => {
+      if (handle) { handle.click?.(); handle.end(); }
+      setPartMenu({ ...at, hasPart: Boolean(handle) });
+    });
   };
   // Right-click a character (or its selected parts) › Edit Symbol, Distribute to Layers (Animate).
   const [symbolMenu, setSymbolMenu] = useState<{ x: number; y: number; objectId: string } | null>(null);
@@ -1685,13 +1796,14 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const frame = frameRefs.current.get(object.id);
     if (!frame) return true;
     try {
-      const canvas = frame.contentDocument?.querySelector("canvas");
+      const native = nativeReady.has(object.id) ? nativeCanvases.current.get(object.id) : null;
+      const canvas = native ?? frame.contentDocument?.querySelector("canvas");
       if (!canvas || !canvas.width || !canvas.height) return true;
       const rotation = resolveObjectTransformAtTime(object, playhead).rotation || 0;
       const point = playerPointFromClient(frame, rotation, skewOf(object), Boolean(object.flipX), clientX, clientY);
       if (!point) return false;
-      // The canvas may cover only the visible part of the player (sharp rendering).
-      const canvasRect = canvas.getBoundingClientRect();
+      // The player's canvas may cover only the visible part of the player (sharp rendering); the native canvas always covers the whole box.
+      const canvasRect = native ? { left: 0, top: 0, width: frame.offsetWidth, height: frame.offsetHeight } : canvas.getBoundingClientRect();
       if (canvasRect.width <= 0 || canvasRect.height <= 0) return true;
       const px = Math.floor(((point.x - canvasRect.left) / canvasRect.width) * canvas.width);
       const py = Math.floor(((point.y - canvasRect.top) / canvasRect.height) * canvas.height);
@@ -2470,13 +2582,13 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           if (!isCharacterPixelOpaque(object, event.clientX, event.clientY)) return;
           event.preventDefault();
           event.stopPropagation();
-          // ⌥ Option + double-click steps inside its Animate timeline (plain double-click edits a body part).
-          if (event.altKey && onEnterSymbol) { onEnterSymbol(object.id); return; }
+          // A character with an Animate timeline: a double-click steps inside it (⌥ Option + double-click edits a body part instead).
+          if (!event.altKey && !partMode && onEnterSymbol && canEnterSymbol?.(object.id)) { onEnterSymbol(object.id); return; }
           if (partMode && doubleClickSubPart(object, event.clientX, event.clientY)) return;
           onSelect(object.id);
           requestCharacterPartAtPoint(object, event.clientX, event.clientY, true);
         }}
-        title={selected ? "Drag to move. Double-click a body part to edit just that part." : "Click to select the character. Double-click to edit a body part."}
+        title={canEnterSymbol?.(object.id) ? "Drag to move. Double-click to step inside it (⌥ double-click edits a body part)." : selected ? "Drag to move. Double-click a body part to edit just that part." : "Click to select the character. Double-click to edit a body part."}
       />
     );
   };
@@ -2956,7 +3068,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   return (
     <div
       ref={hostRef}
-      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""} ${symbolView && !renderMode ? "cb-symbol-viewing" : ""} ${isolating && !renderMode ? "cb-isolating" : ""}`}
+      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotateHeld && !renderMode ? "cb-rotate-held" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""} ${symbolView && !renderMode ? "cb-symbol-viewing" : ""} ${isolating && !renderMode ? "cb-isolating" : ""}`}
       onWheel={handleWheel}
       // Scale tool (S) takes the drag before objects or the marquee see it.
       onPointerDownCapture={(event) => {
@@ -2966,6 +3078,18 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         // Hand tool (Space held): pan from anywhere on the canvas. Taken here, before any part, handle
         // or object sees the press, so nothing is picked or moved in any mode.
         if (spacePanning) { beginPan(event); return; }
+        // Rotate tool (R): hand the press to the selection's own rotate handle (pose part, character part, then whole object),
+        // so the drag turns it exactly as dragging beside a corner does.
+        if (rotateHeld && !renderMode && event.button === 0 && event.nativeEvent.isTrusted) {
+          const host = hostRef.current;
+          const rotate = host?.querySelector<HTMLElement>(".cb-symbol-turn") || host?.querySelector<HTMLElement>(".cb-part-rotate-handle") || host?.querySelector<HTMLElement>(".cb-corner-rotate-handle");
+          if (rotate) {
+            event.preventDefault();
+            event.stopPropagation();
+            rotate.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, shiftKey: event.shiftKey }));
+            return;
+          }
+        }
         // A press in the text being typed moves the caret: nothing is selected or dragged.
         if ((event.target as HTMLElement).closest?.(".cb-stage-text-editing")) { event.stopPropagation(); return; }
         // Text tool (T): a press on a text layer types into it; anywhere else starts new text there.
@@ -3099,10 +3223,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           // Empty timeline layers draw nothing; hidden layers only disappear in the editor.
           if (object.type === "background" || object.type === "audio" || object.type === "empty" || (object.hidden && !renderMode)) return null;
           const lockClass = object.locked && !renderMode ? "cb-layer-locked" : "";
-          const layerStart = Math.max(0, Number(object.startTime || 0));
-          const layerDuration = object.actionDurationMs ? Math.max(0.1, Number(object.actionDurationMs) / 1000) : null;
-          if (playhead + 0.0001 < layerStart) return null;
-          if (layerDuration != null && playhead > layerStart + layerDuration + 0.0001) return null;
+          if (!inLayerSpan(object, playhead)) return null;
           const selected = selectedIds.includes(object.id);
           const resolvedTransform = resolveObjectTransformAtTime(object, playhead);
           const baseStyle = {
@@ -3201,9 +3322,22 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                   style={{
                     filter: `hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)`,
                     pointerEvents: "none",
+                    opacity: nativeReady.has(object.id) && !(symbolView && symbolView.objectId === object.id) ? 0 : undefined,
                   }}
                   tabIndex={-1}
                 />
+                {object.nativePose && Object.keys(object.nativePose).length > 0 && !(symbolView && symbolView.objectId === object.id) && (
+                  <NativeCharacterCanvas
+                    object={object}
+                    seekMs={resolveSourceSeekMs(object, playhead)}
+                    hueFilter={`hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)`}
+                    onCanvas={onNativeCanvas}
+                    onReady={onNativeReady}
+                    playerFrame={() => frameRefs.current.get(object.id)}
+                    playerReady={readyCharacterIds.has(object.id)}
+                    savedFit={object.nativePoseFit}
+                  />
+                )}
                 {renderSourcePartReplacements(object)}
                 {renderCharacterPartHitArea(object, selected)}
                 {renderSelectionGizmo(object, selected)}
@@ -3363,11 +3497,98 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         );
       })}
       {/* Inside a character: the stage only answers double-clicks (a part steps in, elsewhere steps out). */}
-      {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={doubleClickInsideSymbol} onPointerDown={(event) => { if (!spacePanning) event.stopPropagation(); }} title="Double-click a part to step inside it; double-click elsewhere (or Esc) to step out" />}
+      {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={doubleClickInsideSymbol} onContextMenu={openPartMenu} onPointerDown={(event) => {
+          if (spacePanning) return;
+          event.stopPropagation();
+          // Press a part and drag: it moves. A click picks it (handles appear); a click on nothing drops it.
+          if (event.button === 0 && onSymbolDragStart) trackSymbolPointer(event, (nx, ny, shift) => onSymbolDragStart(nx, ny, shift), onSymbolDeselect, onSymbolBoxSelect);
+        }} title="Drag a part to move it, click it for handles; double-click a part to step inside it; double-click elsewhere (or Esc) to step out" />}
+      {poseMarquee && typeof document !== "undefined" && createPortal(<div className="cb-symbol-marquee" style={{ position: "fixed", left: poseMarquee.left, top: poseMarquee.top, width: poseMarquee.width, height: poseMarquee.height }} aria-hidden="true" />, document.body)}
+      {symbolView && !renderMode && symbolBox && (
+        <div ref={handlesRef} className="cb-symbol-handles">
+          {handleFrame && (() => {
+            const [c0, c1, c2, c3] = symbolBox.corners;
+            const mid = (p: [number, number], q: [number, number]): [number, number] => [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+            const sides: Array<[string, [number, number]]> = [["nw", c0], ["n", mid(c0, c1)], ["ne", c1], ["e", mid(c1, c2)], ["se", c2], ["s", mid(c2, c3)], ["sw", c3], ["w", mid(c3, c0)]];
+            const centre: [number, number] = [(c0[0] + c2[0]) / 2, (c0[1] + c2[1]) / 2];
+                        const press = (name: string) => (event: ReactPointerEvent<HTMLElement>) => {
+              if (event.button !== 0 || !onSymbolHandleStart) return;
+              event.stopPropagation();
+              event.preventDefault();
+              trackSymbolPointer(event, (nx, ny) => onSymbolHandleStart(name, nx, ny));
+            };
+            return (
+              <div className="cb-symbol-box" style={{ left: handleFrame.left, top: handleFrame.top, width: handleFrame.width, height: handleFrame.height }}>
+                <svg className="cb-symbol-box-lines" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+                  <polygon points={symbolBox.corners.map((p) => p.join(",")).join(" ")} vectorEffect="non-scaling-stroke" />
+                </svg>
+                {symbolBox.editable && !symbolBox.multi && ([["skew-n", c0, c1], ["skew-e", c1, c2], ["skew-s", c2, c3], ["skew-w", c3, c0]] as Array<[string, [number, number], [number, number]]>).map(([name, from, to]) => {
+                  const centre = mid(from, to), dx = (to[0] - from[0]) * handleFrame.width, dy = (to[1] - from[1]) * handleFrame.height;
+                  return <i key={name} className={`cb-symbol-edge ${name}`} role="button" aria-label="Skew along this edge" title="Skew: drag along this edge"
+                    style={{ left: `${centre[0] * 100}%`, top: `${centre[1] * 100}%`, width: Math.hypot(dx, dy), transform: `translate(-50%, -50%) rotate(${Math.atan2(dy, dx)}rad)`, cursor: name === "skew-n" || name === "skew-s" ? "ew-resize" : "ns-resize" }}
+                    onPointerDown={press(name)} />;
+                })}
+                {symbolBox.editable && sides.map(([name, point]) => <i key={name} className={`cb-symbol-handle ${name}`} style={{ left: `${point[0] * 100}%`, top: `${point[1] * 100}%` }} role="button" aria-label={`Scale ${name}`} onPointerDown={press(name)} />)}
+                {!symbolBox.editable && <b className="cb-symbol-box-note" style={{ left: `${c0[0] * 100}%`, top: `${c0[1] * 100}%` }}>View only</b>}
+                {symbolBox.editable && ([["nw", c0], ["ne", c1], ["se", c2], ["sw", c3]] as Array<[string, [number, number]]>).map(([name, point]) => {
+                  // Animate: press just outside a corner to turn the part; the rotate arrow shows on hover.
+                  const ox = (point[0] - centre[0]) * handleFrame.width, oy = (point[1] - centre[1]) * handleFrame.height, ol = Math.hypot(ox, oy) || 1;
+                  return <i key={`turn-${name}`} className="cb-symbol-turn" role="button" aria-label="Rotate" title="Rotate (Shift: 15° steps)"
+                    style={{ left: `calc(${point[0] * 100}% + ${(ox / ol) * 22}px)`, top: `calc(${point[1] * 100}% + ${(oy / ol) * 22}px)` }}
+                    onPointerDown={press("rotate")} />;
+                })}
+                {symbolBox.pivot && <i className={`cb-symbol-pivot${symbolBox.editable ? " movable" : ""}`} style={{ left: `${symbolBox.pivot[0] * 100}%`, top: `${symbolBox.pivot[1] * 100}%` }} aria-hidden="true" title={symbolBox.editable ? "Registration point: drag to move where this part turns and scales from; double-click to put it back in the middle" : undefined} onPointerDown={symbolBox.editable ? press("pivot") : undefined} onDoubleClick={symbolBox.editable ? onSymbolPivotReset : undefined} />}
+              </div>
+            );
+          })()}
+        </div>
+      )}
       </div>
+      {partMenu && symbolView && (
+        <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: partMenu.x, top: partMenu.y, maxHeight: "calc(100vh - 16px)", overflowY: "auto" }} onPointerDown={(event) => event.stopPropagation()}
+          ref={(element) => {
+            // A long menu opened low on the screen slides up so that all of it can be reached.
+            if (!element) return;
+            const box = element.getBoundingClientRect();
+            if (box.bottom > window.innerHeight - 8) element.style.top = `${Math.max(8, window.innerHeight - 8 - box.height)}px`;
+            if (box.right > window.innerWidth - 8) element.style.left = `${Math.max(8, window.innerWidth - 8 - box.width)}px`;
+          }}>
+          {partMenu.hasPart ? <>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("cut"); }}>Cut<kbd>⌘X</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("copy"); }}>Copy<kbd>⌘C</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("paste"); }}>Paste<kbd>⌘V</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pasteFront"); }}>Paste in Front<kbd>⌘F</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pasteBack"); }}>Paste in Back<kbd>⌘B</kbd></button>
+            <span className="cb-frame-menu-sep" aria-hidden="true" />
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("toFront"); }}>Bring to Front<kbd>⇧⌘↑</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("forward"); }}>Bring Forward<kbd>⌘↑</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("backward"); }}>Send Backward<kbd>⌘↓</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("toBack"); }}>Send to Back<kbd>⇧⌘↓</kbd></button>
+            <span className="cb-frame-menu-sep" aria-hidden="true" />
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("duplicate"); }}>Duplicate Layer<kbd>⌘D</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("flipH"); }}>Flip Horizontal<kbd>H</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("flipV"); }}>Flip Vertical<kbd>⇧H</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pivot"); }}>Reset Registration Point</button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("group"); }}>Group in Folder<kbd>⌘G</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("ungroup"); }}>Ungroup<kbd>⇧⌘G</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("hide"); }}>Hide Layer</button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("lock"); }}>Lock Layer</button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("delete"); }}>Delete Layer<kbd>⌫</kbd></button>
+          </> : <>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("paste"); }}>Paste<kbd>⌘V</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pasteFront"); }}>Paste in Front<kbd>⌘F</kbd></button>
+            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pasteBack"); }}>Paste in Back<kbd>⌘B</kbd></button>
+          </>}
+          <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolDoubleClick?.(null); }}>Back to Scene<kbd>Esc</kbd></button>
+        </div>
+      )}
       {symbolMenu && (
         <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: symbolMenu.x, top: symbolMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
-          {onEnterSymbol && <button type="button" role="menuitem" onClick={() => { const id = symbolMenu.objectId; setSymbolMenu(null); onEnterSymbol(id); }}>Edit Symbol<kbd>⌥ double-click</kbd></button>}
+          {onEnterSymbol && <button type="button" role="menuitem" onClick={() => { const id = symbolMenu.objectId; setSymbolMenu(null); onEnterSymbol(id); }}>Edit Symbol<kbd>{canEnterSymbol?.(symbolMenu.objectId) ? "double-click" : ""}</kbd></button>}
+          {onEnterSymbol && canEnterSymbol?.(symbolMenu.objectId) && (() => {
+            const object = objects.find((item) => item.id === symbolMenu.objectId);
+            return object ? <button type="button" role="menuitem" onClick={() => { const at = symbolMenu; setSymbolMenu(null); onSelect(object.id); requestCharacterPartAtPoint(object, at.x, at.y, true); }}>Select Parts<kbd>⌥ double-click</kbd></button> : null;
+          })()}
           {onDistributeParts && <>
             <span className="cb-frame-menu-sep" aria-hidden="true" />
             <button type="button" role="menuitem" onClick={() => { setSymbolMenu(null); onDistributeParts("animated"); }}
