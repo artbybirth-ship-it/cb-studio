@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>CB Studio Render Harness</title>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&family=Mukta:wght@400;600;800&family=Noto+Sans+Devanagari:wght@400;600;800&family=Hind:wght@400;600;700&family=Baloo+2:wght@400;600;800&family=Montserrat:wght@400;600;800&family=Roboto:wght@400;700;900&family=Open+Sans:wght@400;600;800&family=Lato:wght@400;700;900&family=Playfair+Display:wght@400;700;900&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&family=Mukta:wght@200;300;400;500;600;700;800&family=Noto+Sans+Devanagari:wght@100;200;300;400;500;600;700;800;900&family=Hind:wght@300;400;500;600;700&family=Baloo+2:wght@400;500;600;700;800&family=Montserrat:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&family=Roboto:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&family=Open+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,300;1,400;1,500;1,600;1,700;1,800&family=Lato:ital,wght@0,100;0,300;0,400;0,700;0,900;1,100;1,300;1,400;1,700;1,900&family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,500;1,600;1,700;1,800;1,900&display=swap" />
   <style>
     html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#fff}
     *{box-sizing:border-box}
@@ -12,8 +12,9 @@
     .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none;image-rendering:auto;filter:none}
     .char-layer{position:absolute;transform-origin:50% 50%;pointer-events:none}
     .char-layer iframe{display:block;width:100%;height:100%;border:0;background:transparent;pointer-events:none}
-    .text-layer{position:absolute;transform-origin:center;color:#fff;font:800 52px/1.1 Arial,sans-serif;text-shadow:0 2px 8px #000;white-space:pre-wrap}
+    .text-layer{position:absolute;transform-origin:center;color:#fff;font:800 52px/1.2 Arial,sans-serif;text-shadow:0 2px 8px #000;white-space:pre}
     .prop-layer{position:absolute;width:130px;height:130px;border-radius:22px;border:4px solid #49c9c7;background:#17343a;color:#dffafa;display:grid;place-items:center;text-align:center;transform-origin:center}
+    .image-layer{position:absolute;transform-origin:50% 50%;pointer-events:none}.image-layer img{display:block;width:100%;height:100%;object-fit:contain}
     .prop-layer span{font-size:48px}.prop-layer small{position:absolute;top:136px;font-size:18px;white-space:nowrap;color:#dffafa}
     #fatal{position:absolute;inset:0;display:none;place-items:center;padding:30px;background:#fff;color:#b91c1c;font:700 18px/1.4 Arial,sans-serif;text-align:center;z-index:999999}
   </style>
@@ -21,6 +22,7 @@
 <body>
   <div id="stage"></div>
   <div id="fatal"></div>
+<script src="/vendor/cb-native.js"></script>
 <script>
 (function(){
   'use strict';
@@ -39,6 +41,8 @@
   var timedLayers = [];
   var readySources = new Set();
   var pendingImages = 0;
+  var nativeEntries = []; // characters drawn natively with no player behind them (their placement was saved with the edits)
+  var nativePending = 0; // characters edited in the native editor that are still loading their Animate file
   var pendingSeek = null;
   var seekCounter = 0;
   var stageZoomed = false;
@@ -92,13 +96,32 @@
   var FONT_CSS = {"Arial":"Arial, Helvetica, sans-serif","Poppins":"'Poppins', sans-serif","Mukta":"'Mukta', sans-serif","Noto Sans Devanagari":"'Noto Sans Devanagari', sans-serif","Hind":"'Hind', sans-serif","Baloo 2":"'Baloo 2', cursive","Montserrat":"'Montserrat', sans-serif","Roboto":"'Roboto', sans-serif","Open Sans":"'Open Sans', sans-serif","Lato":"'Lato', sans-serif","Playfair Display":"'Playfair Display', serif","Georgia":"Georgia, serif","Times New Roman":"'Times New Roman', Times, serif","Verdana":"Verdana, Geneva, sans-serif","Trebuchet MS":"'Trebuchet MS', sans-serif","Courier New":"'Courier New', Courier, monospace","Impact":"Impact, 'Arial Black', sans-serif"};
   function fontCss(name){ var key = name || 'Arial'; return FONT_CSS[key] || ("'" + key + "', Arial, sans-serif"); }
 
+  // Same look as the editor (lib/textStyle.ts textCss): older text layers stay weight 800, centred,
+  // with the drop shadow. A font uploaded from someone's computer is loaded before capture.
   function addText(object, z){
     var el = document.createElement('div');
     el.className = 'text-layer';
-    el.textContent = object.text || object.name || '';
+    el.textContent = object.text != null ? object.text : (object.name || '');
     el.style.color = object.fillColor || '#fff';
     el.style.fontFamily = fontCss(object.fontFamily);
     el.style.fontSize = Number(object.fontSize || 52) + 'px';
+    el.style.fontWeight = String(object.fontWeight == null ? 800 : object.fontWeight);
+    el.style.fontStyle = object.fontStyle || 'normal';
+    el.style.lineHeight = object.lineHeight ? Number(object.lineHeight) + 'px' : '1.2';
+    el.style.letterSpacing = (Number(object.letterSpacing || 0) / 1000) + 'em';
+    el.style.textAlign = object.textAlign || 'center';
+    el.style.textShadow = object.textShadowColor ? '0 2px 8px ' + object.textShadowColor : (object.textShadow === false ? 'none' : '0 2px 8px #000');
+    if (object.textStrokeColor) {
+      el.style.webkitTextStroke = (2 * Math.max(0, Number(object.textStrokeWidth == null ? 2 : object.textStrokeWidth))) + 'px ' + object.textStrokeColor;
+      el.style.paintOrder = 'stroke fill';
+    }
+    if (object.fontUrl && object.fontFamily && window.FontFace) {
+      pendingImages += 1;
+      var face = new FontFace(object.fontFamily, 'url(' + JSON.stringify(resolveUrl(object.fontUrl)) + ')', { weight: String(object.fontWeight == null ? 400 : object.fontWeight), style: object.fontStyle || 'normal' });
+      document.fonts.add(face);
+      face.load().catch(function(){ console.error('Font failed to load: ' + object.fontUrl); })
+        .then(function(){ pendingImages = Math.max(0, pendingImages - 1); markReadyWhenPossible(); });
+    }
     el.style.left = Number(object.x || 0) + 'px';
     el.style.top = Number(object.y || 0) + 'px';
     el.style.opacity = String(object.opacity == null ? 1 : object.opacity);
@@ -108,25 +131,92 @@
     timedLayers.push({el:el,object:object});
   }
 
-  // Layers draw only inside their time span (StageCanvas): from startTime for actionDurationMs.
+  // Layers draw only inside their time span, on the timeline's 30 fps frame grid: from the start
+  // frame to the frame before start + length (lib/layerRows.ts inLayerSpan, the same rule).
   function inTimeSpan(object, seconds){
     var start = Math.max(0, Number(object.startTime || 0));
-    var length = object.actionDurationMs ? Math.max(0.1, Number(object.actionDurationMs) / 1000) : null;
-    return seconds + 0.0001 >= start && (length == null || seconds <= start + length + 0.0001);
+    var frame = Math.floor(seconds * 30 + 1e-4), startFrame = Math.round(start * 30);
+    if (frame < startFrame) return false;
+    if (!object.actionDurationMs) return true;
+    return frame < Math.max(startFrame + 1, Math.round((start + object.actionDurationMs / 1000) * 30));
   }
   function updateVisibility(seconds){
-    timedLayers.forEach(function(entry){ entry.el.style.visibility = inTimeSpan(entry.object, seconds) ? 'visible' : 'hidden'; });
+    timedLayers.forEach(function(entry){
+      entry.el.style.visibility = inTimeSpan(entry.object, seconds) ? 'visible' : 'hidden';
+      // Text and pictures in a ⌘G group with motion move with it every frame (characters: placeCharacter).
+      if(entry.object.type !== 'character' && entry.object.group && entry.object.groupMotion) placeFlat(entry, seconds);
+    });
+  }
+  function placeFlat(entry, seconds){
+    var object = entry.object;
+    var t = groupPlace(object, {x:Number(object.x||0),y:Number(object.y||0),scale:Number(object.scale||1),rotation:Number(object.rotation||0)}, seconds);
+    entry.el.style.left = t.x + 'px';
+    entry.el.style.top = t.y + 'px';
+    entry.el.style.transform = layerTransform(object, t.rotation, t.scale);
+  }
+
+  // ---- ⌘G group motion: the group's move, turn and size about its registration point, on top of
+  // each member's own transform. Keep in sync with lib/groupMotion.ts.
+  function groupPose(motion, seconds){
+    var frames = byTime(motion && motion.keyframes), rest = {x:0,y:0,rotation:0,scale:1};
+    var pose = function(f){ return {x:Number(f.x||0),y:Number(f.y||0),rotation:Number(f.rotation||0),scale:Math.max(0.02,Number(f.scale==null?1:f.scale))}; };
+    if(!frames.length) return rest;
+    var t = Math.max(0, Number(seconds||0)), first = frames[0], last = frames[frames.length-1];
+    if(t <= Number(first.time||0) + KEY_EPSILON) return pose(first);
+    if(t >= Number(last.time||0) - KEY_EPSILON) return pose(last);
+    for(var i=0;i<frames.length-1;i++){
+      var l = frames[i], r = frames[i+1], lt = Number(l.time||0), rt = Number(r.time||0);
+      if(t < lt - KEY_EPSILON || t > rt + KEY_EPSILON) continue;
+      if(l.tween === false) return pose(l);
+      var linear = Math.max(0, Math.min(1, (t - lt) / Math.max(KEY_EPSILON, rt - lt)));
+      var k = l.tween ? easeProgress(linear, l.tween.easeIn, l.tween.easeOut) : linear;
+      var a = pose(l), b = pose(r);
+      return {x:a.x+(b.x-a.x)*k, y:a.y+(b.y-a.y)*k, rotation:a.rotation+(b.rotation-a.rotation)*k, scale:a.scale+(b.scale-a.scale)*k};
+    }
+    return rest;
+  }
+  function groupPlace(object, own, seconds){
+    if(!object.group || !object.groupMotion) return own;
+    var motion = object.groupMotion, p = groupPose(motion, seconds);
+    if(!p.x && !p.y && !p.rotation && p.scale === 1) return own;
+    var px = Number(motion.pivotX||0), py = Number(motion.pivotY||0), r = p.rotation * Math.PI / 180;
+    var vx = own.x - px, vy = own.y - py;
+    return {x:px + p.x + p.scale * (vx * Math.cos(r) - vy * Math.sin(r)), y:py + p.y + p.scale * (vx * Math.sin(r) + vy * Math.cos(r)), rotation:own.rotation + p.rotation, scale:own.scale * p.scale};
   }
 
   // Same transform as the editor canvas (StageCanvas layerTransformCss): rotation, skew, scale with
   // stretch, and the mirror flip (Reflect).
-  function layerTransform(object){
+  function layerTransform(object, rotation, size){
     var clamp = function(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); };
-    var scale = Number(object.scale || 1);
+    var scale = size == null ? Number(object.scale || 1) : size;
+    var turn = rotation == null ? Number(object.rotation || 0) : rotation;
     var sx = clamp(Number(object.stretchX == null ? 1 : object.stretchX) || 1, 0.02, 50);
     var sy = clamp(Number(object.stretchY == null ? 1 : object.stretchY) || 1, 0.02, 50);
     var kx = clamp(Number(object.skewX || 0), -80, 80), ky = clamp(Number(object.skewY || 0), -80, 80);
-    return 'translate(-50%,-50%) rotate(' + Number(object.rotation || 0) + 'deg) skew(' + kx + 'deg,' + ky + 'deg) scale(' + (scale * sx) + ',' + (scale * sy) + ')' + (object.flipX ? ' scaleX(-1)' : '');
+    return 'translate(-50%,-50%) rotate(' + turn + 'deg) skew(' + kx + 'deg,' + ky + 'deg) scale(' + (scale * sx) + ',' + (scale * sy) + ')' + (object.flipX ? ' scaleX(-1)' : '');
+  }
+
+  // Picture layers (Import to Stage, library FX): the real image at its own pixel size, with the
+  // layer transform, exactly as the editor draws them (StageCanvas cb-stage-prop-image).
+  function addImageLayer(object, z){
+    var el = document.createElement('div');
+    el.className = 'image-layer';
+    el.style.left = Number(object.x || 0) + 'px';
+    el.style.top = Number(object.y || 0) + 'px';
+    el.style.width = Number(object.sourceWidth || 300) + 'px';
+    el.style.height = Number(object.sourceHeight || 300) + 'px';
+    el.style.opacity = String(object.opacity == null ? 1 : object.opacity);
+    el.style.zIndex = String(z);
+    el.style.transform = layerTransform(object);
+    var img = document.createElement('img');
+    pendingImages += 1;
+    img.onload = function(){ pendingImages = Math.max(0, pendingImages - 1); markReadyWhenPossible(); };
+    // A missing picture must not stop the whole export: it is left out and reported.
+    img.onerror = function(){ pendingImages = Math.max(0, pendingImages - 1); console.error('Picture layer failed to load: ' + object.assetUrl); markReadyWhenPossible(); };
+    img.src = resolveUrl(object.assetUrl);
+    el.appendChild(img);
+    stage.appendChild(el);
+    timedLayers.push({el:el,object:object});
   }
 
   function addProp(object, z){
@@ -225,13 +315,13 @@
   function resolveSourceSeekMs(object, seconds){
     var localTime = Math.max(0, seconds - Math.max(0, Number(object.startTime || 0)));
     var clips = byTime((object.sourceAnimationClips || []).map(function(c){ return Object.assign({}, c, {time:c.start}); }));
-    if(!clips.length) return localTime * 1000;
+    if(!clips.length) return localTime * 1000 + Math.max(0, Number(object.sourceOffsetMs || 0));
     var active = clips.find(function(c){ return localTime >= c.start && localTime < c.start + c.duration; });
     return active ? Math.max(0, (localTime - active.start) * 1000) : 0;
   }
 
   function placeCharacter(entry, seconds){
-    var object = entry.object, transform = resolveCharacterTransform(object, seconds);
+    var object = entry.object, transform = groupPlace(object, resolveCharacterTransform(object, seconds), seconds);
     var clamp = function(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); };
     var sx = clamp(Number(object.stretchX == null ? 1 : object.stretchX) || 1, 0.02, 50);
     var sy = clamp(Number(object.stretchY == null ? 1 : object.stretchY) || 1, 0.02, 50);
@@ -248,6 +338,19 @@
     return transform;
   }
 
+  // Draws a natively drawn character at the layer's own source time, at the captured resolution.
+  function drawNative(entry, seconds){
+    var native = entry.native;
+    if(!native || !native.ready) return;
+    var boxWidth = parseFloat(entry.layer.style.width) || 720;
+    var resolution = Math.min(4, Math.max(1, boxWidth * captureScale * Math.max(1, Number(window.devicePixelRatio || 1)) / 720));
+    // Placed exactly where the player placed the pose (its exportRoot), so edits never move the character.
+    var root = null;
+    try{ root = entry.frame && entry.frame.contentWindow && entry.frame.contentWindow.exportRoot; }catch(e){}
+    var fit = native.fit || (root && isFinite(root.scaleX) && root.scaleX > 0 ? {s:root.scaleX, tx:root.x, ty:root.y} : null);
+    native.handle.draw(native.canvas, resolveSourceSeekMs(entry.object, seconds == null ? currentTimeSeconds : seconds), resolution, fit);
+  }
+
   function sendEdits(entry, seconds){
     if(!entry.frame.contentWindow) return;
     var object = entry.object, time = seconds == null ? currentTimeSeconds : seconds;
@@ -258,8 +361,14 @@
       partOverrides:resolvePartOverrides(object, time),
       colorOverrides:object.colorOverrides || {},
       colorReplacements:object.colorReplacements || [],
+      symbolEases:object.symbolEases || {},
+      symbolKeys:object.symbolKeys || {},
+      symbolValues:object.symbolValues || {},
+      symbolLayers:Object.keys(object.symbolLayers || {}).reduce(function(all,name){ all[name] = (object.symbolLayers[name] && object.symbolLayers[name].spec) || {}; return all; }, {}),
+      strokeScale:object.strokeScale == null ? 1 : object.strokeScale,
       selectedPart:'',
       focusPart:'',
+      onlyParts:object.onlyParts || [],
       viewport:{width:requestedWidth || innerWidth,height:requestedHeight || innerHeight},
       characterTransform:{
         x:transform.x,
@@ -280,6 +389,26 @@
     layer.className = 'char-layer';
     layer.style.zIndex = String(z);
     layer.style.opacity = String(object.opacity == null ? 1 : object.opacity);
+    var savedFit = object.nativePoseFit && isFinite(object.nativePoseFit.s) && object.nativePoseFit.s > 0 ? object.nativePoseFit : null;
+    if(window.CBNative && savedFit && object.nativePose && Object.keys(object.nativePose).length){
+      // No player at all: it would only compete for the page's one thread. If the native drawing cannot load, the render fails with that reason.
+      var only = document.createElement('canvas');
+      only.width = 720; only.height = 960;
+      only.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;filter:hue-rotate(' + Number(object.characterHue == null ? 0 : object.characterHue) + 'deg) saturate(' + Number(object.characterSaturation == null ? 100 : object.characterSaturation) + '%) brightness(' + Number(object.characterBrightness == null ? 100 : object.characterBrightness) + '%)';
+      layer.appendChild(only);
+      var solo = {frame:null,layer:layer,object:object,native:{canvas:only,handle:window.CBNative.createNativeCharacter(object),ready:false,fit:savedFit}};
+      nativePending++;
+      solo.native.handle.load().then(function(ok){
+        if(!ok) throw new Error('the character ' + (object.name || '') + ' could not load its Animate file');
+        solo.native.ready = true;
+        drawNative(solo, currentTimeSeconds);
+      }).catch(function(error){ fail('Native character: ' + (error && error.message ? error.message : error)); }).then(function(){ nativePending--; markReadyWhenPossible(); });
+      stage.appendChild(layer);
+      placeCharacter(solo, 0);
+      nativeEntries.push(solo);
+      timedLayers.push({el:layer,object:object});
+      return;
+    }
     var frame = document.createElement('iframe');
     var assetUrl = object.assetUrl || '/characters/talking/men/player.html';
     var src = new URL(resolveUrl(assetUrl));
@@ -296,8 +425,24 @@
     var bright = Number(object.characterBrightness == null ? 100 : object.characterBrightness);
     frame.style.filter = 'hue-rotate(' + hue + 'deg) saturate(' + sat + '%) brightness(' + bright + '%)';
     layer.appendChild(frame);
+    var entry = {frame:frame,layer:layer,object:object,native:null};
+    // A character with edits from the native editor (lib/native, built into /vendor/cb-native.js) is drawn
+    // natively over its player: its edited timelines, pasted symbols and all. The player stays underneath
+    // (it still takes its seeks) and is hidden once the native drawing is ready; if that cannot load, the player's drawing stays.
+    if(object.nativePose && Object.keys(object.nativePose).length && window.CBNative){
+      var canvas = document.createElement('canvas');
+      canvas.width = 720; canvas.height = 960;
+      canvas.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;visibility:hidden;filter:' + frame.style.filter;
+      layer.appendChild(canvas);
+      var handle = window.CBNative.createNativeCharacter(object);
+      entry.native = {canvas:canvas,handle:handle,ready:false};
+      nativePending++;
+      handle.load().then(function(ok){
+        entry.native.ready = !!ok;
+        if(ok){ frame.style.visibility = 'hidden'; canvas.style.visibility = 'visible'; drawNative(entry, currentTimeSeconds); }
+      }, function(error){ console.error('[native character] ' + (error && error.message ? error.message : error)); }).then(function(){ nativePending--; markReadyWhenPossible(); });
+    }
     stage.appendChild(layer);
-    var entry = {frame:frame,layer:layer,object:object};
     placeCharacter(entry, 0);
     characterFrames.push(entry);
     timedLayers.push({el:layer,object:object});
@@ -306,10 +451,12 @@
   function markReadyWhenPossible(){
     if(window.__CBS_RENDER_ERROR__) return;
     if(pendingImages > 0) return;
+    if(nativePending > 0) return;
     if(readySources.size < characterFrames.length) return;
     // Text fonts must be loaded before capture (Google fonts arrive asynchronously).
     if(document.fonts && document.fonts.status !== 'loaded' && !markReadyWhenPossible.fontsWaited){ markReadyWhenPossible.fontsWaited = true; document.fonts.ready.then(markReadyWhenPossible, markReadyWhenPossible); return; }
-    characterFrames.forEach(function(entry){sendEdits(entry,currentTimeSeconds);});
+    characterFrames.forEach(function(entry){sendEdits(entry,currentTimeSeconds); drawNative(entry,currentTimeSeconds);});
+    nativeEntries.forEach(function(entry){ placeCharacter(entry,currentTimeSeconds); drawNative(entry,currentTimeSeconds); });
     requestAnimationFrame(function(){requestAnimationFrame(function(){window.__CBS_RENDER_READY__ = true;});});
   }
 
@@ -345,6 +492,8 @@
       var token = 'seek-' + (++seekCounter);
       if(pendingSeek){ clearTimeout(pendingSeek.timer); pendingSeek.resolve(); pendingSeek = null; }
       updateVisibility(safeSeconds);
+      // The layer's own movement over time (position, scale, rotation keyframes), then its native drawing.
+      nativeEntries.forEach(function(entry){ placeCharacter(entry, safeSeconds); drawNative(entry, safeSeconds); });
       if(characterFrames.length === 0){ requestAnimationFrame(function(){requestAnimationFrame(resolve);}); return; }
       var timer = setTimeout(function(){
         if(pendingSeek && pendingSeek.token === token){
@@ -360,6 +509,7 @@
           // Each layer plays its own source time (start time, clips) and loop mode, as in the editor.
           entry.frame.contentWindow.postMessage({source:'characterbazaarstudio-editor',type:'SEEK',seekMs:resolveSourceSeekMs(entry.object, safeSeconds),loop:entry.object.loopMode === 'loop',token:token}, '*');
         }
+        drawNative(entry, safeSeconds);
       });
     });
   };
@@ -391,15 +541,17 @@
         if(object.type === 'background' || object.type === 'audio') return;
         if(object.type === 'character' && object.assetKind === 'animate-createjs' && object.assetUrl) addCharacter(object,z);
         else if(object.type === 'text') addText(object,z);
+        else if(object.type === 'prop' && object.assetKind === 'image' && object.assetUrl) addImageLayer(object,z);
         else addProp(object,z);
       });
       updateVisibility(0);
       if(characterFrames.length === 0){
         markReadyWhenPossible();
+        if(nativeEntries.length) setTimeout(function(){ if(!window.__CBS_RENDER_READY__ && !window.__CBS_RENDER_ERROR__) fail('The native characters did not finish loading'); }, 50000);
       } else {
         setTimeout(function(){
           if(!window.__CBS_RENDER_READY__ && !window.__CBS_RENDER_ERROR__) fail('Only ' + readySources.size + '/' + characterFrames.length + ' character runtimes became ready');
-        }, 20000);
+        }, (nativeEntries.length || characterFrames.some(function(entry){ return entry.native; })) ? 50000 : 20000);
       }
     }catch(error){ fail(error && error.message ? error.message : String(error)); }
   }

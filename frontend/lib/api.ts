@@ -69,7 +69,9 @@ export const api = {
   },
   updateScene: (sceneId: string, body: Partial<{ name: string; duration_seconds: number; editor_data: EditorData }>) =>
     request<Scene>(`${API}/scenes/${sceneId}`, { method: "PATCH", body: JSON.stringify(body) }),
-  startRender: (projectId: string) => request<RenderJob>(`${API}/projects/${projectId}/render`, { method: "POST" }),
+  /** format: mp4 / gif / jpeg / png; a JPEG / PNG is the frame at `time` (seconds) of `scene`. */
+  startRender: (projectId: string, options: { format?: string; resolution?: string; time?: number; scene?: string } = {}) =>
+    request<RenderJob>(`${API}/projects/${projectId}/render`, { method: "POST", body: JSON.stringify(options) }),
   getRender: (jobId: string) => request<RenderJob>(`${API}/renders/${jobId}`),
   uploadAsset: (projectId: string, kind: "background" | "audio", file: File) => {
     const form = new FormData();
@@ -78,6 +80,16 @@ export const api = {
     form.append("file", file);
     return request<Asset>(`${API}/assets/upload`, { method: "POST", body: form });
   },
+  /** A font from this computer (Text panel), with its family and style for the team's font list. */
+  uploadFont: (projectId: string, file: File, meta: Record<string, string>) => {
+    const form = new FormData();
+    form.append("project", projectId);
+    form.append("kind", "font");
+    form.append("file", file);
+    for (const [key, value] of Object.entries(meta)) form.append(key, value);
+    return request<Asset>(`${API}/assets/upload`, { method: "POST", body: form });
+  },
+  listFonts: () => request<import("@/lib/localFonts").TeamFont[]>(`${API}/assets/fonts`),
   listCharacterLibraries: () => request<CharacterLibraryResponse>(`${API}/assets/character-library`),
   uploadCharacterLibrary: (file: File) => {
     const form = new FormData();

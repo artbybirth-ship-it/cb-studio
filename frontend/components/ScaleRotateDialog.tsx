@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { scrubProps } from "@/lib/scrub";
+import { useEscClose } from "@/lib/escClose";
+import PanelClose from "./PanelClose";
 
 type Props = {
   /** Called with the relative scale (percent) and rotation (degrees) to apply. */
@@ -36,6 +39,7 @@ const saveLastValues = (scale: string, rotate: string) => {
  * Values are relative: Scale 100 / Rotate 0 leave the selection unchanged.
  */
 export default function ScaleRotateDialog({ onApply, onClose, target }: Props) {
+  useEscClose(true, onClose);
   const [initial] = useState(readLastValues);
   const [scale, setScale] = useState(initial.scale);
   const [rotate, setRotate] = useState(initial.rotate);
@@ -75,18 +79,21 @@ export default function ScaleRotateDialog({ onApply, onClose, target }: Props) {
       >
         {/* Dragged by the app-wide DialogDragManager. */}
         <div className="cb-scale-rotate-header" data-drag-handle>
+          <PanelClose onClose={onClose} label="Cancel" />
           <h2 id="cb-scale-rotate-title">Scale and Rotate{target ? ` · ${target}` : ""}</h2>
         </div>
         <form className="cb-scale-rotate-body" onSubmit={(event) => { event.preventDefault(); submit(); }}>
           <label className="cb-scale-rotate-row">
             <span>Scale</span>
             <input ref={scaleInput} value={scale} onChange={(event) => setScale(event.target.value)} inputMode="decimal"
+              {...scrubProps({ value: scaleValid ? scaleValue : null, onChange: (next) => setScale(String(next)), min: 1, decimals: 1 })}
               aria-invalid={!scaleValid} aria-label="Scale percent" />
             <em aria-hidden="true" />
           </label>
           <label className="cb-scale-rotate-row">
             <span>Rotate</span>
             <input value={rotate} onChange={(event) => setRotate(event.target.value)} inputMode="decimal"
+              {...scrubProps({ value: rotateValid ? rotateValue : null, onChange: (next) => setRotate(String(next)), decimals: 1 })}
               aria-invalid={!rotateValid} aria-label="Rotate degrees" />
             <em>degrees</em>
           </label>

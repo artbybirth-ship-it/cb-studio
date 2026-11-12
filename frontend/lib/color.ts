@@ -57,3 +57,28 @@ export function shiftLightness(hex: string, delta: number): string {
   if (!hsl) return hex;
   return hslToHex(hsl.h, hsl.s, Math.max(0.02, Math.min(0.98, hsl.l + delta)));
 }
+
+/** `hex` made lighter or darker in the same ratio as `from` became `to`: its lightness is scaled by
+ *  to ÷ from, so an outline or a shadow stays as much darker than the colour as it was; hue and
+ *  saturation stay. Light/Dark uses it for the outlines and shadows that go with a colour. */
+export function shiftLike(hex: string, from: string, to: string): string {
+  const a = hexToHsl(from), b = hexToHsl(to), c = hexToHsl(hex);
+  if (!a || !b || !c) return hex;
+  const l = a.l > 0.01 ? c.l * (b.l / a.l) : c.l + (b.l - a.l);
+  return hslToHex(c.h, c.s, Math.max(0, Math.min(0.98, l)));
+}
+
+/** Where `hex` goes when `from` becomes `to` and it follows along (Fill/Stroke's Include Stroke /
+ *  Include Shadow on a character): it keeps its hue and saturation difference from `from` (greys and
+ *  black keep theirs) and its lightness moves in the same ratio (shiftLike). Back at `from`, it is
+ *  `hex` again. */
+export function followColour(hex: string, from: string, to: string): string {
+  const a = hexToHsl(from), b = hexToHsl(to), c = hexToHsl(hex);
+  if (!a || !b || !c) return hex;
+  if (from.toLowerCase() === to.toLowerCase()) return hex;
+  const grey = c.s < 0.08;
+  const h = grey ? c.h : a.s < 0.08 ? b.h : c.h + (b.h - a.h);
+  const s = grey ? c.s : Math.max(0, Math.min(1, c.s + (b.s - a.s)));
+  const l = hexToHsl(shiftLike(hex, from, to))!.l;
+  return hslToHex(h, s, l);
+}

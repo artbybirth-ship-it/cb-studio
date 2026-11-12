@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from .models import Asset, Project, RenderJob, Scene
 from .serializers import AssetSerializer, ProjectSerializer, RenderJobSerializer, SceneSerializer
 from .tasks import render_project
-from .character_library import CHARACTER_BRIDGE_VERSION, duplicate_character_package, install_character_library_zip, package_fingerprint, upgrade_package_bridges, with_character_category
+from .character_library import CHARACTER_BRIDGE_VERSION, FLA_TIMELINE_VERSION, POSE_LENGTH_VERSION, attach_fla_timelines, duplicate_character_package, install_character_library_zip, package_fingerprint, refresh_pose_lengths, upgrade_package_bridges, with_character_category
 from .media_library import LIBRARY_ASSET_KIND, LIBRARY_TYPES, delete_media_library_files, install_media_library_zip
 from .admin_auth import is_admin_authenticated
 
@@ -64,7 +64,14 @@ class ProjectViewSet(viewsets.ModelViewSet):
         job = RenderJob.objects.create(project=project)
         project.status = "rendering"
         project.save(update_fields=["status", "updated_at"])
-        render_project.delay(str(job.id))
+        # Export format (mp4 / gif / jpeg / png); a still is the frame at "time" of "scene".
+        export_format = str(request.data.get("format") or "mp4").lower()
+        try:
+            still_time = float(request.data.get("time") or 0)
+        except (TypeError, ValueError):
+            still_time = 0.0
+        resolution = str(request.data.get("resolution") or "fullhd").lower()  # MP4: hd / fullhd / 4k
+        render_project.delay(str(job.id), export_format, still_time, request.data.get("scene") or None, resolution)
         return Response(RenderJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 
 
@@ -107,6 +114,10 @@ def _clean_color_rules(value) -> list[dict]:
     return rules
 
 
+FONT_EXTENSIONS = {".ttf", ".otf", ".woff", ".woff2"}
+FONT_FIELDS = ("family", "style", "weight", "italic", "postscriptName", "fullName")
+
+
 class AssetViewSet(viewsets.ModelViewSet):
     queryset = Asset.objects.select_related("project").all()
     serializer_class = AssetSerializer
@@ -124,16 +135,25 @@ class AssetViewSet(viewsets.ModelViewSet):
                 # fingerprint custom uploads so uploading the same export again is recognised.
                 needs_bridge = int(metadata.get("bridgeVersion") or 0) < CHARACTER_BRIDGE_VERSION
                 needs_fingerprint = metadata.get("scope") == "custom" and not metadata.get("fingerprint")
-                if needs_bridge or needs_fingerprint:
+                needs_pose_lengths = int(metadata.get("poseLengthVersion") or 0) < POSE_LENGTH_VERSION
+                needs_fla_timeline = int(metadata.get("flaTimelineVersion") or 0) < FLA_TIMELINE_VERSION
+                if needs_bridge or needs_fingerprint or needs_pose_lengths or needs_fla_timeline:
                     try:
                         disk_root = Path(settings.MEDIA_ROOT) / "character_libraries" / uuid.UUID(str(metadata.get("packageId") or "")).hex
                         if needs_bridge:
                             upgrade_package_bridges(disk_root)
                         if needs_fingerprint and disk_root.is_dir():
                             metadata["fingerprint"] = package_fingerprint(disk_root)
+                        if needs_pose_lengths and disk_root.is_dir():
+                            refresh_pose_lengths(disk_root, metadata.get("characters") or [])
+                        # Characters shipped with their .fla can be stepped into (layers and keyframes).
+                        if needs_fla_timeline and disk_root.is_dir():
+                            attach_fla_timelines(disk_root, Path("character_libraries") / disk_root.name, metadata.get("characters") or [])
                     except (ValueError, TypeError, OSError):
                         pass
                     metadata["bridgeVersion"] = CHARACTER_BRIDGE_VERSION
+                    metadata["poseLengthVersion"] = POSE_LENGTH_VERSION
+                    metadata["flaTimelineVersion"] = FLA_TIMELINE_VERSION
                     asset.metadata = metadata
                     asset.save(update_fields=["metadata"])
                 catalog = metadata.get("characters") or []
@@ -285,6 +305,8 @@ class AssetViewSet(viewsets.ModelViewSet):
         metadata = {
             "characterLibraryPackage": True,
             "bridgeVersion": CHARACTER_BRIDGE_VERSION,
+            "poseLengthVersion": POSE_LENGTH_VERSION,
+            "flaTimelineVersion": FLA_TIMELINE_VERSION,
             "fingerprint": fingerprint,
             "packageId": package_id,
             "originalName": Path(uploaded.name).name,
@@ -389,8 +411,8 @@ class AssetViewSet(viewsets.ModelViewSet):
 
         if not uploaded:
             return Response({"detail": "file is required"}, status=status.HTTP_400_BAD_REQUEST)
-        if kind not in {"background", "audio"}:
-            return Response({"detail": "kind must be background or audio"}, status=status.HTTP_400_BAD_REQUEST)
+        if kind not in {"background", "audio", "font"}:
+            return Response({"detail": "kind must be background, audio or font"}, status=status.HTTP_400_BAD_REQUEST)
 
         project = None
         if project_id:
@@ -404,6 +426,9 @@ class AssetViewSet(viewsets.ModelViewSet):
             return Response({"detail": "background upload must be an image"}, status=status.HTTP_400_BAD_REQUEST)
         if kind == "audio" and not content_type.startswith("audio/"):
             return Response({"detail": "voice upload must be an audio file"}, status=status.HTTP_400_BAD_REQUEST)
+        # A font from the person's computer (Text panel), so exports and other computers draw the same text.
+        if kind == "font" and Path(uploaded.name).suffix.lower() not in FONT_EXTENSIONS:
+            return Response({"detail": "font upload must be a .ttf, .otf, .woff or .woff2 file"}, status=status.HTTP_400_BAD_REQUEST)
 
         max_size = 50 * 1024 * 1024 if kind == "background" else 30 * 1024 * 1024
         if uploaded.size > max_size:
@@ -424,9 +449,25 @@ class AssetViewSet(viewsets.ModelViewSet):
                 "mimeType": content_type,
                 "size": uploaded.size,
                 "originalName": Path(uploaded.name).name,
+                **({key: str(request.data.get(key) or "")[:200] for key in FONT_FIELDS} if kind == "font" else {}),
             },
         )
         return Response(AssetSerializer(asset).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"])
+    def fonts(self, request):
+        """Fonts uploaded from people's computers (newest first, one per PostScript name): the Text
+        panel's "Installed font" list, so the whole team can use them."""
+        seen: set[str] = set()
+        fonts = []
+        for asset in Asset.objects.filter(kind="font").order_by("-created_at"):
+            meta = asset.metadata or {}
+            key = str(meta.get("postscriptName") or asset.url)
+            if key in seen:
+                continue
+            seen.add(key)
+            fonts.append({"url": asset.url, **{field: meta.get(field, "") for field in FONT_FIELDS}})
+        return Response(fonts)
 
 
 class RenderJobViewSet(viewsets.ReadOnlyModelViewSet):

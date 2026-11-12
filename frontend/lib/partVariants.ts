@@ -37,8 +37,10 @@ const posesOf = (character: Html5CharacterLibraryCharacter) => character.actions
   .filter((pose) => pose.symbol);
 
 /** The export script and composition a character's player loads, read from its player HTML. */
-export const exportSourceOf = (character: Html5CharacterLibraryCharacter): Promise<ExportSource | null> => {
-  const playerUrl = character.actions[0]?.assetUrl || "";
+export const exportSourceOf = (character: Html5CharacterLibraryCharacter): Promise<ExportSource | null> =>
+  exportSourceOfPlayer(character.actions[0]?.assetUrl || "");
+/** The same, from one player URL (a character on the stage). */
+export const exportSourceOfPlayer = (playerUrl: string): Promise<ExportSource | null> => {
   if (!playerUrl) return Promise.resolve(null);
   let pending = sourceCache.get(playerUrl);
   if (!pending) {

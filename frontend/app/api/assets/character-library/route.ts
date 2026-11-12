@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { CHARACTER_BRIDGE_VERSION, characterPackageFingerprint, deleteLocalCharacterLibrary, duplicateLocalCharacterLibrary, installLocalCharacterLibrary, upgradeCharacterPackageBridges, withCharacterCategory, withUniqueActionIds } from "@/lib/server/localCharacterLibrary";
-import { listCharacterPackages, localMediaRoot, updateCharacterPackage } from "@/lib/server/localStore";
+import { CHARACTER_BRIDGE_VERSION, POSE_LENGTH_VERSION, attachFlaTimelines, characterPackageFingerprint, deleteLocalCharacterLibrary, duplicateLocalCharacterLibrary, installLocalCharacterLibrary, refreshPoseLengths, upgradeCharacterPackageBridges, withCharacterCategory, withUniqueActionIds } from "@/lib/server/localCharacterLibrary";
+import { listCharacterPackages, localMediaRoot, updateCharacterPackage, type LocalCharacterPackage } from "@/lib/server/localStore";
 import path from "path";
+import { FLA_TIMELINE_VERSION } from "@/lib/server/flaTimeline";
 import { isAdminAuthenticated } from "@/lib/server/adminAuth";
 import { convertFlaUpload, flaSourceFingerprint, needsAnimateConversion } from "@/lib/server/flaImport";
 
@@ -12,14 +13,18 @@ export async function GET() {
   let stored = await listCharacterPackages();
   // One-time maintenance of older installs: move players to the shared bridge, and
   // fingerprint custom uploads so uploading the same export again is recognised.
-  const outdated = stored.filter((pkg) => (pkg.bridgeVersion || 0) < CHARACTER_BRIDGE_VERSION || (pkg.scope === "custom" && !pkg.fingerprint));
+  const outdated = stored.filter((pkg) => (pkg.bridgeVersion || 0) < CHARACTER_BRIDGE_VERSION || (pkg.scope === "custom" && !pkg.fingerprint) || (pkg.poseLengthVersion || 0) < POSE_LENGTH_VERSION || (pkg.flaTimelineVersion || 0) < FLA_TIMELINE_VERSION);
   if (outdated.length) {
     for (const pkg of outdated) {
-      const patch: { bridgeVersion: number; fingerprint?: string } = { bridgeVersion: CHARACTER_BRIDGE_VERSION };
+      const patch: Partial<LocalCharacterPackage> = { bridgeVersion: CHARACTER_BRIDGE_VERSION, poseLengthVersion: POSE_LENGTH_VERSION, flaTimelineVersion: FLA_TIMELINE_VERSION };
       if ((pkg.bridgeVersion || 0) < CHARACTER_BRIDGE_VERSION) await upgradeCharacterPackageBridges(pkg.id);
       if (pkg.scope === "custom" && !pkg.fingerprint) {
         patch.fingerprint = await characterPackageFingerprint(path.join(localMediaRoot(), "character_libraries", pkg.id)).catch(() => undefined);
       }
+      // Each pose of a multi-pose export gets its own length (older installs used the file's longest).
+      if ((pkg.poseLengthVersion || 0) < POSE_LENGTH_VERSION && await refreshPoseLengths(pkg.id, pkg.characters)) patch.characters = pkg.characters;
+      // Characters shipped with their .fla can be stepped into (layers and keyframes).
+      if ((pkg.flaTimelineVersion || 0) < FLA_TIMELINE_VERSION && await attachFlaTimelines(pkg.id, pkg.characters)) patch.characters = pkg.characters;
       await updateCharacterPackage(pkg.id, patch);
     }
     stored = await listCharacterPackages();

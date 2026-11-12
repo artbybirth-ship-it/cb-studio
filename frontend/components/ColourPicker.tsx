@@ -3,12 +3,20 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { hexToRgb, hsbToRgb, rgbToHex, rgbToHsb, type Hsb, type Rgb } from "@/lib/color";
 import { normalizeHex } from "@/lib/findReplace";
+import { scrubProps } from "@/lib/scrub";
+import { useEscClose } from "@/lib/escClose";
+import PanelClose from "./PanelClose";
+import CanvasEyedropper from "./CanvasEyedropper";
+import { EyedropperIcon } from "./toolIcons";
 
 /**
- * Colour Picker, after Adobe Illustrator's: a colour field and a strip, H/S/B and R/G/B boxes whose
- * radio button chooses what the strip controls, a # code, and new | original preview. Nothing is
- * applied until OK (Enter); Cancel (Esc) discards. Modal; dragged by its title like every dialog.
+ * Fill/Stroke (every colour picker in the app; mockup, after Illustrator's Colour Picker): a colour
+ * field and a strip, H/S/B and R/G/B whose radio button chooses what the strip controls, a # code,
+ * the new / original colour box (a click on the original goes back to it), Include Stroke / Include
+ * Shadow (greyed out where nothing has an outline or a shadow) and the canvas eyedropper. Nothing
+ * is applied until OK (Enter); Cancel (Esc) discards. Modal; dragged by its title like every dialog.
  */
+export type ColourEffects = { stroke: boolean; shadow: boolean };
 
 type Mode = "h" | "s" | "v" | "r" | "g" | "bl";
 type Colour = { hsb: Hsb; rgb: Rgb };
@@ -17,10 +25,12 @@ const MODES: { key: Mode; label: string; max: number; unit: string }[] = [
   { key: "h", label: "H", max: 360, unit: "°" },
   { key: "s", label: "S", max: 100, unit: "%" },
   { key: "v", label: "B", max: 100, unit: "%" },
-  { key: "r", label: "R", max: 255, unit: "" },
-  { key: "g", label: "G", max: 255, unit: "" },
-  { key: "bl", label: "B", max: 255, unit: "" },
+  { key: "r", label: "R", max: 255, unit: "%" },
+  { key: "g", label: "G", max: 255, unit: "%" },
+  { key: "bl", label: "B", max: 255, unit: "%" },
 ];
+/** R / G / B are shown in % (0–255 inside). */
+const isRgb = (mode: Mode) => mode === "r" || mode === "g" || mode === "bl";
 const MODE_KEY = "cb-colour-picker-mode";
 const readMode = (): Mode => {
   try { const saved = window.localStorage.getItem(MODE_KEY) as Mode | null; return MODES.some((mode) => mode.key === saved) ? saved! : "h"; } catch { return "h"; }
@@ -83,6 +93,7 @@ function NumberBox({ label, value, max, unit, onValue }: { label: string; value:
   const shown = draft ?? `${Math.round(value)}${unit}`;
   return (
     <input className="cb-cp-number" value={shown} aria-label={label} inputMode="numeric"
+      {...scrubProps({ value: Math.round(value), onChange: onValue, min: 0, max })}
       onFocus={(event) => { setDraft(String(Math.round(value))); requestAnimationFrame(() => event.target.select()); }}
       onBlur={() => setDraft(null)}
       onChange={(event) => {
@@ -101,14 +112,24 @@ function NumberBox({ label, value, max, unit, onValue }: { label: string; value:
 }
 
 type Props = {
-  /** Starting colour (#rrggbb); also the "original" half of the preview. */
+  /** Starting colour (#rrggbb). */
   initial: string;
   title?: string;
-  onOk: (hex: string) => void;
+  /** Include Stroke / Include Shadow, starting as given; OK returns them. Without it they are greyed out. */
+  effects?: ColourEffects;
+  /** Why the two boxes are greyed out (shown on hover). */
+  effectsNote?: string;
+  onOk: (hex: string, effects?: ColourEffects) => void;
   onCancel: () => void;
 };
 
-export default function ColourPicker({ initial, title = "Colour Picker", onOk, onCancel }: Props) {
+export default function ColourPicker({ initial, title = "Fill/Stroke", effects, effectsNote = "Only text and characters have outlines and shadows", onOk, onCancel }: Props) {
+  const [stroke, setStroke] = useState(Boolean(effects?.stroke));
+  const [shadow, setShadow] = useState(Boolean(effects?.shadow));
+  const [picking, setPicking] = useState(false);
+  const create = (hex: string) => onOk(hex, effects ? { stroke, shadow } : undefined);
+  // Its own Enter / Esc keys stay (OK / Cancel); registering keeps panels behind it from closing first.
+  useEscClose(true, onCancel);
   const original = normalizeHex(initial) || "#000000";
   const [colour, setColour] = useState<Colour>(() => fromRgb(hexToRgb(original)!, { h: 0, s: 0, b: 0 }));
   const [mode, setModeState] = useState<Mode>("h");
@@ -181,8 +202,8 @@ export default function ColourPicker({ initial, title = "Colour Picker", onOk, o
   };
   // Enter = OK, Esc = Cancel, wherever focus is (clicking the field or strip takes it off the
   // dialog). A focused button keeps Enter for itself.
-  const keysRef = useRef({ ok: () => onOk(hex), cancel: onCancel });
-  keysRef.current = { ok: () => onOk(hex), cancel: onCancel };
+  const keysRef = useRef({ ok: () => create(hex), cancel: onCancel });
+  keysRef.current = { ok: () => create(hex), cancel: onCancel };
   const dialogRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -201,11 +222,12 @@ export default function ColourPicker({ initial, title = "Colour Picker", onOk, o
   const stripAt = fixed / (MODES.find((item) => item.key === mode)!.max);
 
   return (
-    <div className="cb-cp-backdrop" onKeyDown={onKeyDown}>
-      <div className="cb-cp-dialog" role="dialog" aria-modal="true" aria-label={title} ref={dialogRef}>
-        <header>{title}</header>
-        <div className="cb-cp-body">
-          <div className="cb-cp-left">
+    <div className={`cb-cp-backdrop ${picking ? "picking" : ""}`} onKeyDown={onKeyDown}>
+      <div className="cb-cp-dialog cb-fs-dialog" role="dialog" aria-modal="true" aria-label={title} ref={dialogRef}>
+        <header><PanelClose onClose={onCancel} label="Cancel" />{title}</header>
+        <div className="cb-fs-body">
+          <div className="cb-fs-left">
+            <div className="cb-fs-label"><span>Select Colour</span></div>
             <div className="cb-cp-field" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); dragField(event); }} onPointerMove={(event) => { if (event.buttons) dragField(event); }}>
               <canvas ref={fieldRef} width={SIZE} height={SIZE} aria-hidden="true" />
               <span className={`cb-cp-ring ${colour.hsb.b > 55 && colour.hsb.s < 45 ? "dark" : ""}`} style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }} />
@@ -216,17 +238,29 @@ export default function ColourPicker({ initial, title = "Colour Picker", onOk, o
               <span className="cb-cp-tri top" style={{ left: `${stripAt * 100}%` }} />
               <span className="cb-cp-tri bottom" style={{ left: `${stripAt * 100}%` }} />
             </div>
+            <div className="cb-fs-foot">
+              <div className={`cb-fs-effects ${effects ? "" : "off"}`} title={effects ? undefined : effectsNote}>
+                <label><input type="checkbox" checked={Boolean(effects) && stroke} disabled={!effects} onChange={(event) => setStroke(event.target.checked)} /> Include Stroke</label>
+                <label><input type="checkbox" checked={Boolean(effects) && shadow} disabled={!effects} onChange={(event) => setShadow(event.target.checked)} /> Include Shadow</label>
+              </div>
+              <button type="button" className="cb-fs-dropper" aria-label="Eyedropper" title="Eyedropper: click a colour on the canvas" onClick={() => setPicking(true)}><EyedropperIcon /></button>
+              <button type="button" className="cb-fs-cancel" onClick={onCancel}>Cancel</button>
+            </div>
           </div>
 
-          <div className="cb-cp-right">
-            {MODES.map((item) => (
-              <label key={item.key} className="cb-cp-row">
+          <div className="cb-fs-right">
+            {MODES.map((item, index) => (
+              <label key={item.key} className={`cb-fs-row ${index === 3 ? "gap" : ""}`}>
                 <input type="radio" name="cb-cp-mode" checked={mode === item.key} onChange={() => setMode(item.key)} aria-label={`${item.label} on the slider`} />
-                <span>{item.label}:</span>
-                <NumberBox label={item.key === "bl" ? "Blue" : item.key === "v" ? "Brightness" : item.label} value={channel(colour, item.key)} max={item.max} unit={item.unit} onValue={(value) => setChannel(item.key, value)} />
+                <span className="cb-fs-pill">
+                  <b>{item.label}</b>
+                  <NumberBox label={item.key === "bl" ? "Blue" : item.key === "v" ? "Brightness" : item.label}
+                    value={isRgb(item.key) ? (channel(colour, item.key) / 255) * 100 : channel(colour, item.key)} max={isRgb(item.key) ? 100 : item.max} unit={item.unit}
+                    onValue={(value) => setChannel(item.key, isRgb(item.key) ? (value / 100) * 255 : value)} />
+                </span>
               </label>
             ))}
-            <div className="cb-cp-hexrow">
+            <div className="cb-cp-hexrow cb-fs-hexrow">
               <label className="cb-cp-hex"><i>#</i>
                 <input ref={hexRef} value={hexDraft ?? hex.slice(1)} maxLength={7} spellCheck={false} aria-label="Colour code"
                   onChange={(event) => {
@@ -241,16 +275,17 @@ export default function ColourPicker({ initial, title = "Colour Picker", onOk, o
                 {copied && <em>Copied</em>}
               </button>
             </div>
-            <div className="cb-cp-preview">
-              <span style={{ background: hex }} title={`New: ${hex}`} />
-              <button type="button" style={{ background: original }} title={`Original: ${original} (click to go back)`} aria-label={`Original colour ${original}`}
+            {/* Illustrator: the new colour above the colour it started as; a click on the old one goes back. */}
+            <div className="cb-fs-compare">
+              <span style={{ background: hex }} title={`New colour ${hex}`} aria-label={`New colour ${hex}`} role="img" />
+              <button type="button" style={{ background: original }} title={`Original colour ${original}: click to go back to it`} aria-label={`Back to the original colour ${original}`}
                 onClick={() => { setHexDraft(null); setColour((current) => fromRgb(hexToRgb(original)!, current.hsb)); }} />
             </div>
-            <button type="button" className="cb-cp-ok" onClick={() => onOk(hex)}>OK</button>
-            <button type="button" className="cb-cp-cancel" onClick={onCancel}>Cancel</button>
+            <button type="button" className="cb-fs-create" onClick={() => create(hex)}>OK</button>
           </div>
         </div>
       </div>
+      {picking && <CanvasEyedropper onPick={(picked) => { setPicking(false); setHexDraft(null); setColour((current) => fromRgb(hexToRgb(picked)!, current.hsb)); }} onCancel={() => setPicking(false)} />}
     </div>
   );
 }

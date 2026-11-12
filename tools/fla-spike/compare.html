@@ -1,0 +1,36 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Compare</title>
+<script src="createjs.js"></script>
+<script src="sardar_pub.js"></script>
+<script src="render.js"></script></head>
+<body>
+<script>
+let refStage, refRoot, doc, R;
+async function init(file, compId, rootName) {
+  doc = await (await fetch(file)).json();
+  R = new FlaRenderer(doc);
+  await loadBrushes(doc.brushes);
+  const lib = AdobeAn.getComposition(compId).getLibrary();
+  const c = document.createElement("canvas"); c.width = doc.w; c.height = doc.h;
+  refStage = new createjs.Stage(c);
+  refRoot = new lib[rootName]();
+  refStage.addChild(refRoot);
+  refStage.update();
+  return refRoot.currentFrame;
+}
+// Animate's own player, ticked frame by frame from the start (as it plays in a browser).
+function refFrame(n) {
+  let guard = 0;
+  while (refRoot.currentFrame !== n && guard++ < 1000) refStage.update();
+  const out = document.createElement("canvas"); out.width = doc.w; out.height = doc.h;
+  const ctx = out.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(refStage.canvas, 0, 0);
+  return out;
+}
+function ourFrame(n) {
+  const c = document.createElement("canvas"); c.width = doc.w; c.height = doc.h;
+  const ctx = c.getContext("2d"); ctx.fillStyle = doc.bg; ctx.fillRect(0, 0, c.width, c.height);
+  R.drawTimeline(ctx, doc.scenes[0], n);
+  return c;
+}
+</script></body></html>

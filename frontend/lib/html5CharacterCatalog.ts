@@ -13,6 +13,10 @@ export type Html5CharacterLibraryAction = {
   sourceHeight: number;
   fps: number;
   durationMs: number;
+  /** Its symbol's Animate timeline (layers and keyframes), when the upload included the .fla:
+   *  the cb-fla-timeline index.json URL, and the symbol's published class (lib.<flaSymbol>). */
+  flaTimeline?: string;
+  flaSymbol?: string;
   partAssets?: Record<string, {
     assetUrl: string;
     thumbUrl: string;

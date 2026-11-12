@@ -83,8 +83,15 @@ export default function RenderScenePage() {
     const markReady = () => {
       if (finished) return;
       finished = true;
-      // One short paint window after every character has confirmed its CreateJS runtime is ready.
-      window.setTimeout(() => { window.__CBS_RENDER_READY__ = true; }, 120);
+      // One short paint window after every character has confirmed its CreateJS runtime is ready,
+      // and after the characters drawn natively (edited in the native editor) have loaded their Animate file.
+      const started = Date.now();
+      const done = () => {
+        const waiting = (window as unknown as { __CBS_NATIVE_PENDING__?: number }).__CBS_NATIVE_PENDING__ || 0;
+        if (waiting > 0 && Date.now() - started < 40_000) { window.setTimeout(done, 100); return; }
+        window.setTimeout(() => { window.__CBS_RENDER_READY__ = true; }, 120);
+      };
+      done();
     };
 
     const handleMessage = (event: MessageEvent) => {

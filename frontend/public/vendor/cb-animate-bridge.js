@@ -7,6 +7,13 @@
  *
  * Editor → player messages (source "characterbazaarstudio-editor"):
  *   SEEK, PAUSE, PLAY, CHARACTER_EDITS, HIT_TEST_PART, BEGIN/MOVE/END_PART_DRAG,
+ *   SYMBOL_VIEW { view: { levels: [{ props?, frame }], hidden: [prop] } | null } — "step inside"
+ *            (view only): levels[0] is the player's root at a frame, each later level an object
+ *            inside the previous one (the first of its candidate properties that is on stage),
+ *            shown at its own frame; hidden: the last level's objects of hidden layers. null ends it.
+ *   SYMBOL_HIT { normalizedX, normalizedY } — which object of the last symbol-view level is there.
+ *   CHARACTER_EDITS.onlyParts: [partKey] — a part layer (Distribute to Layers, pasted parts): only
+ *            these parts are drawn; everything else in the character is hidden.
  *   SET_VIEW { pixelScale, x, y, width, height, exact }  — device pixels per player CSS px and
  *            the visible part of the player (0..1). The vectors are redrawn at exactly that
  *            resolution, for the visible region only, so zooming never pixelates. exact: the
@@ -14,7 +21,8 @@
  *            aligned to whole device pixels. minStroke: thinnest outline in device pixels (1).
  *            seal: edge in device pixels that closes seams between touching fills (0 = off).
  * Player → editor messages (source "characterbazaarstudio-animate"):
- *   READY, CONTENT_BOUNDS, PART_SELECTED, PART_DRAG_PREVIEW, PART_DRAG_END, SEEK_DONE, ERROR
+ *   READY, CONTENT_BOUNDS, PART_SELECTED, PART_DRAG_PREVIEW, PART_DRAG_END, SEEK_DONE, ERROR,
+ *   SYMBOL_HIT { prop } — the property name of the object hit (null: nothing there)
  */
 (function () {
   var script = document.currentScript;
@@ -22,6 +30,32 @@
   var W = Math.max(1, Number(ds.width) || 1080);
   var H = Math.max(1, Number(ds.height) || 1920);
   var FPS = Math.max(1, Number(ds.fps) || 30);
+  // The frames of a clip's own timeline where something changes at once: a layer starts or ends, or
+  // a still keyframe moves (not the tiny pivot adjustment Animate writes between tweened keyframes).
+  function cutFrames(clip) {
+    if (clip.__cbCuts) return clip.__cbCuts;
+    var cuts = {}, tweens = (clip.timeline && clip.timeline.tweens) || [];
+    tweens.forEach(function (tween) {
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var a = step.prev.props || {}, b = step.props || {};
+        var moved = !step.d && (Math.abs((b.x || 0) - (a.x || 0)) + Math.abs((b.y || 0) - (a.y || 0)) > 2);
+        if (a.state !== b.state || a._off !== b._off || moved) cuts[step.t + step.d] = true;
+      }
+    });
+    clip.__cbCuts = cuts;
+    return cuts;
+  }
+  // Where a time falls on the source timeline. A source at the stage's own 30 fps sits on whole
+  // frames. Any other rate (a 24 fps .fla) keeps the fraction, so tweens draw their true in-between
+  // instead of repeating every fifth stage frame. Next to a cut there is no in-between to draw, and
+  // holding back would stall and then jump further, so that takes the nearest whole frame.
+  function seekPosition(root, seekMs, loop, total) {
+    var exact = Math.max(0, Number(seekMs || 0) / 1000 * FPS), whole = Math.round(exact);
+    var at = FPS === 30 || Math.abs(exact - whole) < 1e-3 ? whole : exact;
+    at = loop && total > 1 ? at % total : Math.min(total - 1, at);
+    if (at % 1 && cutFrames(root)[Math.floor(at) + 1]) at = Math.min(total - 1, Math.round(at));
+    return at;
+  }
   // Backing-store limits for the visible-region canvas (per side and total pixels).
   var MAX_EDGE = 8192;
   var MAX_AREA = 40e6;
@@ -197,8 +231,23 @@
     return { x: x0, y: y0, width: Math.max(.001, x1 - x0), height: Math.max(.001, y1 - y0) };
   }
   function partTightBounds(p) { return unionBounds(nodesOf(p).map(tightBoundsFor)); }
+  // Several selected parts at once (Shift+click, drag-select, a ⌘G group): "leftHand|head/lips".
+  // Never stored in cbParts, so it never shows up as a part of its own; its box is the members'
+  // boxes where they are drawn now (their own edits included).
+  function multiPart(key) {
+    var members = key.split('|').filter(Boolean), nodes = [], boxes = [];
+    members.forEach(function (m) {
+      var mp = resolvePart(m), list = nodesOf(mp); if (!list.length) return;
+      list.forEach(function (n) { if (nodes.indexOf(n) < 0) nodes.push(n); });
+      var b = partTightBounds(mp), o = cbLastOv[m] || {};
+      if (b) boxes.push({ x: b.x + Number(o.offsetX || 0) / W, y: b.y + Number(o.offsetY || 0) / H, width: b.width, height: b.height });
+    });
+    if (!nodes.length) return null;
+    return { key: key, label: members.length + ' parts', node: nodes[0], nodes: nodes, members: members, multi: true, bounds: unionBounds(boxes) };
+  }
   function resolvePart(key) {
     key = String(key || ''); if (!key) return null;
+    if (key.indexOf('|') >= 0) return multiPart(key);
     var p = cbParts[key]; if (p && p.node) return p;
     var cut = key.lastIndexOf('/'); if (cut < 0) return p || null;
     var parent = resolvePart(key.slice(0, cut)); if (!parent || !parent.node || parent.nodes) return null;
@@ -245,7 +294,7 @@
   // Editor: a part's current (unedited, tight) box and label, nested keys included.
   window.cbPartBoundsOf = function (key) {
     var p = resolvePart(key); if (!p || !p.node) return null;
-    p.bounds = partTightBounds(p) || p.bounds;
+    if (!p.multi) p.bounds = partTightBounds(p) || p.bounds;
     return { key: p.key, label: p.label, bounds: p.bounds };
   };
   // Saved edits, the selection and nested parts edited before (so removing an edit resets them).
@@ -323,7 +372,7 @@
     o = o || {};
     if (n.getMatrix !== editedMatrix) n.getMatrix = editedMatrix;
     if (!grouped && !p.nested) applySwap(n, String(o.swapSymbol || ''));
-    if (n.__cbBaseVisible === undefined) n.__cbBaseVisible = n.visible !== false;
+    if (n.__cbBaseVisible === undefined) n.__cbBaseVisible = n.__cbOnlyHid ? true : n.visible !== false;
     var sc = Math.max(.02, Number(o.scale == null ? 1 : o.scale || 1)), ox = Number(o.offsetX || 0), oy = Number(o.offsetY || 0), rot = Number(o.rotation || 0), flip = !!o.flipX, kx = Number(o.skewX || 0), ky = Number(o.skewY || 0);
     var stx = stretchOf(o.stretchX), sty = stretchOf(o.stretchY);
     if (!ox && !oy && !rot && sc === 1 && !flip && !kx && !ky && stx === 1 && sty === 1) n.__cbOv = null;
@@ -335,20 +384,76 @@
     n.visible = o.visible === false ? false : n.__cbBaseVisible;
     if (o.animate === false && typeof n.stop === 'function') n.stop();
   }
-  // Entered part (CHARACTER_EDITS.focusPart): wash out the artwork outside the part's box so
-  // only that part reads at full strength. source-atop keeps the wash on the character's own pixels.
+  // ---- Part layers (CHARACTER_EDITS.onlyParts): only the listed parts are drawn. Along the path
+  // from the root to each kept part, every other child is hidden (the character still draws and
+  // animates normally); applied again after every SEEK, since frames bring other objects in.
+  var cbOnlyParts = [], cbOnlyHidden = [];
+  function onlyNodes() {
+    var out = [];
+    cbOnlyParts.forEach(function (key) { nodesOf(resolvePart(key)).forEach(function (n) { if (out.indexOf(n) < 0) out.push(n); }); });
+    return out;
+  }
+  function applyOnly() {
+    cbOnlyHidden.forEach(function (n) { if (n.__cbOnlyHid) { n.__cbOnlyHid = false; n.visible = n.__cbBaseVisible === undefined ? true : n.__cbBaseVisible; } });
+    cbOnlyHidden = [];
+    var root = cbRoot(); if (!root || !cbOnlyParts.length) return;
+    var keep = onlyNodes(); if (!keep.length) return;
+    var onPath = [];
+    keep.forEach(function (n) { for (var q = n.parent; q && q !== root.parent; q = q.parent) if (onPath.indexOf(q) < 0) onPath.push(q); });
+    onPath.forEach(function (container) {
+      (container.children || []).forEach(function (child) {
+        if (keep.indexOf(child) >= 0 || onPath.indexOf(child) >= 0 || child.visible === false) return;
+        child.__cbOnlyHid = true; child.visible = false; cbOnlyHidden.push(child);
+      });
+    });
+  }
+  // Drawn now: the node and everything above it visible (a part layer hides the rest).
+  function shownNow(n) { for (var q = n; q; q = q.parent) if (q.visible === false) return false; return true; }
+
+  // Entered part (CHARACTER_EDITS.focusPart; several parts joined by "|"): wash out the whole
+  // character, then draw the part's own artwork again on top, so exactly its outline reads at full
+  // strength (a box would leave a neck or collar inside it bright). source-atop keeps the wash on the
+  // character's own pixels. A part known only as a guessed zone keeps the old box.
+  var cbFocusCopy = null;
+  function focusNodes() {
+    var out = [];
+    String(cbFocusPart || '').split('|').forEach(function (key) { var p = key && (cbParts[key] || resolvePart(key)); nodesOf(p).forEach(function (n) { if (out.indexOf(n) < 0) out.push(n); }); });
+    return out;
+  }
   function applyFocus() {
     var st = cbStage(); if (!st || !window.createjs) return;
     if (!cbDimLayer) { cbDimLayer = new createjs.Shape(); cbDimLayer.compositeOperation = 'source-atop'; cbDimLayer.alpha = .6; }
-    if (cbDimLayer.parent !== st || st.getChildIndex(cbDimLayer) !== st.numChildren - 1) st.addChild(cbDimLayer);
+    if (!cbFocusCopy) {
+      cbFocusCopy = new createjs.DisplayObject();
+      cbFocusCopy.draw = function (ctx) {
+        var stage = cbStage(); if (!stage) return true;
+        var toStage = stage.getMatrix(new createjs.Matrix2D()).invert();
+        focusNodes().forEach(function (n) {
+          if (!n.parent || n.visible === false || n._off) return;
+          try {
+            var m = n.getConcatenatedMatrix(new createjs.Matrix2D()).prependMatrix(toStage), a = 1;
+            for (var q = n; q && q !== stage; q = q.parent) a *= q.alpha == null ? 1 : q.alpha;
+            ctx.save(); ctx.globalAlpha *= a; ctx.transform(m.a, m.b, m.c, m.d, m.tx, m.ty); n.draw(ctx, false); ctx.restore();
+          } catch (e) { try { ctx.restore(); } catch (e2) {} }
+        });
+        return true;
+      };
+    }
+    if (cbDimLayer.parent !== st || st.getChildIndex(cbDimLayer) !== st.numChildren - 2 || cbFocusCopy.parent !== st || st.getChildIndex(cbFocusCopy) !== st.numChildren - 1) { st.addChild(cbDimLayer); st.addChild(cbFocusCopy); }
     var g = cbDimLayer.graphics; g.clear();
-    var p = cbFocusPart && cbParts[cbFocusPart];
+    cbFocusCopy.visible = false;
+    if (!cbFocusPart) return;
+    var nodes = focusNodes();
+    if (nodes.length) { g.f('#ffffff').dr(0, 0, W, H); cbFocusCopy.visible = true; return; }
+    var p = cbParts[cbFocusPart];
     if (!p) return;
-    var b = unionBounds(nodesOf(p).map(boundsFor)) || p.bounds || zoneFor(cbFocusPart);
+    var b = p.bounds || zoneFor(cbFocusPart);
     var x = b.x * W, y = b.y * H, r = (b.x + b.width) * W, bt = (b.y + b.height) * H;
     g.f('#ffffff').dr(0, 0, W, y).dr(0, bt, W, H - bt).dr(0, y, x, bt - y).dr(r, y, W - r, bt - y);
   }
-  function applyEdits(d) { discover(); cbSelectedPart = String(d.selectedPart || ''); var ov = d.partOverrides || {}; var ruleScopes = (d.colorReplacements || []).map(function (r) { return String(r && r.scope || ''); }); resolveNested(Object.keys(ov).concat([cbSelectedPart, String(d.focusPart || '')], ruleScopes)); refreshBounds(ov); Object.keys(cbParts).forEach(function (k) { applyOne(k, ov[k] || {}); }); Object.keys(cbNestedKeys).forEach(function (k) { if (!ov[k] && k !== cbSelectedPart && k !== String(d.focusPart || '') && ruleScopes.indexOf(k) < 0) delete cbNestedKeys[k]; }); refreshBounds(ov); applyFallbackMasks(ov, d.colorOverrides || {}); cbColorRules = d.colorReplacements || []; applyRecolor(cbColorRules); cbFocusPart = String(d.focusPart || ''); applyFocus(); var st = cbStage(); if (st && st.update) st.update(); }
+  var cbLastEdits = null;
+  function handleEdits(d) { cbLastEdits = d; var st = cbStage(); applySymbolEdits(d.symbolEases, d.symbolKeys, d.symbolValues, d.symbolLayers); cbStrokeScale = clamp(Number(d.strokeScale) || 1, 0.02, 50); cbLastOv = d.partOverrides || {}; applyEdits(d); applyLayerVisibility(d.symbolLayers); if (st && st.update) st.update(); scheduleBounds(); }
+  function applyEdits(d) { discover(); cbSelectedPart = String(d.selectedPart || ''); cbOnlyParts = (d.onlyParts || []).map(String).filter(Boolean); var ov = d.partOverrides || {}; var ruleScopes = (d.colorReplacements || []).map(function (r) { return String(r && r.scope || ''); }); resolveNested(Object.keys(ov).concat([cbSelectedPart, String(d.focusPart || '')], ruleScopes, cbOnlyParts)); refreshBounds(ov); Object.keys(cbParts).forEach(function (k) { applyOne(k, ov[k] || {}); }); Object.keys(cbNestedKeys).forEach(function (k) { if (!ov[k] && k !== cbSelectedPart && k !== String(d.focusPart || '') && ruleScopes.indexOf(k) < 0) delete cbNestedKeys[k]; }); refreshBounds(ov); applyFallbackMasks(ov, d.colorOverrides || {}); cbColorRules = d.colorReplacements || []; applyRecolor(cbColorRules); cbFocusPart = String(d.focusPart || ''); applyOnly(); applyFocus(); var st = cbStage(); if (st && st.update) st.update(); }
   // ---- Tight part bounds: the part alone is drawn off-screen (unedited, in stage units) and its
   // opaque pixels measured, so the box hugs the artwork instead of the symbol's nominal bounds.
   // Only the selected part and edited parts are measured; results are cached per frame/variant.
@@ -490,9 +595,167 @@
   window.cbAnyPartAt = function (x, y, tol) { if (!cbNamedMode) return null; var h = pixelHitNear(Number(x), Number(y), Number(tol) || 0); return h ? h.key : ''; };
   function hit(x, y) { refreshBounds(); if (cbNamedMode) return pixelHitNear(x, y, 2 / Math.max(W, H)); var px = pixelHit(x, y); if (px) return px; var hits = []; Object.keys(cbParts).forEach(function (k) { var b = cbParts[k].bounds || zoneFor(k); if (x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height) hits.push({ key: k, b: b, area: b.width * b.height }); }); hits.sort(function (a, b) { return a.area - b.area; }); return hits[0] || null; }
   function selectAt(x, y) { var h = hit(x, y); if (!h) return; var p = cbParts[h.key]; var b = p && p.node ? tightBoundsFor(p.node) : h.b; if (p && b) p.bounds = b; cbPost('PART_SELECTED', { partKey: h.key, partBounds: b || h.b }); }
-  function startDrag(d) { var key = String(d.partKey || ''), p = cbParts[key], last = cbLastOv[key] || {}; if (!p) return; cbDrag = { key: key, startX: Number(d.normalizedX || 0), startY: Number(d.normalizedY || 0), baseX: Number(last.offsetX || 0), baseY: Number(last.offsetY || 0) }; }
+  function startDrag(d) { var key = String(d.partKey || ''); if (key.indexOf('|') >= 0) { var mp = multiPart(key); if (mp) cbDrag = { key: key, multi: mp, startX: Number(d.normalizedX || 0), startY: Number(d.normalizedY || 0), baseX: 0, baseY: 0 }; return; } var p = cbParts[key], last = cbLastOv[key] || {}; if (!p) return; cbDrag = { key: key, startX: Number(d.normalizedX || 0), startY: Number(d.normalizedY || 0), baseX: Number(last.offsetX || 0), baseY: Number(last.offsetY || 0) }; }
   // Drag preview keeps the part's rotation/scale/flip; the reported bounds stay unedited (the editor adds the offset).
-  function moveDrag(d, end) { if (!cbDrag) return; var p = cbParts[cbDrag.key]; if (!p) return; var ox = cbDrag.baseX + (Number(d.normalizedX || 0) - cbDrag.startX) * W, oy = cbDrag.baseY + (Number(d.normalizedY || 0) - cbDrag.startY) * H; var merged = Object.assign({}, cbLastOv[cbDrag.key] || {}, { offsetX: ox, offsetY: oy }); cbLastOv[cbDrag.key] = merged; applyOne(cbDrag.key, merged); var b = p.bounds || (p.node ? baseBoundsFor(p.node) : zoneFor(cbDrag.key)); if (cbFocusPart) applyFocus(); cbPost(end ? 'PART_DRAG_END' : 'PART_DRAG_PREVIEW', { partKey: cbDrag.key, offsetX: ox, offsetY: oy, partBounds: b }); var st = cbStage(); if (st && st.update) st.update(); if (end) cbDrag = null; }
+  function moveDrag(d, end) { if (!cbDrag) return; if (cbDrag.multi) { moveMultiDrag(d, end); return; } var p = cbParts[cbDrag.key]; if (!p) return; var ox = cbDrag.baseX + (Number(d.normalizedX || 0) - cbDrag.startX) * W, oy = cbDrag.baseY + (Number(d.normalizedY || 0) - cbDrag.startY) * H; var merged = Object.assign({}, cbLastOv[cbDrag.key] || {}, { offsetX: ox, offsetY: oy }); cbLastOv[cbDrag.key] = merged; applyOne(cbDrag.key, merged); var b = p.bounds || (p.node ? baseBoundsFor(p.node) : zoneFor(cbDrag.key)); if (cbFocusPart) applyFocus(); cbPost(end ? 'PART_DRAG_END' : 'PART_DRAG_PREVIEW', { partKey: cbDrag.key, offsetX: ox, offsetY: oy, partBounds: b }); var st = cbStage(); if (st && st.update) st.update(); if (end) cbDrag = null; }
+
+  // Several parts dragged together: each keeps its own edit and moves by the same amount; the editor
+  // gets the shared offset (PART_DRAG_END) and adds it to each part.
+  function moveMultiDrag(d, end) {
+    var dx = (Number(d.normalizedX || 0) - cbDrag.startX) * W, dy = (Number(d.normalizedY || 0) - cbDrag.startY) * H, mp = cbDrag.multi;
+    mp.members.forEach(function (m) { var last = cbLastOv[m] || {}; applyOne(m, Object.assign({}, last, { offsetX: Number(last.offsetX || 0) + dx, offsetY: Number(last.offsetY || 0) + dy })); });
+    if (cbFocusPart) applyFocus();
+    cbPost(end ? 'PART_DRAG_END' : 'PART_DRAG_PREVIEW', { partKey: cbDrag.key, offsetX: dx, offsetY: dy, partBounds: mp.bounds });
+    var st = cbStage(); if (st && st.update) st.update();
+    if (end) cbDrag = null;
+  }
+  // Editor (same-origin): the part under (x, y) (0..1 of the player), for Shift+click.
+  window.cbPartAt = function (x, y) {
+    var h = hit(Number(x), Number(y)); if (!h) return null;
+    var p = cbParts[h.key], b = p && p.node ? tightBoundsFor(p.node) : h.b;
+    if (p && p.node && !shownNow(p.node)) return null;
+    return { key: h.key, label: p ? p.label : h.key, bounds: b };
+  };
+  // Editor: parts in drawing order, back to front (Distribute to Layers keeps the look). Without
+  // keys: every top-level part with real artwork that is drawn now. Each comes with its label.
+  window.cbPartsByStack = function (keys) {
+    var root = cbRoot(), order = new Map(), i = 0;
+    (function walk(n, depth) { if (!n || depth > 60) return; order.set(n, i++); (n.children || []).forEach(function (c) { walk(c, depth + 1); }); })(root, 0);
+    var list = keys && keys.length ? keys.map(String) : (cbOrder.length ? cbOrder : Object.keys(cbParts)).filter(function (k) { var p = cbParts[k]; return k.indexOf('/') < 0 && p && p.node && shownNow(p.node); });
+    return list.map(function (k) {
+      var p = resolvePart(k), nodes = nodesOf(p), at = Math.min.apply(null, nodes.map(function (n) { return order.has(n) ? order.get(n) : 1e9; }).concat([1e9]));
+      return { key: k, label: p ? p.label : k, at: at };
+    }).filter(function (item) { return item.at < 1e9; }).sort(function (a, b) { return a.at - b.at; }).map(function (item) { return { key: item.key, label: item.label }; });
+  };
+  // ---- Distribute as Still: a part as vector SVG, exactly as drawn now (its edits and recolours
+  // included). Animate exports draw with CreateJS Graphics instructions; each shape becomes SVG
+  // paths in the player's own units (transform = where it is drawn), masks become clip paths,
+  // gradients and transparency are kept, bitmaps are embedded. Filters, blend modes and text are
+  // not converted (they are counted in `skipped`).
+  function svgNumber(v) { return String(Math.round(Number(v) * 100) / 100); }
+  function svgColor(style, fallback) { return typeof style === 'string' ? style.replace(/"/g, '') : fallback; }
+  function partSvg(keys) {
+    var stage = cbStage(); if (!stage || !window.createjs) return null;
+    var G = createjs.Graphics, toStage = stage.getMatrix(new createjs.Matrix2D()).invert();
+    var defs = [], body = [], ids = 0, skipped = {}, box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    var caps = ['butt', 'round', 'square'], joins = ['miter', 'round', 'bevel'];
+    function skip(what) { skipped[what] = (skipped[what] || 0) + 1; }
+    function abs(n) { return n.getConcatenatedMatrix(new createjs.Matrix2D()).prependMatrix(toStage); }
+    function matrixAttr(m) { return 'matrix(' + [m.a, m.b, m.c, m.d, m.tx, m.ty].map(function (v) { return Math.round(v * 10000) / 10000; }).join(' ') + ')'; }
+    function grow(m, x, y, pad) { var px = m.a * x + m.c * y + m.tx, py = m.b * x + m.d * y + m.ty; pad = pad || 0; box.x0 = Math.min(box.x0, px - pad); box.y0 = Math.min(box.y0, py - pad); box.x1 = Math.max(box.x1, px + pad); box.y1 = Math.max(box.y1, py + pad); }
+    function paint(style, matrix) {
+      if (typeof style === 'string') return style;
+      var props = style && style.props; if (!props) { skip('pattern fill'); return 'none'; }
+      if (props.type === 'bitmap') { skip('bitmap fill'); return 'none'; }
+      var id = 'g' + (ids++), stops = (props.colors || []).map(function (c, i) { return '<stop offset="' + svgNumber(props.ratios[i]) + '" stop-color="' + svgColor(c, '#000') + '"/>'; }).join('');
+      var gt = matrix ? ' gradientTransform="' + matrixAttr(matrix) + '"' : '';
+      defs.push(props.type === 'radial'
+        ? '<radialGradient id="' + id + '" gradientUnits="userSpaceOnUse" cx="' + svgNumber(props.x1) + '" cy="' + svgNumber(props.y1) + '" r="' + svgNumber(props.r1) + '" fx="' + svgNumber(props.x0) + '" fy="' + svgNumber(props.y0) + '"' + gt + '>' + stops + '</radialGradient>'
+        : '<linearGradient id="' + id + '" gradientUnits="userSpaceOnUse" x1="' + svgNumber(props.x0) + '" y1="' + svgNumber(props.y0) + '" x2="' + svgNumber(props.x1) + '" y2="' + svgNumber(props.y1) + '"' + gt + '>' + stops + '</linearGradient>');
+      return 'url(#' + id + ')';
+    }
+    function shapeSvg(shape, m, alpha) {
+      var list = shape.graphics && shape.graphics.getInstructions ? shape.graphics.getInstructions() : [];
+      var d = '', out = [], stroke = { width: 1, caps: 'butt', joins: 'miter', miter: 10, fixed: false }, has = false;
+      var tf = ' transform="' + matrixAttr(m) + '"' + (alpha < 1 ? ' opacity="' + svgNumber(alpha) + '"' : '');
+      function pt(x, y) { grow(m, x, y, 0); return svgNumber(x) + ' ' + svgNumber(y); }
+      function arc(x, y, r, a0, a1, ccw) {
+        var sx = x + r * Math.cos(a0), sy = y + r * Math.sin(a0), sweep = a1 - a0;
+        if (!ccw && sweep < 0) sweep += Math.PI * 2; if (ccw && sweep > 0) sweep -= Math.PI * 2;
+        d += (has ? 'L' : 'M') + pt(sx, sy); has = true;
+        if (Math.abs(sweep) >= Math.PI * 2 - 1e-6) { var mx = x - r * Math.cos(a0), my = y - r * Math.sin(a0); d += 'A' + svgNumber(r) + ' ' + svgNumber(r) + ' 0 1 ' + (ccw ? 0 : 1) + ' ' + pt(mx, my) + 'A' + svgNumber(r) + ' ' + svgNumber(r) + ' 0 1 ' + (ccw ? 0 : 1) + ' ' + pt(sx, sy); grow(m, x - r, y - r); grow(m, x + r, y + r); return; }
+        var ex = x + r * Math.cos(a0 + sweep), ey = y + r * Math.sin(a0 + sweep);
+        d += 'A' + svgNumber(r) + ' ' + svgNumber(r) + ' 0 ' + (Math.abs(sweep) > Math.PI ? 1 : 0) + ' ' + (sweep > 0 ? 1 : 0) + ' ' + pt(ex, ey);
+      }
+      for (var i = 0; i < list.length; i++) {
+        var c = list[i];
+        if (c instanceof G.BeginPath) { d = ''; has = false; }
+        else if (c instanceof G.MoveTo) { d += 'M' + pt(c.x, c.y); has = true; }
+        else if (c instanceof G.LineTo) { d += (has ? 'L' : 'M') + pt(c.x, c.y); has = true; }
+        else if (c instanceof G.QuadraticCurveTo) { d += 'Q' + pt(c.cpx, c.cpy) + ' ' + pt(c.x, c.y); has = true; }
+        else if (c instanceof G.BezierCurveTo) { d += 'C' + pt(c.cp1x, c.cp1y) + ' ' + pt(c.cp2x, c.cp2y) + ' ' + pt(c.x, c.y); has = true; }
+        else if (c instanceof G.ClosePath) { d += 'Z'; }
+        else if (c instanceof G.Rect) { d += 'M' + pt(c.x, c.y) + 'H' + svgNumber(c.x + c.w) + 'V' + svgNumber(c.y + c.h) + 'H' + svgNumber(c.x) + 'Z'; grow(m, c.x + c.w, c.y + c.h); has = true; }
+        else if (G.Circle && c instanceof G.Circle) { has = false; arc(c.x, c.y, c.radius, 0, Math.PI * 2, false); d += 'Z'; }
+        else if (G.Ellipse && c instanceof G.Ellipse) { var rx = c.w / 2, ry = c.h / 2, cx = c.x + rx, cy = c.y + ry; d += 'M' + pt(c.x, cy) + 'A' + svgNumber(rx) + ' ' + svgNumber(ry) + ' 0 1 0 ' + pt(c.x + c.w, cy) + 'A' + svgNumber(rx) + ' ' + svgNumber(ry) + ' 0 1 0 ' + pt(c.x, cy) + 'Z'; grow(m, c.x, c.y); grow(m, c.x + c.w, c.y + c.h); has = true; }
+        else if (c instanceof G.Arc) { arc(c.x, c.y, c.radius, c.startAngle, c.endAngle, c.anticlockwise); }
+        else if (c instanceof G.StrokeStyle) { stroke = { width: Number(c.width) || 1, caps: typeof c.caps === 'number' ? caps[c.caps] : (c.caps || 'butt'), joins: typeof c.joints === 'number' ? joins[c.joints] : (c.joints || 'miter'), miter: Number(c.miterLimit) || 10, fixed: !!c.ignoreScale }; }
+        else if (c instanceof G.Fill) { if (c.style && d) out.push('<path' + tf + ' d="' + d + '" fill="' + paint(c.style, c.matrix) + '"' + (c.evenOdd ? ' fill-rule="evenodd"' : '') + '/>'); }
+        else if (c instanceof G.Stroke) {
+          if (c.style && d) {
+            out.push('<path' + tf + ' d="' + d + '" fill="none" stroke="' + paint(c.style, null) + '" stroke-width="' + svgNumber(stroke.width * (stroke.fixed ? 1 : Math.max(.02, Number(cbStrokeScale) || 1))) + '" stroke-linecap="' + stroke.caps + '" stroke-linejoin="' + stroke.joins + '" stroke-miterlimit="' + svgNumber(stroke.miter) + '"' + (stroke.fixed ? ' vector-effect="non-scaling-stroke"' : '') + '/>');
+            var half = stroke.width * Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) / 2; box.x0 -= 0; if (half > 0) { box.x0 -= half; box.y0 -= half; box.x1 += half; box.y1 += half; }
+          }
+        }
+        else if (!(c instanceof G.StrokeDash)) skip('shape command');
+      }
+      return out.join('');
+    }
+    function bitmapSvg(node, m, alpha) {
+      var img = node.image; if (!img || !img.width) return '';
+      var w = node.sourceRect ? node.sourceRect.width : img.width, h = node.sourceRect ? node.sourceRect.height : img.height, url = '';
+      try { var cv = document.createElement('canvas'); cv.width = w; cv.height = h; var r = node.sourceRect || { x: 0, y: 0 }; cv.getContext('2d').drawImage(img, r.x, r.y, w, h, 0, 0, w, h); url = cv.toDataURL('image/png'); } catch (e) { skip('bitmap'); return ''; }
+      grow(m, 0, 0); grow(m, w, h);
+      return '<image transform="' + matrixAttr(m) + '" width="' + w + '" height="' + h + '" href="' + url + '"' + (alpha < 1 ? ' opacity="' + svgNumber(alpha) + '"' : '') + '/>';
+    }
+    function nodeSvg(n, alpha) {
+      if (!n || n.visible === false || n._off || !(n.alpha > 0)) return '';
+      alpha *= n.alpha == null ? 1 : n.alpha;
+      if (n.filters && n.filters.length) skip('filter');
+      if (n.compositeOperation) skip('blend mode');
+      var inner = '';
+      if (n.graphics) inner = shapeSvg(n, abs(n), alpha);
+      else if (n.image) inner = bitmapSvg(n, abs(n), alpha);
+      else if (n.text != null && !n.children) skip('text');
+      else (n.children || []).forEach(function (c) { inner += nodeSvg(c, alpha); });
+      if (inner && n.mask && n.mask.graphics && n.parent) {
+        var id = 'c' + (ids++), mm = n.parent.getConcatenatedMatrix(new createjs.Matrix2D()).prependMatrix(toStage).appendMatrix(n.mask.getMatrix(new createjs.Matrix2D()));
+        var saved = box; box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+        var clip = shapeSvg(n.mask, mm, 1).replace(/ fill="[^"]*"/g, '').replace(/<path[^>]* fill="none"[^>]*\/>/g, '');
+        box = saved;
+        defs.push('<clipPath id="' + id + '" clipPathUnits="userSpaceOnUse">' + clip + '</clipPath>');
+        inner = '<g clip-path="url(#' + id + ')">' + inner + '</g>';
+      }
+      return inner;
+    }
+    var nodes = [];
+    keys.forEach(function (k) { nodesOf(resolvePart(k)).forEach(function (n) { if (nodes.indexOf(n) < 0) nodes.push(n); }); });
+    var order = new Map(), i = 0;
+    (function walk(n, depth) { if (!n || depth > 60) return; order.set(n, i++); (n.children || []).forEach(function (c) { walk(c, depth + 1); }); })(cbRoot(), 0);
+    nodes = nodes.filter(function (n) { for (var q = n.parent; q; q = q.parent) if (nodes.indexOf(q) >= 0) return false; return true; })
+      .sort(function (a, b) { return (order.get(a) || 0) - (order.get(b) || 0); });
+    nodes.forEach(function (n) {
+      var parentAlpha = 1; for (var q = n.parent; q && q !== stage; q = q.parent) parentAlpha *= q.alpha == null ? 1 : q.alpha;
+      body.push(nodeSvg(n, parentAlpha));
+    });
+    if (!isFinite(box.x0) || box.x1 <= box.x0 || box.y1 <= box.y0) return null;
+    var pad = 2, x = Math.floor(box.x0 - pad), y = Math.floor(box.y0 - pad), w = Math.ceil(box.x1 + pad) - x, h = Math.ceil(box.y1 + pad) - y;
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" viewBox="' + [x, y, w, h].join(' ') + '">' + (defs.length ? '<defs>' + defs.join('') + '</defs>' : '') + body.join('') + '</svg>';
+    return { svg: svg, x: x, y: y, width: w, height: h, playerWidth: W, playerHeight: H, skipped: skipped };
+  }
+  // Editor: the library symbol a part is drawn from ("Symbol2copy9"), for pasting it onto a part
+  // of another character (a "source-symbol" part replacement).
+  window.cbPartSymbolName = function (key) {
+    var p = resolvePart(String(key || '')), n = p && p.node; if (!n || p.nodes) return '';
+    try { return protoNames().get(Object.getPrototypeOf(n)) || ''; } catch (e) { return ''; }
+  };
+  window.cbPartsToSvg = function (keys) { try { return partSvg((keys || []).map(String)); } catch (e) { return { error: String(e) }; } };
+
+  // Editor: the parts a drag box (0..1 of the player) touches — whole parts at the top level, or the
+  // pieces (else the drawn shapes) inside containerKey.
+  window.cbPartsInRect = function (containerKey, x0, y0, x1, y1) {
+    var out = [], touches = function (b) { return !!b && b.x <= x1 && b.x + b.width >= x0 && b.y <= y1 && b.y + b.height >= y0; };
+    refreshBounds();
+    if (!containerKey) {
+      (cbOrder.length ? cbOrder : Object.keys(cbParts)).forEach(function (k) { var p = cbParts[k]; if (p && p.node && k.indexOf('/') < 0 && shownNow(p.node) && touches(partTightBounds(p) || p.bounds)) out.push(k); });
+      return out;
+    }
+    var parent = resolvePart(containerKey); if (!parent || !parent.node || parent.nodes) return out;
+    var pieces = childPieces(parent.node), prefix = parent.key + '/';
+    if (pieces.length) pieces.forEach(function (c) { if (shownNow(c.node) && touches(tightBoundsFor(c.node))) out.push(prefix + c.id); });
+    else shapesUnder(parent.node, '', []).forEach(function (sh) { if (shownNow(sh.node) && touches(tightBoundsFor(sh.node))) out.push(prefix + sh.id); });
+    return out;
+  };
 
   // ---- Recolour (CHARACTER_EDITS.colorReplacements): Illustrator-style recolour and Animate-style
   // find & replace on the vector artwork itself. Rules: { from, to, target: fill|stroke|both,
@@ -559,33 +822,54 @@
   }
   // Shapes of the character (or one part), including timeline instances not on the current frame
   // (Animate names them shape, shape_1, instance_3…) and swapped-in variants. fn(shape, partKey).
+  // A pose part is a scope of its own: "@<pose class>/<object name>" (e.g. "@Sardar_01/instance_9"), several parts joined by "+".
+  // Its shapes get that tag, next to the character part they belong to.
+  var cbTagNodes = new Map();
+  function refreshTagNodes(extra) {
+    cbTagNodes = new Map();
+    var scopes = (cbColorRules || []).map(function (r) { return String(r && r.scope || ''); }).concat(extra ? [String(extra)] : []);
+    scopes.forEach(function (sc) {
+      if (sc.charAt(0) !== '@') return;
+      var cut = sc.indexOf('/'), cls = sc.slice(1, cut), props = sc.slice(cut + 1).split('+');
+      try { clipsOfClass(cls).forEach(function (clip) { props.forEach(function (prop) { var node = clip[prop]; if (node && typeof node === 'object') cbTagNodes.set(node, sc); }); }); } catch (e) {}
+    });
+  }
+  function scopeNodes(scope) {
+    scope = String(scope || ''); if (!scope) return [];
+    if (scope.charAt(0) === '@') { refreshTagNodes(scope); var out = []; cbTagNodes.forEach(function (tag, node) { if (tag === scope) out.push(node); }); return out; }
+    return nodesOf(resolvePart(scope));
+  }
+  function tagsOf(node) { var out = []; for (var n = node; n; n = n.parent) { var t = cbTagNodes.get(n); if (t) out.push(t); } return out; }
+  function inScopeT(partKey, tags, scope) { return scope.charAt(0) === '@' ? tags.indexOf(scope) >= 0 : inScope(partKey, scope); }
   function eachShape(start, fn) {
     var partOf = new Map(); Object.keys(cbParts).forEach(function (k) { nodesOf(cbParts[k]).forEach(function (n) { partOf.set(n, k); }); });
     var seen = new Set();
-    (function visit(node, partKey) {
+    (function visit(node, partKey, tags) {
       if (!node || typeof node !== 'object' || seen.has(node)) return;
       seen.add(node);
-      var key = partOf.get(node) || partKey;
-      if (node.graphics) fn(node, key);
+      var key = partOf.get(node) || partKey, own = cbTagNodes.get(node), mine = own ? tags.concat(own) : tags;
+      if (node.graphics) fn(node, key, mine);
       var kids = node.children || [];
-      for (var i = 0; i < kids.length; i++) visit(kids[i], key);
-      for (var name in node) if (/^(shape|instance)(_\d+)?$/.test(name)) visit(node[name], key);
-      if (node.__cbSwap) visit(node.__cbSwap.inst, key);
-    })(start, '');
+      for (var i = 0; i < kids.length; i++) visit(kids[i], key, mine);
+      for (var name in node) if (/^(shape|instance)(_\d+)?$/.test(name)) visit(node[name], key, mine);
+      if (node.__cbSwap) visit(node.__cbSwap.inst, key, mine);
+    })(start, '', tagsOf(start.parent));
   }
   // "head/hair" is recoloured by rules for "head" and then "head/hair".
   function scopesOf(key) { var out = [], parts = String(key || '').split('/'); for (var i = 1; i <= parts.length; i++) if (parts[0]) out.push(parts.slice(0, i).join('/')); return out; }
   function inScope(partKey, scope) { return scope === '*' || partKey === scope || String(partKey || '').indexOf(scope + '/') === 0; }
   function applyRecolor(list) {
     var root = cbRoot(); if (!root || !window.createjs) return;
+    refreshTagNodes();
     var rules = prepareRules(list), sig = JSON.stringify(list || []);
     var whole = rules.filter(function (r) { return r.scope === '*'; }), byPart = {};
     rules.forEach(function (r) { if (r.scope !== '*') (byPart[r.scope] = byPart[r.scope] || []).push(r); });
     var cached = [];
-    eachShape(root, function (shape, partKey) {
-      var g = shape.graphics, partSig = sig + '|' + partKey;
+    eachShape(root, function (shape, partKey, tags) {
+      var g = shape.graphics, partSig = sig + '|' + partKey + '|' + tags.join(',');
       if (g.__cbSig === partSig) return;
       var active = whole; scopesOf(partKey).forEach(function (sc) { if (byPart[sc]) active = active.concat(byPart[sc]); });
+      tags.forEach(function (tg) { if (byPart[tg]) active = active.concat(byPart[tg]); });
       var list = graphicsList(g);
       for (var i = 0; i < list.length; i++) {
         var ins = list[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
@@ -609,10 +893,11 @@
   // the colour it currently shows. Called directly by the same-origin editor.
   window.cbColorPalette = function (scopeKey) {
     var root = cbRoot(); if (!root || !window.createjs) return [];
-    var scoped = scopeKey ? nodesOf(resolvePart(scopeKey)) : [];
+    refreshTagNodes(scopeKey);
+    var scoped = scopeKey ? scopeNodes(scopeKey) : [];
     var rules = prepareRules(cbColorRules), found = {};
-    (scoped.length ? scoped : [root]).forEach(function (start) { eachShape(start, function (shape, partKey) {
-      var active = rules.filter(function (r) { return inScope(partKey, r.scope); });
+    (scoped.length ? scoped : [root]).forEach(function (start) { eachShape(start, function (shape, partKey, tags) {
+      var active = rules.filter(function (r) { return inScopeT(partKey, tags, r.scope); });
       var list = graphicsList(shape.graphics);
       for (var i = 0; i < list.length; i++) {
         var ins = list[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
@@ -629,6 +914,47 @@
     }); });
     return Object.keys(found).map(function (k) { return found[k]; }).sort(function (a, b) { return (b.fills + b.strokes) - (a.fills + a.strokes); }).slice(0, 80);
   };
+  // Light/Dark (Include Stroke / Include Shadow): what goes with a colour, as original colours.
+  // strokes = the outline colours (darker, same hue or grey) of the shapes filled with it, else of the
+  // part that holds it;
+  // shadows = darker colours of its shading family used as fills (sameFamily: same hue, darker).
+  window.cbColorRelatives = function (hexIn, scopeKey) {
+    var none = { strokes: [], shadows: [] }, root = cbRoot(), base = parseColor(hexIn);
+    if (!root || !window.createjs || !base) return none;
+    var baseHex = hexOf(base), baseHsl = toHsl(base), scoped = scopeKey ? scopeNodes(scopeKey) : [];
+    var strokes = {}, shadows = {}, partsWithBase = {}, strokesByPart = {};
+    // An outline of this colour: darker, and its hue (or grey/black) — not a neighbour's outline drawn
+    // in the same shape (a green lungi's outline next to skin).
+    var outlineOf = function (h) {
+      if (h === baseHex) return false;
+      var c = toHsl(parseColor(h)); if (c.l >= baseHsl.l) return false;
+      if (c.s < .08 || baseHsl.s < .12) return true;
+      var dh = Math.abs(c.h - baseHsl.h); return Math.min(dh, 360 - dh) <= 30;
+    };
+    var colorsOf = function (ins) { var o = originalStyle(ins); if (o == null) return []; return (typeof o === 'string' ? [o] : o.props.colors).map(parseColor).filter(function (c) { return c && c.a >= .05; }).map(hexOf); };
+    (scoped.length ? scoped : [root]).forEach(function (start) { eachShape(start, function (shape, partKey) {
+      var list = graphicsList(shape.graphics), fills = [], lines = [];
+      for (var i = 0; i < list.length; i++) {
+        var ins = list[i];
+        if (ins instanceof createjs.Graphics.Fill) fills = fills.concat(colorsOf(ins));
+        else if (ins instanceof createjs.Graphics.Stroke) lines = lines.concat(colorsOf(ins));
+      }
+      var hasBase = fills.indexOf(baseHex) >= 0;
+      if (hasBase) { partsWithBase[partKey] = 1; lines.forEach(function (h) { if (outlineOf(h)) strokes[h] = 1; }); }
+      var own = strokesByPart[partKey] || (strokesByPart[partKey] = {});
+      lines.forEach(function (h) { own[h] = 1; });
+      fills.forEach(function (h) {
+        if (h === baseHex || shadows[h]) return;
+        var hsl = toHsl(parseColor(h));
+        if (hsl.l < baseHsl.l - .01 && sameFamily(hsl, baseHsl)) shadows[h] = 1;
+      });
+    }); });
+    // Outlines drawn as their own shapes: those of the named parts that hold the colour.
+    if (!Object.keys(strokes).length) Object.keys(partsWithBase).forEach(function (k) {
+      if (k) Object.keys(strokesByPart[k] || {}).forEach(function (h) { if (outlineOf(h)) strokes[h] = 1; });
+    });
+    return { strokes: Object.keys(strokes), shadows: Object.keys(shadows) };
+  };
   // Eyedropper / Lighten-Darken: the original colour of the top-most visible shape under (x, y)
   // (0..1 of the player), like clicking a fill in Animate. Among that shape's fills, the one whose
   // current colour is closest to the drawn pixel. Falls back to the nearest palette colour.
@@ -640,7 +966,8 @@
       var a = d[3] / 255, picked = { r: d[0] / a, g: d[1] / a, b: d[2] / a, a: 1 }, pickedHex = hexOf(picked);
       var dist = function (c) { return Math.pow(c.r - picked.r, 2) + Math.pow(c.g - picked.g, 2) + Math.pow(c.b - picked.b, 2); };
       var rules = prepareRules(cbColorRules);
-      var scoped = scopeKey ? nodesOf(resolvePart(scopeKey)) : [];
+      refreshTagNodes(scopeKey);
+      var scoped = scopeKey ? scopeNodes(scopeKey) : [];
       // Visible shapes on the current frame, in drawing order (later = on top).
       var top = null;
       (scoped.length ? scoped : [root]).forEach(function visitStart(start) { (function visit(node) {
@@ -656,7 +983,8 @@
         // The deepest part (nested parts included) that contains the shape.
         var partKey = '', best = null, bestDist = Infinity;
         for (var n = top; n && !partKey; n = n.parent) Object.keys(cbParts).forEach(function (k) { if (!partKey && nodesOf(cbParts[k]).indexOf(n) >= 0) partKey = k; });
-        var active = rules.filter(function (r) { return inScope(partKey, r.scope); });
+        var topTags = tagsOf(top);
+        var active = rules.filter(function (r) { return inScopeT(partKey, topTags, r.scope); });
         var list = graphicsList(top.graphics);
         for (var i = 0; i < list.length; i++) {
           var ins = list[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
@@ -711,8 +1039,11 @@
       bw = Math.max(1, x1 - x0); bh = Math.max(1, y1 - y0);
       if (cv.width !== bw) cv.width = bw;
       if (cv.height !== bh) cv.height = bh;
-      s.left = (x0 / q) + 'px'; s.top = (y0 / q) + 'px';
-      s.width = (bw / q) + 'px'; s.height = (bh / q) + 'px';
+      // In % of this page (the same CSS px at this size), so when the editor resizes the player
+      // (Transform W / H, scale handles) the drawing follows at once instead of showing at its old
+      // size until the redraw: that one-frame mismatch flickered on every step of a drag.
+      s.left = (x0 / q / cssW * 100) + '%'; s.top = (y0 / q / cssH * 100) + '%';
+      s.width = (bw / q / cssW * 100) + '%'; s.height = (bh / q / cssH * 100) + '%';
       st.scaleX = cssW * q / W; st.scaleY = cssH * q / H;
       st.x = -x0; st.y = -y0;
       if (st.update) st.update();
@@ -741,7 +1072,7 @@
     cbScanCanvas.width = w; cbScanCanvas.height = h;
     var ctx = cbScanCanvas.getContext('2d', { willReadFrequently: true });
     var saved = { sx: st.scaleX, sy: st.scaleY, x: st.x, y: st.y };
-    var helpers = [cbFallbackLayer, cbTintLayer, cbDimLayer].filter(Boolean).map(function (l) { var was = l.visible; l.visible = false; return [l, was]; });
+    var helpers = [cbFallbackLayer, cbTintLayer, cbDimLayer, cbFocusCopy].filter(Boolean).map(function (l) { var was = l.visible; l.visible = false; return [l, was]; });
     var data = null;
     try {
       st.scaleX = w / W; st.scaleY = h / H; st.x = 0; st.y = 0;
@@ -771,11 +1102,10 @@
     var snap = document.createElement('canvas'); snap.width = w; snap.height = h;
     var ctx = snap.getContext('2d');
     var saved = { sx: st.scaleX, sy: st.scaleY, x: st.x, y: st.y, frame: root.currentFrame };
-    var helpers = [cbFallbackLayer, cbTintLayer, cbDimLayer].filter(Boolean).map(function (l) { var was = l.visible; l.visible = false; return [l, was]; });
+    var helpers = [cbFallbackLayer, cbTintLayer, cbDimLayer, cbFocusCopy].filter(Boolean).map(function (l) { var was = l.visible; l.visible = false; return [l, was]; });
     try {
       if (seekMs != null && root.gotoAndStop) {
-        var total = Math.max(1, root.totalFrames || 1), f = Math.max(0, Math.round(Number(seekMs) / 1000 * FPS));
-        root.gotoAndStop(loop && total > 1 ? f % total : Math.min(total - 1, f));
+        root.gotoAndStop(seekPosition(root, seekMs, loop, Math.max(1, root.totalFrames || 1)));
       }
       st.scaleX = w / W; st.scaleY = h / H; st.x = 0; st.y = 0;
       ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, w, h);
@@ -807,6 +1137,9 @@
   // the editor asks for 1.5 px on 1× (Full HD) screens and the video export for 1.5 px of the final
   // frame, which matches Animate's outline weight there (SET_VIEW minStroke).
   var cbMinStroke = 1;
+  // Outline thickness factor of the layer (CHARACTER_EDITS strokeScale): the Transform panel with
+  // "Scale Strokes & Effects" off scales a character but keeps its outlines as thick as they were.
+  var cbStrokeScale = 1;
   function installMinStroke() {
     var G = window.createjs && window.createjs.Graphics, S = G && G.Stroke && G.Stroke.prototype;
     if (!S || S.__cbMinStroke) return;
@@ -818,8 +1151,9 @@
       // ignoreScale strokes are drawn with the transform reset, so their width is already in pixels.
       var scale = 1;
       if (!this.ignoreScale) { var m = ctx.getTransform(); scale = Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) || 1; }
-      if (lw * scale >= cbMinStroke) return exec.call(this, ctx);
-      ctx.lineWidth = cbMinStroke / scale;
+      var width = this.ignoreScale ? lw : lw * cbStrokeScale;
+      if (width === lw && lw * scale >= cbMinStroke) return exec.call(this, ctx);
+      ctx.lineWidth = Math.max(width, cbMinStroke / scale);
       try { return exec.call(this, ctx); } finally { ctx.lineWidth = lw; }
     };
   }
@@ -874,6 +1208,9 @@
   setTimeout(cbTryReady, 180);
   // Animate's responsive handler resizes the canvas on window resize; re-apply our view after it.
   window.addEventListener('resize', function () { setTimeout(applyView, 0); });
+  // Redraw at the new size before the browser paints it (ResizeObserver runs after layout, after
+  // Animate's own resize handler), so a resize never shows a stretched drawing for a frame.
+  if (window.ResizeObserver) new ResizeObserver(function () { if (cbView) refreshView(); }).observe(document.documentElement);
   // The drawing must always match this page's current size and pixel ratio. The ratio changes with
   // the editor's zoom (CSS zoom) and when the window moves to a screen with another density (4K ↔
   // Full HD), which fires no resize: redraw on a ratio change, and check once a second as a backstop.
@@ -890,6 +1227,685 @@
     if (mq.addEventListener) mq.addEventListener('change', onChange);
   })();
   setInterval(refreshView, 1000);
+
+  // ---- Symbol view ("step inside a character", Animate's edit in place; view only). Every level
+  // but the last stays on the frame it was entered at; graphic symbols are switched to their own
+  // timeline (mode independent) so they can show any frame. Everything changed is put back when
+  // the view ends, and the view is applied again after every SEEK.
+  var cbSymbolView = null, cbSymbolSaved = [];
+  function rememberSymbolProp(node, key) {
+    for (var i = 0; i < cbSymbolSaved.length; i++) if (cbSymbolSaved[i].node === node && cbSymbolSaved[i].key === key) return;
+    cbSymbolSaved.push({ node: node, key: key, value: node[key] });
+  }
+  function restoreSymbolView() {
+    for (var i = cbSymbolSaved.length - 1; i >= 0; i--) { try { cbSymbolSaved[i].node[cbSymbolSaved[i].key] = cbSymbolSaved[i].value; } catch (e) {} }
+    cbSymbolSaved = [];
+  }
+  // ---- Edited tween eases (CHARACTER_EDITS.symbolEases: { <class>: { <layer:frame>: { props, frame,
+  // frames, value } } }, value −100 ease in … 100 ease out). Every copy of a symbol in this player
+  // takes the edit; the export's own ease comes back when an edit is removed.
+  var cbEasesKey = '{}', cbEasedSteps = [], cbClipsByClass = null;
+  function clipsOfClass(name) {
+    var root = cbRoot();
+    if (!cbClipsByClass || cbClipsByClass.root !== root) {
+      var names = protoNames(), found = {}, seen = new Set();
+      (function walk(node) {
+        if (seen.has(node)) return;
+        seen.add(node);
+        var own = names.get(Object.getPrototypeOf(node));
+        if (own) (found[own] = found[own] || []).push(node);
+        Object.keys(node).forEach(function (k) { var v = k !== 'parent' && node[k]; if (v && typeof v === 'object' && v.timeline && v.gotoAndStop) walk(v); });
+      })(root);
+      cbClipsByClass = { root: root, found: found };
+    }
+    return cbClipsByClass.found[name] || [];
+  }
+  // ---- Moved and added keyframes (CHARACTER_EDITS.symbolKeys: { <class>: { <layer>: { props, anchors } } },
+  // anchors = every keyframe of the layer as [frame in the file, frame now], an added keyframe being one
+  // the file has none at). The tween steps of the layer's objects follow the anchors piecewise-linearly;
+  // an added keyframe cuts its tween step in two there (splitSteps), so it can hold a value of its own.
+  var cbRetimedSteps = [], cbValueSteps = [];
+  var VALUE_KEYS = ['x', 'y', 'scaleX', 'scaleY', 'skewX', 'skewY', 'alpha', 'regX', 'regY'];
+  // The steps that hold a keyframe's values (by the file's frames): the one that sets them there and the tween that ends there.
+  function valueStepsAt(clip, props, frame) {
+    var out = stepsOf(clip, props).filter(function (step) {
+      var t = step.__ot != null ? step.__ot : step.t, d = step.__od != null ? step.__od : step.d;
+      // A hold (wait) shares its values with the keyframe before it: only a tween's own end belongs to this one.
+      return step.props && !step.props.state && ((d === 0 && Math.abs(t - frame) < 1e-6) || (d > 0 && Math.abs(t + d - frame) < 1e-6 && step.props !== step.prev.props));
+    });
+    // The first frame's values are the tween's starting state (its head), which the first hold shares.
+    if (frame === 0) {
+      var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean);
+      clip.timeline.tweens.forEach(function (tween) { if (targets.indexOf(tween.target) >= 0 && tween._stepHead && tween._stepHead.props) out.push(tween._stepHead); });
+    }
+    return out;
+  }
+  // A press on the stage inside a symbol: which object is there, how its own x / y axes lie on the stage, and where it is.
+  function postDragInfo(d) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, prop = null, info = null;
+    if (st && node) {
+      prop = symbolHit(Number(d.normalizedX || 0), Number(d.normalizedY || 0));
+      var o = prop && prop.charAt(0) !== '#' ? node[prop] : null;
+      if (o && o.localToLocal) {
+        var p0 = node.localToLocal(0, 0, st), px = node.localToLocal(1, 0, st), py = node.localToLocal(0, 1, st);
+        info = { prop: prop, ax: px.x - p0.x, ay: px.y - p0.y, bx: py.x - p0.x, by: py.y - p0.y, x: o.x, y: o.y, W: W, H: H };
+      }
+    }
+    // The part's box comes with the press, so a pick shows its selection box without asking again.
+    var part = null; try { part = info ? partInfoOf(info.prop) : null; } catch (e) {}
+    cbPost('SYMBOL_DRAG_INFO', { token: d.token, info: info, part: part });
+  }
+  // Box selection: the named parts of the open symbol whose box (on the stage) meets the rectangle (fractions of the player).
+  // Parts under a box (SYMBOL_PARTS_IN_RECT): a part is picked when some of its drawn pixels lie inside the box, so the box is
+  // matched against the artwork itself, not the rectangle around it (Animate's marquee).
+  function partTouchesRect(o, x0, y0, x1, y1) {
+    var st = cbStage(), rw = x1 - x0, rh = y1 - y0;
+    if (!st || !(rw > 0) || !(rh > 0) || !o.getConcatenatedMatrix) return false;
+    var k = Math.min(1, 320 / Math.max(rw, rh)), cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.ceil(rw * k)); cv.height = Math.max(1, Math.ceil(rh * k));
+    var ctx = cv.getContext('2d'), m = o.getConcatenatedMatrix(), inv = st.getMatrix ? st.getMatrix() : null;
+    if (inv) { try { inv.invert(); m = m.clone().prependMatrix(inv); } catch (e) {} }
+    ctx.setTransform(k, 0, 0, k, -x0 * k, -y0 * k);
+    ctx.transform(m.a, m.b, m.c, m.d, m.tx, m.ty);
+    try { o.draw(ctx, true); } catch (e) { return false; }
+    var px = ctx.getImageData(0, 0, cv.width, cv.height).data;
+    for (var n = 3; n < px.length; n += 4) if (px[n] > 8) return true;
+    return false;
+  }
+  function postPartsInRect(d) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, out = [];
+    if (st && node) {
+      var x0 = Math.min(d.x0, d.x1) * W, x1 = Math.max(d.x0, d.x1) * W, y0 = Math.min(d.y0, d.y1) * H, y1 = Math.max(d.y0, d.y1) * H;
+      (node.children || []).forEach(function (kid) {
+        if (!kid || kid.visible === false) return;
+        var id = childId(node, kid); if (!id || id.charAt(0) === '#') return;
+        var o = node[id], b = o && (rawBounds(o) || shapeBounds(o)); if (!b || !(b.width > 0) || !(b.height > 0)) return;
+        var pts = [[b.x, b.y], [b.x + b.width, b.y], [b.x + b.width, b.y + b.height], [b.x, b.y + b.height]].map(function (p) { return o.localToLocal(p[0], p[1], st); });
+        var bx0 = Math.min.apply(null, pts.map(function (p) { return p.x; })), bx1 = Math.max.apply(null, pts.map(function (p) { return p.x; }));
+        var by0 = Math.min.apply(null, pts.map(function (p) { return p.y; })), by1 = Math.max.apply(null, pts.map(function (p) { return p.y; }));
+        if (bx1 >= x0 && bx0 <= x1 && by1 >= y0 && by0 <= y1 && partTouchesRect(o, x0, y0, x1, y1)) out.push(id);
+      });
+    }
+    cbPost('SYMBOL_PARTS_RECT', { token: d.token, props: out });
+  }
+  // A part of the open symbol: its own transform, its box, and how its parent sits on the stage (for the handles).
+  // A drawn shape has no bounds of its own: take the extent of its path (control points included).
+  function shapeBounds(o) {
+    if (!o.graphics || !o.graphics.draw) return null;
+    var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    function add(x, y) { if (isFinite(x) && isFinite(y)) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } }
+    var path = { moveTo: add, lineTo: add, quadraticCurveTo: function (a, b, c, e) { add(a, b); add(c, e); }, bezierCurveTo: function (a, b, c, e, f, g) { add(a, b); add(c, e); add(f, g); }, rect: function (x, y, w, h) { add(x, y); add(x + w, y + h); }, arc: function (x, y, r) { add(x - r, y - r); add(x + r, y + r); } };
+    var ctx = new Proxy({}, { get: function (t, k) { return path[k] || function () {}; }, set: function () { return true; } });
+    try { o.graphics.draw(ctx); } catch (e) { return null; }
+    return x1 > x0 && y1 > y0 ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
+  }
+  // A part's transform and box, as the editor's selection box needs them (null when it has none to give).
+  function partInfoOf(prop) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, info = null;
+    var o = st && node && prop && prop.charAt(0) !== '#' ? node[prop] : null;
+    if (o && o.localToLocal) {
+      var b = rawBounds(o) || shapeBounds(o);
+      if (b && b.width > 0 && b.height > 0) {
+        var p0 = node.localToLocal(0, 0, st), px = node.localToLocal(1, 0, st), py = node.localToLocal(0, 1, st);
+        info = { prop: prop, ax: px.x - p0.x, ay: px.y - p0.y, bx: py.x - p0.x, by: py.y - p0.y, p0x: p0.x, p0y: p0.y,
+          x: o.x, y: o.y, sx: o.scaleX, sy: o.scaleY, skx: o.skewX, sky: o.skewY, rot: o.rotation, regX: o.regX, regY: o.regY,
+          bounds: { x: b.x, y: b.y, width: b.width, height: b.height }, W: W, H: H };
+      }
+    }
+    return info;
+  }
+  function postPartInfo(d) {
+    cbPost('SYMBOL_PART_INFO', { token: d.token, info: partInfoOf(String(d.prop || '')) });
+  }
+  function postKeyValues(d) {
+    var clip = clipsOfClass(d.js)[0], values = null;
+    if (clip) {
+      var steps = valueStepsAt(clip, d.props, d.frame), items = steps.length ? [] : stateItemsAt(clip, d.props, d.frame);
+      if (steps.length || items.length) {
+        values = {};
+        VALUE_KEYS.forEach(function (k) {
+          var held = cbValueSteps.filter(function (v) { return v.k === k && (v.item ? items.indexOf(v.item) >= 0 : steps.indexOf(v.step) >= 0); })[0], v;
+          if (held) v = held.item ? (held.old !== undefined ? held.old : held.objOld) : held.old;
+          else if (items.length) v = items[0].p && typeof items[0].p[k] === 'number' ? items[0].p[k] : items[0].t[k];
+          else v = steps[0].props[k];
+          if (typeof v === 'number') values[k] = v;
+        });
+      }
+    }
+    cbPost('SYMBOL_KEY_VALUES', { js: d.js, layer: d.layer, frame: d.frame, token: d.token, values: values });
+  }
+  // The tweens of a layer's objects: ones that move them, and the frame-by-frame "state" tweens that show them.
+  function tweensFor(clip, props) {
+    var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean);
+    return clip.timeline.tweens.filter(function (tween) {
+      if (targets.indexOf(tween.target) >= 0) return true;
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var list = step.props && step.props.state;
+        if (list && list.some && list.some(function (item) { return item && targets.indexOf(item.t) >= 0; })) return true;
+      }
+      return false;
+    });
+  }
+  function stepsOf(clip, props) {
+    var out = [];
+    tweensFor(clip, props).forEach(function (tween) { for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) out.push(step); });
+    return out;
+  }
+  // The drawn parts a frame-by-frame layer shows at a keyframe: its state tween's items for those objects (item.t, and item.p the
+  // values the state sets on it). Editing p edits that keyframe only; an object in several keyframes has p in each of them.
+  function stateItemsAt(clip, props, frame) {
+    var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean), out = [];
+    clip.timeline.tweens.forEach(function (tween) {
+      if (tween.target && tween.target.localToGlobal) return;
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var list = step.props && step.props.state;
+        if (!list || !list.forEach) continue;
+        var t = step.__ot != null ? step.__ot : step.t, d = step.__od != null ? step.__od : step.d;
+        if (!((d === 0 && Math.abs(t - frame) < 1e-6) || (d > 0 && Math.abs(t + d - frame) < 1e-6))) continue;
+        list.forEach(function (item) { if (item && targets.indexOf(item.t) >= 0) out.push(item); });
+      }
+    });
+    return out;
+  }
+  // Does a tween move this layer's object, or does a state show it (so its x, y, scale, rotation and opacity are keyframe values)?
+  function movesObject(clip, props) {
+    var targets = (props || []).map(function (prop) { return clip[prop]; }).filter(Boolean);
+    return clip.timeline.tweens.some(function (tween) {
+      if (targets.indexOf(tween.target) >= 0) return true;
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var list = step.props && step.props.state;
+        if (list && list.some && list.some(function (item) { return item && targets.indexOf(item.t) >= 0; })) return true;
+      }
+      return false;
+    });
+  }
+  // An added keyframe inside a tween: the step is cut in two there, holding the motion exactly (the ease is cut with it).
+  var cbSplitSteps = [];
+  function splitSteps(clip, edit) {
+    var orig = (edit.anchors || []).map(function (a) { return a[0]; });
+    function copyItem(item) { return { t: item.t, p: item.p ? Object.assign({}, item.p) : undefined }; }
+    tweensFor(clip, edit.props).forEach(function (tween) {
+      orig.forEach(function (m) {
+        for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+          var t = step.t, d = step.d;
+          if (!(d > 0 && m > t + 1e-6 && m < t + d - 1e-6) || !step.props) continue;
+          var second;
+          if (step.props.state) {
+            // Drawn parts: the state that holds from here on is a copy of the one showing now, so it can be edited on its own.
+            var showing = step.prev.props && step.prev.props.state;
+            if (!showing) continue;
+            // A shape now in two states needs its values stated in both, or the edited one lingers in the other.
+            var gave = [];
+            showing.forEach(function (item) { if (!item.p) { item.p = {}; VALUE_KEYS.forEach(function (k) { item.p[k] = item.t[k]; }); gave.push(item); } });
+            second = new step.constructor(step, m, t + d - m, step.props, step.ease, step.passive);
+            second.next = step.next; if (step.next) step.next.prev = second;
+            cbSplitSteps.push({ step: step, second: second, tween: tween, d: d, props: step.props, ease: step.ease, gave: gave });
+            step.next = second; step.d = m - t; step.props = { state: showing.map(copyItem) }; step.ease = null;
+          } else if (step.props === step.prev.props) {
+            // A hold: a keyframe in it sets a copy of the values, which the rest of the hold then shares.
+            var values = Object.assign({}, step.props), zero = new step.constructor(step, m, 0, values, null, step.passive);
+            second = new step.constructor(zero, m, t + d - m, values, null, step.passive);
+            second.next = step.next; if (step.next) step.next.prev = second;
+            zero.next = second;
+            cbSplitSteps.push({ step: step, second: second, tween: tween, d: d, props: step.props, ease: step.ease });
+            step.next = zero; step.d = m - t;
+          } else {
+            var a = (m - t) / d, e = step.ease, p0 = step.prev.props, p1 = step.props, ea = e ? e(a, 0, 1, 1) : a, mid = {}, k;
+            for (k in p1) mid[k] = p1[k];
+            for (k in p0) mid[k] = (typeof p0[k] === 'number' && typeof p1[k] === 'number' && p0[k] !== p1[k]) ? p0[k] + (p1[k] - p0[k]) * ea : p0[k];
+            var flat = Math.abs(ea) < 1e-9 || Math.abs(1 - ea) < 1e-9;
+            var e1 = e && !flat ? function (x) { return e(x * a, 0, 1, 1) / ea; } : null;
+            var e2 = e && !flat ? function (x) { return (e(a + x * (1 - a), 0, 1, 1) - ea) / (1 - ea); } : null;
+            second = new step.constructor(step, m, t + d - m, p1, e2, step.passive);
+            second.next = step.next; if (step.next) step.next.prev = second;
+            cbSplitSteps.push({ step: step, second: second, tween: tween, d: d, props: p1, ease: e });
+            step.next = second; step.d = m - t; step.props = mid; step.ease = e1;
+          }
+          if (tween._stepTail === step) tween._stepTail = second;
+          break;
+        }
+      });
+    });
+  }
+  function retimeSteps(clip, edit, touched) {
+    var anchors = edit.anchors || [], orig = anchors.map(function (a) { return a[0]; }), now = anchors.map(function (a) { return a[1]; });
+    if (anchors.length < 2) return;
+    function through(x, from, to) {
+      if (x <= from[0]) return to[0] + (x - from[0]);
+      for (var i = 0; i + 1 < from.length; i++) if (x <= from[i + 1]) return to[i] + (x - from[i]) * (to[i + 1] - to[i]) / ((from[i + 1] - from[i]) || 1);
+      return to[to.length - 1] + (x - from[from.length - 1]);
+    }
+    stepsOf(clip, edit.props).forEach(function (step) {
+      var t = step.t, d = step.d, start = through(t, orig, now), end = through(t + d, orig, now);
+      cbRetimedSteps.push({ step: step, clip: clip, t: t, d: d, ease: step.ease });
+      step.__ot = t; step.__od = d;
+      step.t = start; step.d = end - start;
+      touched.add(clip);
+    });
+  }
+  // Which layers' keyframes can be edited here: each of their keyframes is the start or end of a tween step.
+  function keyEditable(clip, props, frames) {
+    var steps = stepsOf(clip, props);
+    if (!steps.length) return false;
+    return frames.every(function (f) { return steps.some(function (st) { return st.t === f || st.t + st.d === f; }); });
+  }
+  function postKeyEditable(d) {
+    var found = {}, moves = {}, drawn = {};
+    clipsOfClass(d.js).slice(0, 1).forEach(function (clip) {
+      (d.layers || []).forEach(function (l) { found[l.index] = keyEditable(clip, l.props, l.frames || []); moves[l.index] = movesObject(clip, l.props); drawn[l.index] = !clip.timeline.tweens.some(function (tween) { return (l.props || []).some(function (prop) { return clip[prop] && tween.target === clip[prop]; }); }); });
+    });
+    cbPost('SYMBOL_KEYS_EDITABLE', { js: d.js, token: d.token, editable: found, moves: moves, drawn: drawn });
+  }
+  // ---- Layers (CHARACTER_EDITS.symbolLayers: { <class>: { order: [[props of a layer], …] top to bottom, hidden: [props] } }).
+  // A pose draws its layers by its animations in order: the first ends up on top. Reordering layers reorders them, and hiding one
+  // hides its objects. Both are undone when the edit goes.
+  var cbLayerState = { orig: new Map(), hidden: [] };
+  // Duplicate Layer (symbolLayers[class].spec.clones: [{ of: <object's name>, prop: <name of the copy> }]): the copy is a new object of the
+  // same symbol on the same clip, with its own copy of the layer's tweens, named so that every edit finds it like any other layer.
+  var cbClones = [];
+  function cloneTween(tween, target) {
+    var made = createjs.Tween.get(target), same = new Map(), head = tween._stepHead;
+    var give = function (props) { var copy = same.get(props); if (!copy) { copy = Object.assign({}, props); same.set(props, copy); } return copy; };
+    if (head && head.props && Object.keys(head.props).length) made.to(give(head.props), 0);
+    for (var step = head && head.next, prev = head; step; prev = step, step = step.next) {
+      if (prev && step.props === prev.props) { if (step.d > 0) made.wait(step.d); } else made.to(give(step.props), step.d, step.ease || undefined);
+    }
+    return made;
+  }
+  // New layer from the pose's library (clones: [{ of: '', symbol: <library class>, prop }]): one instance of the symbol, centred on the
+  // stage, held by one keyframe for the whole pose, on top of the file's layers.
+  function pictureObject(image, clip) {
+    // A picture is a container with the image inside, sized to fit about 40% of the stage and centred on the container's origin.
+    var box = new createjs.Container(), iw = Math.max(1, image.w || 100), ih = Math.max(1, image.h || 100);
+    var fit = image.keep ? 1 : Math.min(1, (H * 0.4) / ih, (W * 0.4) / iw), pw = iw * fit, ph = ih * fit;
+    // A pasted part keeps the size it had on the stage: its size is in stage units, so undo the scale of the clip it lands in.
+    if (image.keep && clip && clip.getConcatenatedMatrix) { var cm = clip.getConcatenatedMatrix(), st0 = cbStage(), kk = (st0 && st0.scaleX) || 1, cs = Math.hypot(cm.a, cm.b) / kk; if (cs > 0) { pw /= cs; ph /= (Math.hypot(cm.c, cm.d) / kk) || cs; } }
+    box.nominalBounds = new createjs.Rectangle(-pw / 2, -ph / 2, pw, ph);
+    box.setBounds(-pw / 2, -ph / 2, pw, ph);
+    var img = new Image();
+    img.onload = function () {
+      var bmp = new createjs.Bitmap(img), k = pw / (img.naturalWidth || iw);
+      bmp.scaleX = bmp.scaleY = k; bmp.x = -pw / 2; bmp.y = -ph / 2;
+      box.addChild(bmp);
+      var st = cbStage(); if (st && st.update) st.update();
+      cbPost('SYMBOL_PICTURE_READY', { url: image.url });
+    };
+    img.src = image.url;
+    return box;
+  }
+  // Another character's export file, loaded into this page when one of its parts is pasted here: its symbols are real vector symbols
+  // and draw as they do in their own file. Returns its library once loaded (null while loading); the layers are added when it arrives.
+  var cbExtLibs = {};
+  function extLib(url) {
+    var got = cbExtLibs[url];
+    if (got && typeof got === 'object') return got;
+    if (got) return null;
+    cbExtLibs[url] = 'loading';
+    var an = window.AdobeAn, before = Object.keys((an && an.compositions) || {}), el = document.createElement('script');
+    el.onload = function () {
+      var now = window.AdobeAn, added = Object.keys((now && now.compositions) || {}).filter(function (id) { return before.indexOf(id) < 0; }), lib = null;
+      try { if (added.length) lib = now.compositions[added[0]].getLibrary(); } catch (e) {}
+      cbExtLibs[url] = lib || 'failed';
+      if (cbLastEdits) { cbEasesKey = ''; try { handleEdits(cbLastEdits); } catch (e) { } }
+    };
+    el.onerror = function () { cbExtLibs[url] = 'failed'; };
+    el.src = url;
+    document.head.appendChild(el);
+    return null;
+  }
+  function addLibraryLayer(w, touched) {
+    var obj, ext = null, Ctor = null, sc = 1;
+    if (w.foreign) { ext = extLib(w.foreign.lib); if (!ext) return; Ctor = ext[w.symbol]; if (typeof Ctor !== 'function') return; }
+    else Ctor = w.symbol ? libSymbol(w.symbol) : null;
+    if (w.symbol && !Ctor) return;
+    obj = w.symbol ? (w.foreign ? new Ctor(w.foreign.mode, w.foreign.frame, w.foreign.loop) : new Ctor()) : pictureObject(w.image, w.clip);
+    if (w.foreign) {
+      // It keeps the size it had on the stage: undo the scale of the clip it lands in.
+      try { var cm = w.clip.getConcatenatedMatrix(), st0 = cbStage(), kk = (st0 && st0.scaleX) || 1, cs = Math.hypot(cm.a, cm.b) / kk; if (cs > 0) sc = (w.foreign.scale || 1) / cs; } catch (e) {}
+    }
+    var total = Math.max(1, w.clip.timeline.duration || w.clip.totalFrames || 1), shown = w.end > 0 ? Math.min(total, w.end) : total, x = 0, y = 0;
+    try { var b = obj.nominalBounds || (obj.getBounds && obj.getBounds()); if (b) { x = W / 2 - (b.x + b.width / 2) * sc; y = H / 2 - (b.y + b.height / 2) * sc; } } catch (e) {}
+    var made = createjs.Tween.get(obj).to({ x: x, y: y, scaleX: sc, scaleY: sc, skewX: 0, skewY: 0, alpha: 1 }, 0);
+    // It shows on frames 0 … shown - 1, so the step that hides it sits on frame `shown` (where the layer's blank keyframe is).
+    if (shown < total) { made.wait(shown); made.to({ _off: true }, 0); if (total - shown > 1) made.wait(total - shown - 1); }
+    else if (shown > 1) made.wait(shown - 1);
+    w.clip.timeline.addTween(made);
+    var list = w.clip.timeline.tweens, from = list.indexOf(made);
+    if (from >= 0) list.splice(from, 1);
+    list.unshift(made);
+    w.clip[w.prop] = obj;
+    cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: w.symbol, image: w.image ? w.image.url : '', lib: w.foreign ? w.foreign.lib : '', end: w.end || 0, obj: obj, tweens: [made] });
+    touched.add(w.clip);
+  }
+  // The part of the open symbol as another character's pose can take it: its symbol, the export file it comes from, how it stands.
+  function postPartSource(d) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, o = node && d.prop ? node[d.prop] : null, out = { token: d.token, symbol: '' };
+    try {
+      var name = o && protoNames().get(Object.getPrototypeOf(o));
+      var scripts = [].slice.call(document.querySelectorAll('script[src]')).map(function (e) { return e.getAttribute('src'); }).filter(function (u) { return !/\/vendor\//.test(u) && /\.js(\?|$)/.test(u); });
+      if (name && scripts.length) {
+        var m = o.getConcatenatedMatrix(), kst = (st && st.scaleX) || 1;
+        out.symbol = name; out.lib = scripts[0]; out.scale = Math.hypot(m.a, m.b) / kst; out.frame = o.currentFrame || 0; out.mode = o.mode; out.loop = o.loop;
+      }
+    } catch (e) {}
+    cbPost('SYMBOL_PART_SOURCE', out);
+  }
+  // A picture of one part of the open symbol, as it looks now (colour edits included), for pasting into another character's pose.
+  // w / h are its size on the stage, so the paste keeps the size it had.
+  function postPartPicture(d) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node, o = node && d.prop ? node[d.prop] : null, out = { token: d.token, url: '', w: 0, h: 0 };
+    try {
+      var b = o && (rawBounds(o) || shapeBounds(o));
+      out.why = !node ? 'no open symbol' : !o ? 'no part ' + d.prop : !b ? 'no bounds' : 'ok';
+      if (b && b.width > 0 && b.height > 0) {
+        var m = o.getConcatenatedMatrix ? o.getConcatenatedMatrix() : null, kst = (st && Math.hypot(st.scaleX || 1, st.skewX || 0)) || 1, sx = m ? Math.hypot(m.a, m.b) / kst : 1, sy = m ? Math.hypot(m.c, m.d) / kst : 1;
+        var k = Math.min(4, 2048 / Math.max(b.width * sx, b.height * sy, 1)) * kst, cv = document.createElement('canvas');
+        cv.width = Math.max(1, Math.ceil(b.width * sx * k)); cv.height = Math.max(1, Math.ceil(b.height * sy * k));
+        var ctx = cv.getContext('2d'); ctx.scale(sx * k, sy * k); ctx.translate(-b.x, -b.y);
+        o.draw(ctx, true);
+        out.url = cv.toDataURL('image/png'); out.w = b.width * sx; out.h = b.height * sy;
+      }
+    } catch (e) { out.why = 'error ' + e; }
+    cbPost('SYMBOL_PART_PICTURE', out);
+  }
+  function postLibrary(d) {
+    protoNames();
+    var names = [], seen = {};
+    cbLibs.forEach(function (lib) { Object.keys(lib || {}).forEach(function (n) { var f = lib[n]; if (seen[n] || typeof f !== 'function' || !f.prototype) return; try { if (f.prototype instanceof createjs.MovieClip && n.charAt(0) !== '_' && !GENERIC_SYMBOL.test(n)) { seen[n] = 1; names.push(n); } } catch (e) {} }); });
+    names.sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; });
+    cbPost('SYMBOL_LIBRARY', { token: d.token, names: names.slice(0, 500) });
+  }
+  function syncClones(specs, touched) {
+    var want = [];
+    Object.keys(specs || {}).forEach(function (name) {
+      var list = (specs[name] || {}).clones || [];
+      if (list.length) clipsOfClass(name).forEach(function (clip) { list.forEach(function (c) { want.push({ clip: clip, of: c.of, prop: c.prop, symbol: c.symbol || '', image: c.image || null, foreign: c.foreign || null, end: c.end || 0 }); }); });
+    });
+    var changed = false;
+    cbClones = cbClones.filter(function (made) {
+      if (want.some(function (w) { return w.clip === made.clip && w.prop === made.prop && w.of === made.of && w.symbol === made.symbol && (w.image ? w.image.url : '') === (made.image || '') && (w.foreign ? w.foreign.lib : '') === (made.lib || '') && (w.end || 0) === (made.end || 0); })) return true;
+      var list = made.clip.timeline.tweens;
+      made.tweens.forEach(function (tw) { var at = list.indexOf(tw); if (at >= 0) list.splice(at, 1); });
+      try { made.clip.removeChild(made.obj); if (made.clip._managed) delete made.clip._managed[made.obj.id]; } catch (e) {}
+      delete made.clip[made.prop];
+      touched.add(made.clip);
+      changed = true;
+      return false;
+    });
+    want.forEach(function (w) {
+      if (cbClones.some(function (made) { return made.clip === w.clip && made.prop === w.prop; })) return;
+      if (w.symbol || w.image) { addLibraryLayer(w, touched); changed = true; return; }
+      var src = w.clip[w.of], Ctor = src && libSymbol(protoNames().get(Object.getPrototypeOf(src)) || '');
+      if (!Ctor) return;
+      var obj = new Ctor(src.mode, src.startPosition, src.loop), list = w.clip.timeline.tweens, own = [];
+      var at = list.findIndex(function (tw) { return tw.target === src; });
+      tweensFor(w.clip, [w.of]).forEach(function (tw) { if (tw.target !== src) return; var made = cloneTween(tw, obj); w.clip.timeline.addTween(made); own.push(made); });
+      // Just above the layer it copies: the first tween ends up on top.
+      own.forEach(function (tw) { var from = list.indexOf(tw); if (from >= 0) list.splice(from, 1); });
+      list.splice(at >= 0 ? at : 0, 0, ...own);
+      w.clip[w.prop] = obj;
+      cbClones.push({ clip: w.clip, of: w.of, prop: w.prop, symbol: '', image: '', obj: obj, tweens: own });
+      touched.add(w.clip);
+      changed = true;
+    });
+    // The editor asked which layers are editable before these existed (a pasted part's file loads late): it asks again.
+    if (changed) { cbClipsByClass = null; cbPost('SYMBOL_CLONES_CHANGED', {}); }
+  }
+  function restoreLayerOrder(touched) {
+    cbLayerState.orig.forEach(function (tweens, clip) { var list = clip.timeline.tweens; list.length = 0; tweens.forEach(function (tw) { list.push(tw); }); touched.add(clip); });
+    cbLayerState.orig = new Map();
+  }
+  function applySymbolLayers(specs, touched) {
+    Object.keys(specs || {}).forEach(function (name) {
+      var spec = specs[name] || {};
+      clipsOfClass(name).forEach(function (clip) {
+        if (spec.order && spec.order.length) {
+          var list = clip.timeline.tweens, used = new Set(), grouped = [];
+          spec.order.forEach(function (props) { tweensFor(clip, props).forEach(function (tw) { if (!used.has(tw)) { used.add(tw); grouped.push(tw); } }); });
+          var rest = list.filter(function (tw) { return !used.has(tw); });
+          cbLayerState.orig.set(clip, list.slice());
+          var next = rest.concat(grouped);
+          list.length = 0; next.forEach(function (tw) { list.push(tw); });
+          touched.add(clip);
+        }
+      });
+    });
+  }
+  // Hidden layers: their objects are hidden after the part edits have run (they set every part's visibility again each time), and
+  // shown again when the layer is no longer hidden.
+  function applyLayerVisibility(specs) {
+    cbLayerState.hidden.forEach(function (h) { h.o.visible = h.was; });
+    cbLayerState.hidden = [];
+    Object.keys(specs || {}).forEach(function (name) {
+      var hidden = (specs[name] || {}).hidden || [];
+      if (!hidden.length) return;
+      clipsOfClass(name).forEach(function (clip) {
+        hidden.forEach(function (prop) {
+          var o = clip[prop];
+          if (o && o.localToGlobal) { cbLayerState.hidden.push({ o: o, was: o.visible === false ? true : o.visible, clip: clip }); o.visible = false; }
+        });
+      });
+    });
+  }
+  // ---- Tweens made in the editor (symbolKeys[class][layer].tweens: [[file frame of the keyframe it starts at, ease −100…100], …]).
+  // Create Classic Tween on a span that holds still: the hold up to the next keyframe becomes a tween step toward that keyframe's
+  // values. A keyframe inside a run of such tweens that has no value of its own gets the tweened one (so a keyframe added there
+  // holds where the motion is); the eased value is worked out between the nearest keyframes that do.
+  var cbTweenSteps = [], cbBlankProps = [];
+  // ---- Blank keyframes made in the editor (symbolKeys[class][layer].blanks: file frames of the keyframes that show nothing).
+  // The layer's object is hidden from a blank keyframe up to the next keyframe: the values of every step say whether it shows (_off),
+  // so it holds whichever way the timeline is seeked. A step that tweens takes the state of the keyframe it ends on.
+  function applyBlanks(clip, edit, touched) {
+    var blanks = edit.blanks || [], anchors = edit.anchors || [], keys = [], q;
+    if (!blanks.length) return;
+    for (q = 0; q + 1 < anchors.length; q++) if (anchors[q + 1][1] > anchors[q][1]) keys.push(q);
+    var spans = [];
+    keys.forEach(function (i, pos) {
+      if (blanks.some(function (b) { return Math.abs(b - anchors[i][0]) < 1e-9; })) spans.push([anchors[i][0], pos + 1 < keys.length ? anchors[keys[pos + 1]][0] : Infinity]);
+    });
+    if (!spans.length) return;
+    function hiddenAt(time) { return spans.some(function (sp) { return time >= sp[0] - 1e-6 && time < sp[1] - 1e-6; }); }
+    var seen = new Set();
+    function mark(props, hidden) {
+      if (!props || props.state || seen.has(props)) return;
+      seen.add(props);
+      // An object the file (or a layer's end) already hides stays hidden.
+      if (!hidden && Object.prototype.hasOwnProperty.call(props, '_off')) return;
+      cbBlankProps.push({ props: props, had: Object.prototype.hasOwnProperty.call(props, '_off'), old: props._off });
+      props._off = hidden;
+    }
+    tweensFor(clip, edit.props).forEach(function (tween) {
+      if (tween._stepHead) mark(tween._stepHead.props, hiddenAt(0));
+      // The tween's own records of the properties it drives (initial, and where it ends up) know _off too.
+      [['_initQueueProps', hiddenAt(0)], ['_curQueueProps', spans.some(function (sp) { return sp[1] === Infinity; })]].forEach(function (pair) {
+        var rec = tween[pair[0]];
+        if (!rec || typeof rec !== 'object') return;
+        cbBlankProps.push({ props: rec, had: Object.prototype.hasOwnProperty.call(rec, '_off'), old: rec._off });
+        rec._off = pair[1];
+      });
+      for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+        var tweens = step.d > 0 && step.prev && step.props !== step.prev.props;
+        mark(step.props, hiddenAt(tweens ? step.t + step.d : step.t));
+      }
+      touched.add(clip);
+    });
+  }
+  function easeAmount(v) {
+    var a = Math.max(-1, Math.min(1, (v || 0) / 100));
+    return function (t) { return !a ? t : a < 0 ? t * (t * -a + 1 + a) : t * ((2 - t) * a + (1 - a)); };
+  }
+  function applyMadeTweens(clip, edit, entries, touched) {
+    var made = edit.tweens || [], anchors = edit.anchors || [], keys = [], q;
+    if (!made.length || anchors.length < 3) return;
+    for (q = 0; q + 1 < anchors.length; q++) if (anchors[q + 1][1] > anchors[q][1]) keys.push(q);
+    var frames = keys.map(function (i) { return anchors[i][0]; });
+    function easeOf(pos) { var m = made.filter(function (e) { return Math.abs(e[0] - frames[pos]) < 1e-9; })[0]; return m ? m[1] : null; }
+    var tweened = frames.map(function (f, pos) { return pos + 1 < frames.length && easeOf(pos) != null; });
+    function explicit(frame, prop) {
+      return Object.keys(entries || {}).some(function (k) { var e = entries[k]; return e && e.props && e.props[0] === edit.props[0] && Math.abs(e.frame - frame) < 1e-6 && e.v && typeof e.v[prop] === 'number'; });
+    }
+    tweensFor(clip, edit.props).forEach(function (tween) {
+      var list = [], step;
+      for (step = tween._stepHead && tween._stepHead.next; step; step = step.next) list.push(step);
+      function plain(s2) { return s2.props && !s2.props.state; }
+      function zeroAt(f) { return list.filter(function (s2) { return s2.d === 0 && plain(s2) && Math.abs(s2.t - f) < 1e-6; })[0]; }
+      function holdStarting(f) { return list.filter(function (s2) { return s2.d > 0 && plain(s2) && s2.prev && s2.props === s2.prev.props && Math.abs(s2.t - f) < 1e-6; })[0]; }
+      function holdTo(f) { return list.filter(function (s2) { return s2.d > 0 && plain(s2) && s2.prev && s2.props === s2.prev.props && Math.abs(s2.t + s2.d - f) < 1e-6 && s2.next && s2.next.d === 0 && plain(s2.next) && s2.next.props !== s2.props && Math.abs(s2.next.t - f) < 1e-6; })[0]; }
+      function valuesAt(pos) { var z = zeroAt(frames[pos]), h = z || holdStarting(frames[pos]); return h ? h.props : null; }
+      var owner = clip[(edit.props || [])[0]];
+      for (var pos = 1; pos + 1 < frames.length; pos++) {
+        if (!(tweened[pos - 1] && tweened[pos])) continue;
+        var z = zeroAt(frames[pos]); if (!z) continue;
+        VALUE_KEYS.forEach(function (prop) {
+          if (explicit(frames[pos], prop)) return;
+          var l = pos - 1, r = pos + 1;
+          while (l > 0 && tweened[l - 1] && !explicit(frames[l], prop)) l--;
+          while (r + 1 < frames.length && tweened[r] && !explicit(frames[r], prop)) r++;
+          var pl = valuesAt(l), pr = valuesAt(r);
+          if (!pl || !pr || typeof pl[prop] !== 'number' || typeof pr[prop] !== 'number' || pl[prop] === pr[prop]) return;
+          var f = (frames[pos] - frames[l]) / ((frames[r] - frames[l]) || 1), v = pl[prop] + (pr[prop] - pl[prop]) * easeAmount(easeOf(l))(f);
+          cbValueSteps.push({ step: z, clip: clip, k: prop, old: z.props[prop], had: Object.prototype.hasOwnProperty.call(z.props, prop), target: owner, targetOld: owner ? owner[prop] : undefined });
+          z.props[prop] = v;
+        });
+      }
+      for (pos = 0; pos + 1 < frames.length; pos++) {
+        if (!tweened[pos]) continue;
+        var hold = holdTo(frames[pos + 1]), end = hold && hold.next;
+        if (!hold || !end) continue;
+        cbTweenSteps.push({ step: hold, props: hold.props, ease: hold.ease });
+        hold.props = end.props;
+        var amount = easeOf(pos);
+        hold.ease = amount ? createjs.Ease.get(amount / 100) : null;
+        touched.add(clip);
+      }
+    });
+  }
+  function applySymbolEdits(eases, keys, values, layerSpecs) {
+    var key = JSON.stringify([eases || {}, keys || {}, values || {}, layerSpecs || {}]), root = cbRoot();
+    if (key === cbEasesKey || !root) return;
+    cbEasesKey = key;
+    var clips = new Set();
+    cbRetimedSteps.reverse().forEach(function (r) { r.step.t = r.t; r.step.d = r.d; r.step.ease = r.ease; delete r.step.__ot; delete r.step.__od; clips.add(r.clip); });
+    cbTweenSteps.reverse().forEach(function (r) { r.step.props = r.props; r.step.ease = r.ease; });
+    cbTweenSteps = [];
+    cbBlankProps.reverse().forEach(function (r) { if (r.had) r.props._off = r.old; else delete r.props._off; });
+    cbBlankProps = [];
+    cbValueSteps.reverse().forEach(function (v) {
+      if (v.item) {
+        if (!v.hadP) delete v.item.p; else if (v.old === undefined) delete v.item.p[v.k]; else v.item.p[v.k] = v.old;
+        if (v.objOld !== undefined) v.item.t[v.k] = v.objOld;
+      } else if (v.had) v.step.props[v.k] = v.old;
+      else { delete v.step.props[v.k]; if (v.target && typeof v.targetOld === 'number') v.target[v.k] = v.targetOld; }
+      clips.add(v.clip);
+    });
+    cbValueSteps = [];
+    cbSplitSteps.reverse().forEach(function (sp) {
+      var step = sp.step; step.d = sp.d; step.props = sp.props; step.ease = sp.ease;
+      (sp.gave || []).forEach(function (item) { delete item.p; });
+      step.next = sp.second.next; if (sp.second.next) sp.second.next.prev = step;
+      if (sp.tween._stepTail === sp.second) sp.tween._stepTail = step;
+    });
+    cbSplitSteps = [];
+    cbRetimedSteps = [];
+    restoreLayerOrder(clips);
+    syncClones(layerSpecs, clips);
+    cbEasedSteps.forEach(function (eased) { eased.step.ease = eased.ease; clips.add(eased.clip); });
+    cbEasedSteps = [];
+    Object.keys(eases || {}).forEach(function (name) {
+      var entries = eases[name] || {};
+      clipsOfClass(name).forEach(function (clip) {
+        Object.keys(entries).forEach(function (k) {
+          var edit = entries[k], targets = (edit.props || []).map(function (prop) { return clip[prop]; });
+          clip.timeline.tweens.forEach(function (tween) {
+            if (targets.indexOf(tween.target) < 0) return;
+            for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
+              if (step.t !== edit.frame || step.d !== edit.frames) continue;
+              cbEasedSteps.push({ step: step, clip: clip, ease: step.ease });
+              step.ease = edit.value ? createjs.Ease.get(edit.value / 100) : null;
+              clips.add(clip);
+            }
+          });
+        });
+      });
+    });
+    Object.keys(keys || {}).forEach(function (name) {
+      var layers = keys[name] || {};
+      clipsOfClass(name).forEach(function (clip) { Object.keys(layers).forEach(function (index) { splitSteps(clip, layers[index]); clips.add(clip); }); });
+    });
+    Object.keys(values || {}).forEach(function (name) {
+      var entries = values[name] || {};
+      clipsOfClass(name).forEach(function (clip) {
+        Object.keys(entries).forEach(function (k) {
+          var edit = entries[k];
+          stateItemsAt(clip, edit.props, edit.frame).forEach(function (item) {
+            Object.keys(edit.v || {}).forEach(function (prop) {
+              if (VALUE_KEYS.indexOf(prop) < 0 || typeof edit.v[prop] !== 'number') return;
+              cbValueSteps.push({ item: item, clip: clip, k: prop, hadP: !!item.p, old: item.p ? item.p[prop] : undefined, objOld: item.t[prop] });
+              if (!item.p) item.p = {};
+              item.p[prop] = edit.v[prop];
+              clips.add(clip);
+            });
+          });
+          valueStepsAt(clip, edit.props, edit.frame).forEach(function (step) {
+            Object.keys(edit.v || {}).forEach(function (prop) {
+              if (VALUE_KEYS.indexOf(prop) < 0 || typeof edit.v[prop] !== 'number') return;
+              var owner = clip[(edit.props || [])[0]];
+              cbValueSteps.push({ step: step, clip: clip, k: prop, old: step.props[prop], had: Object.prototype.hasOwnProperty.call(step.props, prop), target: owner, targetOld: owner ? owner[prop] : undefined });
+              step.props[prop] = edit.v[prop];
+              clips.add(clip);
+            });
+          });
+        });
+      });
+    });
+    Object.keys(keys || {}).forEach(function (name) {
+      var layers = keys[name] || {};
+      clipsOfClass(name).forEach(function (clip) { Object.keys(layers).forEach(function (index) { applyBlanks(clip, layers[index], clips); applyMadeTweens(clip, layers[index], (values || {})[name], clips); }); });
+    });
+    Object.keys(keys || {}).forEach(function (name) {
+      var layers = keys[name] || {};
+      clipsOfClass(name).forEach(function (clip) { Object.keys(layers).forEach(function (index) { retimeSteps(clip, layers[index], clips); }); });
+    });
+    applySymbolLayers(layerSpecs, clips);
+    // An independent clip only redoes its timeline when its position changes (synched ones do when drawn).
+    clips.forEach(function (clip) {
+      // A timeline, and each of its tweens, asked for the position it already holds does nothing: make them run again for the changed values.
+      try { clip.timeline.rawPosition = -1; clip.timeline.tweens.forEach(function (tween) { tween.rawPosition = -1; }); } catch (e) {}
+      if (clip.mode !== 'independent' || !(clip._rawPosition >= 0)) return;
+      var at = clip._rawPosition;
+      clip._rawPosition = NaN;
+      clip._updateTimeline(at, true);
+    });
+    if (cbSymbolView) applySymbolView();
+  }
+  function applySymbolView() {
+    var root = cbRoot(); if (!cbSymbolView || !root) return;
+    var levels = cbSymbolView.levels || [], node = root;
+    for (var i = 0; i < levels.length; i++) {
+      if (i > 0) {
+        var props = levels[i].props || [], next = null, k;
+        for (k = 0; k < props.length && !next; k++) { var c = node[props[k]]; if (c && !c._off && c.parent) next = c; }
+        for (k = 0; k < props.length && !next; k++) if (node[props[k]]) next = node[props[k]];
+        if (!next) break;
+        node = next;
+        if (node.mode != null && node.mode !== 'independent') { rememberSymbolProp(node, 'mode'); node.mode = 'independent'; }
+        if (node.autoReset) { rememberSymbolProp(node, 'autoReset'); node.autoReset = false; }
+      }
+      if (node.gotoAndStop) { var total = Math.max(1, node.totalFrames || 1); node.gotoAndStop(clamp(Math.round(Number(levels[i].frame) || 0), 0, total - 1)); }
+    }
+    cbSymbolView.node = node;
+    (cbSymbolView.hidden || []).forEach(function (prop) { var o = node[prop]; if (o && looksDisplayObject(o)) { rememberSymbolProp(o, 'visible'); o.visible = false; } });
+  }
+  function symbolHit(x, y) {
+    var st = cbStage(), node = cbSymbolView && cbSymbolView.node;
+    if (!st || !node || !st.localToGlobal) return null;
+    var g = st.localToGlobal(x * W, y * H), kids = node.children || [];
+    for (var i = kids.length - 1; i >= 0; i--) {
+      var kid = kids[i]; if (!kid || kid.visible === false || !kid.hitTest || !kid.globalToLocal) continue;
+      try { var l = kid.globalToLocal(g.x, g.y); if (kid.hitTest(l.x, l.y)) return childId(node, kid); } catch (e) {}
+    }
+    return null;
+  }
 
   window.addEventListener('message', function (event) {
     var d = event.data || {};
@@ -912,10 +1928,20 @@
     try {
       // loop: wrap past the last frame (Animate "Loop"); otherwise hold the last frame ("Play Once").
       // SEEK_DONE tells the video export (render harness) the frame is drawn and can be captured.
-      if (d.type === 'SEEK') { var f = Math.max(0, Math.round(Number(d.seekMs || 0) / 1000 * FPS)), total = Math.max(1, root.totalFrames || 1); if (root.gotoAndStop) root.gotoAndStop(d.loop && total > 1 ? f % total : Math.min(total - 1, f)); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
+      if (d.type === 'SEEK') { if (root.gotoAndStop) root.gotoAndStop(seekPosition(root, d.seekMs, d.loop, Math.max(1, root.totalFrames || 1))); if (cbSymbolView) applySymbolView(); if (cbOnlyParts.length) applyOnly(); refreshBounds(); if (cbFocusPart) applyFocus(); if (st && st.update) st.update(); scheduleBounds(); cbPost('SEEK_DONE', { seekMs: Number(d.seekMs || 0), token: d.token }); }
+      else if (d.type === 'SYMBOL_KEYS_QUERY') { postKeyEditable(d); }
+      else if (d.type === 'SYMBOL_VALUES_QUERY') { postKeyValues(d); }
+      else if (d.type === 'SYMBOL_DRAG_BEGIN') { postDragInfo(d); }
+      else if (d.type === 'SYMBOL_PART_QUERY') { postPartInfo(d); }
+      else if (d.type === 'SYMBOL_LIBRARY_QUERY') { postLibrary(d); }
+      else if (d.type === 'SYMBOL_PART_PICTURE_QUERY') { postPartPicture(d); }
+      else if (d.type === 'SYMBOL_PART_SOURCE_QUERY') { postPartSource(d); }
+      else if (d.type === 'SYMBOL_PARTS_IN_RECT') { postPartsInRect(d); }
       else if (d.type === 'PAUSE') { if (root.stop) root.stop(); }
       else if (d.type === 'PLAY') { if (root.play) root.play(); }
-      else if (d.type === 'CHARACTER_EDITS') { cbLastOv = d.partOverrides || {}; applyEdits(d); scheduleBounds(); }
+      else if (d.type === 'CHARACTER_EDITS') { handleEdits(d); }
+      else if (d.type === 'SYMBOL_VIEW') { restoreSymbolView(); cbSymbolView = d.view || null; applySymbolView(); if (st && st.update) st.update(); scheduleBounds(); }
+      else if (d.type === 'SYMBOL_HIT') { cbPost('SYMBOL_HIT', { prop: symbolHit(Number(d.normalizedX || 0), Number(d.normalizedY || 0)) }); }
       else if (d.type === 'HIT_TEST_PART') { selectAt(Number(d.normalizedX || 0), Number(d.normalizedY || 0)); }
       else if (d.type === 'BEGIN_PART_DRAG') { startDrag(d); }
       else if (d.type === 'MOVE_PART_DRAG') { moveDrag(d, false); }

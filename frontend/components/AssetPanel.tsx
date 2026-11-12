@@ -7,6 +7,8 @@ import type { MediaLibraryItem } from "@/lib/mediaLibrary";
 import MediaLibraryBrowser from "./MediaLibraryBrowser";
 import CharacterThumb from "./CharacterThumb";
 import Popover from "./Popover";
+import ImportFlaDialog from "./ImportFlaDialog";
+import { isFlaFile } from "@/lib/fla/importFla";
 
 type Props = {
   onAddReferenceCharacter: (referenceCharacterId: string, actionId?: string, options?: { x?: number; y?: number }) => void;
@@ -202,11 +204,33 @@ export default function AssetPanel({ onAddReferenceCharacter, selectedReferenceC
   const [convertingFla, setConvertingFla] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const importableFiles = (list: FileList | null | undefined) => Array.from(list || []).filter((file) => /\.(zip|fla)$/i.test(file.name));
+  // Animate .fla files are read in the browser, one Import .fla window at a time.
+  const [flaQueue, setFlaQueue] = useState<Array<{ id: number; file: File }>>([]);
+  const flaIds = useRef(0);
   const importCustomZips = async (files: File[]) => {
-    const hasFla = files.some((file) => /\.fla(\.zip)?$/i.test(file.name));
+    const flaFiles = files.filter(isFlaFile);
+    if (flaFiles.length) setFlaQueue((queue) => [...queue, ...flaFiles.map((file) => ({ id: ++flaIds.current, file }))]);
+    const others = files.filter((file) => !isFlaFile(file));
+    if (!others.length) return;
+    // A ZIP holding only a .fla still goes to Adobe Animate (desktop app).
+    const hasFla = others.some((file) => /\.fla\.zip$/i.test(file.name));
     setConvertingFla(hasFla);
     if (hasFla) setUploadNotice("Converting with Adobe Animate… this can take a few minutes. Animate may open in the background.");
-    try { await importCustomFiles(files); } finally { setConvertingFla(false); }
+    try { await importCustomFiles(others); } finally { setConvertingFla(false); }
+  };
+  // A .fla the browser cannot read: the server's Adobe Animate route (desktop app) tries it.
+  const importWithAnimate = async (file: File, reason: string) => {
+    setUploadNotice(`"${file.name}" couldn't be read here — ${reason.replace(/\.$/, "")}. Trying Adobe Animate… this can take a few minutes.`);
+    setConvertingFla(true);
+    try { await importCustom(file); } finally { setConvertingFla(false); }
+  };
+  const importFlaPackage = async (zip: File) => {
+    const result = await uploadCustom(zip);
+    setFlaQueue((queue) => queue.slice(1));
+    setUploadNotice(result.duplicate
+      ? `"${result.name}" is already in My characters — it was imported before with the same poses and names.`
+      : `"${result.name}" imported to My characters.`);
+    showMyCharacters();
   };
   const importCustomFiles = async (files: File[]) => {
     if (files.length === 1) { await importCustom(files[0]); return; }
@@ -391,7 +415,7 @@ export default function AssetPanel({ onAddReferenceCharacter, selectedReferenceC
                 className="cb-character-upload-menu" aria-label="Upload custom character">
                 <button type="button" role="menuitem" onClick={() => { setUploadMenuOpen(false); zipInput.current?.click(); }}><b>HTML5 export ZIPs</b><small>one or more .zip from Adobe Animate</small></button>
                 <button type="button" role="menuitem" onClick={() => { setUploadMenuOpen(false); folderInput.current?.click(); }}><b>HTML5 export folder</b><small>.html + .js + images</small></button>
-                <button type="button" role="menuitem" onClick={() => { setUploadMenuOpen(false); flaInput.current?.click(); }}><b>Animate file (.fla)</b><small>converted with Adobe Animate on this Mac</small></button>
+                <button type="button" role="menuitem" onClick={() => { setUploadMenuOpen(false); flaInput.current?.click(); }}><b>Animate file (.fla)</b><small>read here; name the poses before importing</small></button>
               </Popover>
             </div>}
             <button type="button" className={`cb-character-tool ${characterView === MY_CHARACTERS ? "active" : ""}`} aria-pressed={characterView === MY_CHARACTERS}
@@ -486,6 +510,11 @@ export default function AssetPanel({ onAddReferenceCharacter, selectedReferenceC
           <button type="button" className={aiMode === "voice" ? "active" : ""} aria-pressed={aiMode === "voice"} onClick={() => { setAiMode("voice"); audioInput.current?.click(); }} title="Upload a voice / dialogue file"><VoiceGenIcon /><span>AI Voice Gen</span></button>
         </div>
       </div>
+      {flaQueue[0] && (
+        <ImportFlaDialog key={flaQueue[0].id} file={flaQueue[0].file} onImport={importFlaPackage}
+          onFallback={(file, reason) => { setFlaQueue((queue) => queue.slice(1)); void importWithAnimate(file, reason); }}
+          onClose={() => setFlaQueue((queue) => queue.slice(1))} />
+      )}
     </aside>
   );
 }

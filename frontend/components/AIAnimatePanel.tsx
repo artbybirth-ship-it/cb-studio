@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { useEscClose } from "@/lib/escClose";
+import PanelClose from "./PanelClose";
 import type { AnimationPlan, AnimationPlanResponse, EditorObject } from "@/types";
 
 type Props = {
@@ -21,6 +23,7 @@ const actionText = (action: AnimationPlan["actions"][number], characters: Editor
 };
 
 export default function AIAnimatePanel({ width, height, duration, characters, onApply, onClose }: Props) {
+  useEscClose(true, onClose);
   const [prompt, setPrompt] = useState("Woman right hand wave kare, phir man ke paas jaye aur dono 5 second talk karein.");
   const [result, setResult] = useState<AnimationPlanResponse | null>(null);
   const [busy, setBusy] = useState(false);
@@ -44,8 +47,8 @@ export default function AIAnimatePanel({ width, height, duration, characters, on
     <div className="cb-ai-animate-overlay" role="dialog" aria-modal="true" aria-label="AI Animate">
       <div className="cb-ai-animate-panel">
         <header>
+          <PanelClose onClose={onClose} label="Close AI Animate" />
           <div><b>✨ AI Animate</b><span>Prompt → validated action plan → editable timeline/keyframes</span></div>
-          <button onClick={onClose}>×</button>
         </header>
 
         <div className="cb-ai-animate-body">

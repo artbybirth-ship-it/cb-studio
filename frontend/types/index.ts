@@ -10,6 +10,37 @@ export type CharacterPartKey = string;
  * rules never chain; for a colour the last matching rule wins, and part rules beat whole-character ones.
  * "shades" moves the whole colour family (its lighter/darker shades keep their offset).
  */
+/** One classic tween's ease edited inside a character: the objects its layer creates, its keyframe and length, and the ease (−100 ease in … 100 ease out). */
+export type SymbolEaseEdit = { props: string[]; frame: number; frames: number; value: number };
+
+/** A layer's keyframes inside a character after editing: [frame in the file, frame now] for each one (an added keyframe has no frame in the file: it takes the one it was added at). */
+/** `cut`: the layer ends at this frame (Remove Frames at its end): it has no frames from there on.
+ *  `blanks`: blank keyframes made in the editor (F7), as the file frame of the keyframe: the layer shows nothing from there to its next keyframe.
+ *  `tweens`: classic tweens made in the editor on spans that hold still in the file, as [file frame of the keyframe it starts at, ease −100…100]; each runs to the next keyframe. */
+export type SymbolKeyEdit = { props: string[]; anchors: Array<[number, number]>; tweens?: Array<[number, number]>; blanks?: number[]; cut?: number };
+
+/** The values edited on one keyframe inside a character (x, y, scale, skew in degrees, alpha 0–1), by layer and file frame. */
+export type SymbolValueKey = "x" | "y" | "scaleX" | "scaleY" | "skewX" | "skewY" | "alpha" | "regX" | "regY";
+export type SymbolValueEdit = { props: string[]; frame: number; v: Partial<Record<SymbolValueKey, number>> };
+
+/** A part copied from another character: its symbol (named in the clone), the export file that holds it, and how it stood. */
+export type PoseForeign = { lib: string; scale: number; frame: number; mode?: number; loop?: boolean };
+
+/** How the layers of a symbol inside a character were arranged (step inside): see lib/symbolLayers.ts. */
+export type SymbolLayerEdit = {
+  order?: number[];
+  names?: Record<string, string>;
+  hidden?: number[];
+  locked?: number[];
+  deleted?: number[];
+  parents?: Record<string, number | null>;
+  extras?: Array<{ id: number; name: string; type: "normal" | "folder" }>;
+  /** Layers made by Duplicate Layer: a new copy (named `prop` in the player) of the layer `of` (its index, a duplicate's index follows the file's layers). */
+  clones?: Array<{ of: number; prop: string; symbol?: string; image?: { url: string; w: number; h: number; name: string; keep?: boolean }; foreign?: PoseForeign; end?: number; name?: string }>;
+  /** What the player gets (made from the above): the objects of each layer top to bottom, and the objects to hide. */
+  spec?: { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string; symbol?: string; image?: { url: string; w: number; h: number; name: string; keep?: boolean }; foreign?: PoseForeign; end?: number; name?: string }> };
+};
+
 export type ColorReplacement = {
   id: string;
   from: string;
@@ -93,6 +124,26 @@ export type CharacterKeyframe = {
   tween?: { easeIn: number; easeOut: number } | false;
 };
 
+/** A keyframe of a ⌘G group's motion: its move (x, y in stage px), turn (degrees) and size,
+ *  relative to where its objects themselves are; tween as on CharacterKeyframe. */
+export type GroupKeyframe = {
+  id: string;
+  /** Seconds from the start of the scene. */
+  time: number;
+  x: number;
+  y: number;
+  rotation: number;
+  scale: number;
+  tween?: { easeIn: number; easeOut: number } | false;
+};
+
+/** A ⌘G group's registration point (stage px, with no motion applied) and its keyframes. */
+export type GroupMotion = {
+  pivotX?: number;
+  pivotY?: number;
+  keyframes?: GroupKeyframe[];
+};
+
 export type AnimationClip = {
   id: string;
   type: "gesture" | "move" | "talk";
@@ -163,12 +214,30 @@ export type EditorObject = {
   /** Non-uniform stretch in the object's own axes, on top of the uniform `scale`. Default 1. */
   stretchX?: number;
   stretchY?: number;
+  /** Outline thickness factor on top of the character's size (Transform panel with "Scale Strokes
+   *  & Effects" off keeps the outlines as thick as before scaling). Default 1. */
+  strokeScale?: number;
   flipX?: boolean;
   text?: string;
   fillColor?: string;
   /** Text layers: font name from lib/fonts (default Arial) and size in stage px (default 52). */
   fontFamily?: string;
   fontSize?: number;
+  /** Text panel (Illustrator): weight 100–900 (older text layers: 800), italic, an uploaded font file
+   *  for a font from someone's computer, paragraph alignment (older layers: centre), leading in px
+   *  (none = Auto, 120%), tracking in 1/1000 em, and the old drop shadow (older layers keep it). */
+  fontWeight?: number;
+  fontStyle?: "normal" | "italic";
+  fontUrl?: string;
+  textAlign?: "left" | "center" | "right";
+  lineHeight?: number;
+  letterSpacing?: number;
+  textShadow?: boolean;
+  /** Fill/Stroke (Include Stroke / Include Shadow): an outline of textStrokeWidth px (default 2)
+   *  outside the letters, and a soft shadow, in these colours. */
+  textStrokeColor?: string;
+  textStrokeWidth?: number;
+  textShadowColor?: string;
   assetKind?: EditorAssetKind;
   assetUrl?: string;
   /** Static library thumbnail for source actions. */
@@ -192,18 +261,50 @@ export type EditorObject = {
   keyframes?: CharacterKeyframe[];
   /** Static per-source-part offsets, layered below animated part keyframes. */
   partOverrides?: Record<CharacterPartKey, CharacterPartOverride>;
+  /** Timeline layer this object is on (Merge Layers): objects with the same tag share one layer
+   *  row, kept next to each other in the stacking order. No tag = a layer of its own. */
+  layer?: string;
+  /** A merged timeline layer's own name (same on every object of the layer). Unset = the row shows
+   *  its objects' names; a one-object layer shows its object's `name`. */
+  layerName?: string;
+  /** ⌘G group of objects on the canvas: a click on any member selects them all. On the timeline
+   *  the group is one row (named groupName, same on every member) until it is entered. */
+  group?: string;
+  groupName?: string;
+  /** The group's registration point and motion (same on every member; lib/groupMotion.ts). */
+  groupMotion?: GroupMotion;
+  /** A part layer (Distribute to Layers, pasted parts): the character draws only these parts. */
+  onlyParts?: CharacterPartKey[];
+  /** ⌘G groups of parts (Illustrator): a click on any member selects them all, until the group is
+   *  entered (double-click). Saved with this character in this scene. */
+  partGroups?: Array<{ id: string; name: string; members: CharacterPartKey[] }>;
   /** Prompt/manual body-part animation keyframes layered over the source Animate timeline. */
   partKeyframes?: Record<CharacterPartKey, CharacterPartKeyframe[]>;
   /** Visual/action metadata used by the timeline and AI planner. */
   animationClips?: AnimationClip[];
   /** When present, the source talking timeline only advances inside these windows. */
   sourceAnimationClips?: SourceAnimationClip[];
+  /** Where in its own animation the layer starts playing (ms): a piece split off by dragging
+   *  frames to another layer keeps showing the animation those frames showed. */
+  sourceOffsetMs?: number;
   /** Explicit motion range created only by the Create Motion command. */
   manualMotionRange?: ManualMotionRange | null;
   /** Source-aware colour edits. Keys are character-defined regions such as skin, shirt, hair, selectedPart. */
   colorOverrides?: CharacterColorOverrides;
   /** Vector recolour rules (Recolour panel: palette + find & replace), applied in order by the player. */
   colorReplacements?: ColorReplacement[];
+  /** Tween eases edited inside this character (step inside), by symbol class, then "<layer>:<frame>". */
+  symbolEases?: Record<string, Record<string, SymbolEaseEdit>>;
+  /** Keyframes moved or added inside this character, by symbol class, then layer index. */
+  symbolKeys?: Record<string, Record<string, SymbolKeyEdit>>;
+  /** Values edited on keyframes inside this character, by symbol class, then "<layer>:<file frame>". */
+  symbolValues?: Record<string, Record<string, SymbolValueEdit>>;
+  /** Layers arranged inside this character (reordered, hidden, locked, renamed, deleted, folders), by symbol class. */
+  symbolLayers?: Record<string, SymbolLayerEdit>;
+  /** Native pose editor (beta): edited timelines of the character's Animate file, by the stepped-into symbol's class. */
+  nativePose?: Record<string, import("@/lib/native/store").NativeEdits>;
+  /** Where the character's pose stands in its 720 × 960 box (its Animate player's own placement), read when native edits are saved: lets the video renderer draw it without starting the player. */
+  nativePoseFit?: { s: number; tx: number; ty: number };
   /** Runtime-detected source body parts for Archive/CreateJS actions. */
   sourceParts?: CharacterPartDescriptor[];
   /** User-supplied image replacements for selected body parts. */
@@ -254,7 +355,7 @@ export type RenderJob = {
 export type Asset = {
   id: string;
   project: string | null;
-  kind: "character" | "background" | "prop" | "audio";
+  kind: "character" | "background" | "prop" | "audio" | "font";
   name: string;
   url: string;
   metadata: Record<string, unknown>;

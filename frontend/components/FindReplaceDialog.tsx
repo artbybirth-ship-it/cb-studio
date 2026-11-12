@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { FONT_OPTIONS, fontCss } from "@/lib/fonts";
 import { normalizeHex, type FindContext, type FindKind, type FindRequest } from "@/lib/findReplace";
+import { useEscClose } from "@/lib/escClose";
+import PanelClose from "./PanelClose";
 
 /** Find and Replace dialog (Colour / Text / Font across a context), designed after Adobe Animate's. */
 
@@ -160,11 +162,9 @@ export default function FindReplaceDialog({ onClose, onReplace, onPrepareLibrary
     if (picked.target === "find") setFindColour(picked.color); else setReplaceColour(picked.color);
   }, [picked?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (kind !== "colour" && context === "library") setContext("document"); }, [kind, context]);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape" && !picking) { event.stopPropagation(); if (preserve) setPreserve(null); else if (bubble) setBubble(null); else onClose(); } };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [bubble, onClose, picking, preserve]);
+  // Esc: the "Preserve the original?" question first, then an open colour bubble, then the dialog.
+  // Picking on the canvas registers on top (EditorShell), so Esc cancels the pick first.
+  useEscClose(true, () => { if (preserve) setPreserve(null); else if (bubble) setBubble(null); else onClose(); });
 
   const request: FindRequest = kind === "colour"
     ? { kind, context, find: findColour, replace: replaceColour }
@@ -247,7 +247,7 @@ export default function FindReplaceDialog({ onClose, onReplace, onPrepareLibrary
     <div className={`cb-fr-backdrop ${picking ? "picking" : ""}`} onPointerDown={(event) => { if (event.target === event.currentTarget) setBubble(null); }}>
       {picking && <div className="cb-fr-pick-banner">Click a colour on the canvas · Esc to cancel</div>}
       <div className="cb-fr-dialog" role="dialog" aria-label="Find and Replace" aria-modal="true">
-        <header>Find and Replace</header>
+        <header><PanelClose onClose={onClose} label="Close Find and Replace" />Find and Replace</header>
         <div className="cb-fr-body">
           <div className="cb-fr-line"><span className="cb-fr-label">Search</span><Dropdown value={kind} options={KINDS} onChange={(value) => { setKind(value); setStatus(null); }} /></div>
 
@@ -287,7 +287,7 @@ export default function FindReplaceDialog({ onClose, onReplace, onPrepareLibrary
       {preserve && (
         <div className="cb-fr-preserve-layer">
           <div className="cb-fr-dialog cb-fr-preserve" role="dialog" aria-label="Preserve the original?" aria-modal="true">
-            <header>Preserve the original?</header>
+            <header><PanelClose onClose={() => setPreserve(null)} label="Back" />Preserve the original?</header>
             <div className="cb-fr-body">
               <p className="cb-fr-note">
                 {preserve.characters.length === 1 ? `“${preserve.characters[0].name}” uses` : `${preserve.characters.length} of My characters use`} <span className="cb-fr-chip" style={{ background: findColour }} /> {findColour}.

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ColourSwatch } from "./ColourPicker";
+import { scrubProps } from "@/lib/scrub";
 import { partLabel } from "@/lib/partLabels";
 import CharacterThumb from "./CharacterThumb";
 import type { ChangeEvent } from "react";
@@ -42,8 +43,6 @@ type Props = {
   onSwapPartSymbol: (partKey: CharacterPartKey, symbol: string | null) => void;
   /** Brings back a body part removed with Delete in double-click mode. */
   onRestorePart: (partKey: CharacterPartKey) => void;
-  /** Opens the Recolour panel (Fill/Stroke boxes in the tool palette). */
-  onOpenRecolor: () => void;
   replacementBrowserOpen: boolean;
   onReplacementBrowserOpenChange: (open: boolean) => void;
   referenceCharacterId: string;
@@ -101,7 +100,7 @@ const renderLibraryThumb = (thumbUrl: string, label: string, _assetUrl?: string)
   <CharacterThumb thumbUrl={thumbUrl || EMPTY_PREVIEW} label={label} />
 );
 
-export default function CharacterEditPanel({ character, activePart, onActivePart, onBack, onLibrariesHome, onPatch, onDelete, onUploadVoice, canvasZoom, onCanvasZoomChange, onCanvasFit, playhead, duration, currentTransform, onAddOrUpdateKeyframe, onDeleteKeyframe, onSeek, onClearKeyframes, onAddOrUpdatePartKeyframe, onDeletePartKeyframe, onClearPartKeyframes, onReplacePartAsset, onClearPartReplacement, onApplyLibraryReplacement, onSwapPartSymbol, onRestorePart, onOpenRecolor, replacementBrowserOpen, onReplacementBrowserOpenChange, referenceCharacterId, onReferenceCharacterChange, onReferenceActionChange }: Props) {
+export default function CharacterEditPanel({ character, activePart, onActivePart, onBack, onLibrariesHome, onPatch, onDelete, onUploadVoice, canvasZoom, onCanvasZoomChange, onCanvasFit, playhead, duration, currentTransform, onAddOrUpdateKeyframe, onDeleteKeyframe, onSeek, onClearKeyframes, onAddOrUpdatePartKeyframe, onDeletePartKeyframe, onClearPartKeyframes, onReplacePartAsset, onClearPartReplacement, onApplyLibraryReplacement, onSwapPartSymbol, onRestorePart, replacementBrowserOpen, onReplacementBrowserOpenChange, referenceCharacterId, onReferenceCharacterChange, onReferenceActionChange }: Props) {
   const { characters: characterLibrary } = useCharacterLibrary();
   const parts = character.sourceParts || [];
   const effectivePart = activePart || null;
@@ -558,7 +557,7 @@ export default function CharacterEditPanel({ character, activePart, onActivePart
 
         {browserTab === "colors" && (
           <div className="cb-visual-browser-block cb-v79-browser-content cb-character-colors-panel">
-            <div className="cb-visual-source-caption">Character colors · use the Fill/Stroke boxes at the bottom of the tool palette to recolour.</div>
+            <div className="cb-visual-source-caption">Character colours · use Fill/Stroke or Find/Replace in the Colour palette.</div>
 
             <div className="cb-color-control-card">
               <div className="cb-color-control-title"><strong>Global Filter</strong><small>Optional · affects the whole character including clothes</small></div>
@@ -568,10 +567,10 @@ export default function CharacterEditPanel({ character, activePart, onActivePart
               <button className="cb-color-reset-button" onClick={() => onPatch({ characterHue: 0, characterSaturation: 100, characterBrightness: 100 }, true)}>Reset Global Filter</button>
             </div>
 
-            {/* Real vector recolouring lives in the tool palette (Fill/Stroke boxes), replacing the old tint cards. */}
+            {/* Every colour change made with the Colour palette (Fill/Stroke, Light/Dark, Find/Replace, Adjust colour) is a rule; Reset removes them all (one undo step). */}
             <div className="cb-color-control-card">
-              <div className="cb-color-control-title"><strong>Recolour character</strong><small>Change any colour of the artwork itself, with its shades, for the whole character or the selected part. Find and replace works like Adobe Animate.</small></div>
-              <button className="cb-color-reset-button" onClick={onOpenRecolor}>Open Recolour (tool palette)</button>
+              <div className="cb-color-control-title"><strong>Original colours</strong><small>{character.colorReplacements?.length ? "Put back every colour of this character as it was drawn. Undo brings your changes back." : "This character has its original colours."}</small></div>
+              <button className="cb-color-reset-button" disabled={!character.colorReplacements?.length} onClick={() => onPatch({ colorReplacements: [] }, true)}>Reset colours</button>
             </div>
           </div>
         )}
@@ -727,8 +726,8 @@ export default function CharacterEditPanel({ character, activePart, onActivePart
           <header><strong>Edit: {activeMeta.label}</strong><button onClick={resetPart}>Reset Part</button></header>
           <div className="cb-part-live-state"><b>{activeOverride.animate !== false ? "Original animation ON" : "Animation frozen"}</b><span>Position edits remain independent from the source timeline.</span></div>
           <div className="cb-two-fields">
-            <label>Part X<input type="number" value={Math.round(Number(activeOverride.offsetX || 0))} onChange={(e) => updatePart(effectivePart, { offsetX: Number(e.target.value) }, false)} /></label>
-            <label>Part Y<input type="number" value={Math.round(Number(activeOverride.offsetY || 0))} onChange={(e) => updatePart(effectivePart, { offsetY: Number(e.target.value) }, false)} /></label>
+            <label>Part X<input type="number" value={Math.round(Number(activeOverride.offsetX || 0))} {...scrubProps({ value: Math.round(Number(activeOverride.offsetX || 0)), onChange: (next) => updatePart(effectivePart, { offsetX: next }, false) })} onChange={(e) => updatePart(effectivePart, { offsetX: Number(e.target.value) }, false)} /></label>
+            <label>Part Y<input type="number" value={Math.round(Number(activeOverride.offsetY || 0))} {...scrubProps({ value: Math.round(Number(activeOverride.offsetY || 0)), onChange: (next) => updatePart(effectivePart, { offsetY: next }, false) })} onChange={(e) => updatePart(effectivePart, { offsetY: Number(e.target.value) }, false)} /></label>
           </div>
           <label className="cb-range-field"><span>Part Rotation <b>{Math.round(Number(activeOverride.rotation || 0))}°</b></span><input type="range" min="-180" max="180" value={Number(activeOverride.rotation || 0)} onChange={(e) => updatePart(effectivePart, { rotation: Number(e.target.value) }, false)} /></label>
           <label className="cb-range-field"><span>Group Scale / Zoom <b>{Math.round(Number(activeOverride.scale ?? 1) * 100)}%</b></span><input type="range" min="0.05" max="5" step="0.01" value={Number(activeOverride.scale ?? 1)} onChange={(e) => updatePart(effectivePart, { scale: Number(e.target.value) }, false)} /></label>
@@ -766,7 +765,7 @@ export default function CharacterEditPanel({ character, activePart, onActivePart
             <div className="cb-color-values">
               <label>HEX<input value={activeColor} onChange={(e) => updateColor(e.target.value, false)} /></label>
               <div className="cb-rgb-fields">
-                {(["r","g","b"] as const).map((channel) => <label key={channel}>{channel.toUpperCase()}<input type="number" min="0" max="255" value={rgb[channel]} onChange={(e) => updateColor(rgbToHex(channel === "r" ? Number(e.target.value) : rgb.r, channel === "g" ? Number(e.target.value) : rgb.g, channel === "b" ? Number(e.target.value) : rgb.b), false)} /></label>)}
+                {(["r","g","b"] as const).map((channel) => <label key={channel}>{channel.toUpperCase()}<input type="number" min="0" max="255" value={rgb[channel]} {...scrubProps({ value: rgb[channel], min: 0, max: 255, onChange: (next) => updateColor(rgbToHex(channel === "r" ? next : rgb.r, channel === "g" ? next : rgb.g, channel === "b" ? next : rgb.b), false) })} onChange={(e) => updateColor(rgbToHex(channel === "r" ? Number(e.target.value) : rgb.r, channel === "g" ? Number(e.target.value) : rgb.g, channel === "b" ? Number(e.target.value) : rgb.b), false)} /></label>)}
               </div>
             </div>
           </div>
@@ -799,8 +798,8 @@ export default function CharacterEditPanel({ character, activePart, onActivePart
         {!showVisualReferenceBrowser && <section className="cb-edit-section">
           <header><strong>Whole Character</strong><button onClick={() => onActivePart(null)}>Select Whole</button></header>
           <div className="cb-two-fields">
-            <label>X<input type="number" value={Math.round(currentTransform.x)} readOnly={keyframes.length > 0} onChange={(e) => onPatch({ x: Number(e.target.value) }, false)} /></label>
-            <label>Y<input type="number" value={Math.round(currentTransform.y)} readOnly={keyframes.length > 0} onChange={(e) => onPatch({ y: Number(e.target.value) }, false)} /></label>
+            <label>X<input type="number" value={Math.round(currentTransform.x)} readOnly={keyframes.length > 0} {...scrubProps({ value: Math.round(currentTransform.x), onChange: (next) => onPatch({ x: next }, false) })} onChange={(e) => onPatch({ x: Number(e.target.value) }, false)} /></label>
+            <label>Y<input type="number" value={Math.round(currentTransform.y)} readOnly={keyframes.length > 0} {...scrubProps({ value: Math.round(currentTransform.y), onChange: (next) => onPatch({ y: next }, false) })} onChange={(e) => onPatch({ y: Number(e.target.value) }, false)} /></label>
           </div>
           <label className="cb-range-field"><span>Scale <b>{Math.round((character.scale || 1) * 100)}%{Math.abs((character.scale || 1) - 1) < 0.001 ? " · Original" : ""}</b></span><input type="range" min="0.05" max="10" step="0.01" value={character.scale || 1} onChange={(e) => onPatch({ scale: Number(e.target.value) }, false)} /></label>
           <label className="cb-range-field"><span>Rotation <b>{Math.round(character.rotation || 0)}°</b></span><input type="range" min="-180" max="180" value={character.rotation || 0} onChange={(e) => onPatch({ rotation: Number(e.target.value) }, false)} /></label>

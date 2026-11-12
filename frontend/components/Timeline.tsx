@@ -1,14 +1,17 @@
 "use client";
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { CharacterKeyframe, EditorObject, Scene } from "@/types";
+import { canShareLayer, isGroupRow } from "@/lib/layerRows";
 
 /** Frames selected on one or more layers (inclusive, 0-based frame indexes). layerId is the
  *  layer the selection started on; layerIds lists every selected layer, top to bottom. */
 export type FrameSelection = { layerId: string; layerIds?: string[]; from: number; to: number } | null;
 export const selectionLayerIds = (selection: FrameSelection): string[] =>
   (selection ? (selection.layerIds?.length ? selection.layerIds : [selection.layerId]) : []);
+/** Where dragged frames land: onto a layer, or into the gap above `belowId` (null = below the last layer). */
+export type LayerDropTarget = { kind: "layer"; id: string } | { kind: "gap"; belowId: string | null };
 export type FrameAction = "keyframe" | "blank" | "insert-frame" | "remove-frames" | "clear-keyframe" | "tween" | "remove-tween";
 
 type Props = {
@@ -21,13 +24,18 @@ type Props = {
   activeDuration: number;
   onSelect: (scene: Scene) => void;
   onSelectLayer: (id: string) => void;
+  /** Shift+click / ⌘-click on layer names: several layers selected (with all their frames). */
+  onSelectLayers?: (ids: string[]) => void;
   onAdd: () => void;
   onPlay: () => void;
   onSeek: (seconds: number) => void;
   onAddKeyframe?: (id: string, time: number) => void;
   onImportAudio?: () => void;
   onCreateMotion?: (id: string) => void;
-  onReorderLayer?: (draggedId: string, targetId: string) => void;
+  /** Layers dragged by their name (Animate): the new order, top to bottom. */
+  onReorderLayers?: (idsTopToBottom: string[]) => void;
+  /** Frames dragged up or down onto another layer (from..to of the source layer, moved `shift` frames). */
+  onMoveFramesToLayer?: (sourceId: string, from: number, to: number, shift: number, target: LayerDropTarget) => void;
   onDeleteLayer?: (id: string) => void;
   onUpdateLayerTiming?: (id: string, patch: { startTime?: number; actionDurationMs?: number }) => void;
   /** Animate symbol looping: toggles a layer between Loop and Play Once. */
@@ -42,6 +50,20 @@ type Props = {
   onFrameAction?: (action: FrameAction, layerIds: string[], from: number, to: number) => void;
   onAddLayer?: () => void;
   onToggleLayerHidden?: (id: string) => void;
+  /** Merge Layers: the given layers become one layer holding all their objects. */
+  onMergeLayers?: (layerIds: string[]) => void;
+  /** Distribute to Layers on layers that hold several objects: one object per layer again. */
+  onSplitLayers?: (layerIds: string[]) => void;
+  /** How many objects each layer holds (a merged layer holds several). */
+  layerMemberCounts?: Record<string, number>;
+  /** ⌥-click a layer's eye: show only that layer (again: show every layer). */
+  onSoloLayer?: (id: string) => void;
+  /** Double-click a merged layer's name: its own name ("" = its objects' names again). */
+  onRenameLayer?: (id: string, name: string) => void;
+  /** Double-click a one-object layer's name: renames the object. */
+  onRenameObject?: (id: string, name: string) => void;
+  /** A ⌘G group's row (⤵, or a double-click on its frames): go inside the group. */
+  onEnterGroup?: (id: string) => void;
   onToggleLayerLocked?: (id: string) => void;
   /** Drag a keyframe from one frame to another. */
   onMoveKeyframe?: (layerId: string, fromFrame: number, toFrame: number) => void;
@@ -54,14 +76,17 @@ const LoopIcon = () => (
     <path d="M3 7.2V6.4A2.4 2.4 0 0 1 5.4 4h7.1M10.6 2l1.9 2-1.9 2" /><path d="M13 8.8v.8A2.4 2.4 0 0 1 10.6 12H3.5M5.4 14l-1.9-2 1.9-2" />
   </g></svg>
 );
-const ToolIcon = ({ kind }: { kind: "menu" | "folder" | "add" | "hide" | "lock" | "trash" }) => (
+// Layer tool icons (mockup): thick menu bars, an outlined folder, a thin plus, a bold eye, and a
+// solid padlock and bin with their details cut out.
+const ToolIcon = ({ kind }: { kind: "menu" | "folder" | "add" | "hide" | "show" | "lock" | "trash" }) => (
   <svg viewBox="0 0 16 16" aria-hidden="true"><g fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-    {kind === "menu" && <path d="M2 4h12M2 8h12M2 12h12" strokeWidth="1.8" />}
-    {kind === "folder" && <path d="M2 4.5h4l1.3 1.5H14v6.5H2z" />}
-    {kind === "add" && <path d="M8 2.5v11M2.5 8h11" strokeWidth="1.5" />}
-    {kind === "hide" && <><path d="M1.8 8s2.3-4 6.2-4 6.2 4 6.2 4-2.3 4-6.2 4-6.2-4-6.2-4z" /><circle cx="8" cy="8" r="1.8" /><path d="M3 13 13 3" /></>}
-    {kind === "lock" && <><rect x="3.5" y="7" width="9" height="6.5" rx="1" fill="currentColor" /><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" /></>}
-    {kind === "trash" && <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9h5.6l.7-9" />}
+    {kind === "menu" && <g fill="currentColor" stroke="none"><rect x="1.5" y="2.8" width="13" height="2.2" /><rect x="1.5" y="6.9" width="13" height="2.2" /><rect x="1.5" y="11" width="13" height="2.2" /></g>}
+    {kind === "folder" && <path d="M2 3.6h4.3l1.5 1.8H14v7.2H2z" strokeWidth="1.25" strokeLinecap="butt" strokeLinejoin="miter" />}
+    {kind === "add" && <path d="M8 2.5v11M2.5 8h11" strokeWidth="1.2" />}
+    {kind === "hide" && <><path d="M1.5 8s2.4-4.3 6.5-4.3S14.5 8 14.5 8s-2.4 4.3-6.5 4.3S1.5 8 1.5 8z" strokeWidth="1.6" /><circle cx="8" cy="8" r="2" fill="currentColor" stroke="none" /><path d="M3 13.2 13 2.8" strokeWidth="1.6" /></>}
+    {kind === "show" && <><path d="M1.5 8s2.4-4.3 6.5-4.3S14.5 8 14.5 8s-2.4 4.3-6.5 4.3S1.5 8 1.5 8z" strokeWidth="1.6" /><circle cx="8" cy="8" r="2" fill="currentColor" stroke="none" /></>}
+    {kind === "lock" && <><path d="M5.3 7.2V5.1a2.7 2.7 0 0 1 5.4 0v2.1" strokeWidth="1.7" /><path fill="currentColor" stroke="none" fillRule="evenodd" d="M4.2 7h7.6A1.2 1.2 0 0 1 13 8.2v4.9a1.2 1.2 0 0 1-1.2 1.2H4.2A1.2 1.2 0 0 1 3 13.1V8.2A1.2 1.2 0 0 1 4.2 7zM8 9.3a1.05 1.05 0 0 0-.5 1.97v1.33h1v-1.33A1.05 1.05 0 0 0 8 9.3z" /></>}
+    {kind === "trash" && <g fill="currentColor" stroke="none" fillRule="evenodd"><path d="M6.3 1.8h3.4a.6.6 0 0 1 .6.6v.7h3.1a.7.7 0 0 1 0 1.4H2.6a.7.7 0 0 1 0-1.4h3.1v-.7a.6.6 0 0 1 .6-.6z" /><path d="M3.4 5.8h9.2l-.85 8a1 1 0 0 1-1 .9H5.25a1 1 0 0 1-1-.9zM6 7.4h.9v5.6H6zM7.55 7.4h.9v5.6h-.9zM9.1 7.4h.9v5.6h-.9z" /></g>}
   </g></svg>
 );
 const TransportIcon = ({ kind }: { kind: "first" | "prev" | "play" | "pause" | "next" | "last" }) => (
@@ -100,16 +125,18 @@ const layerSpan = (layer: EditorObject, lastSceneFrame: number) => {
   return { startFrame, endFrame };
 };
 
+/** Rows whose keyframes move something: characters, and ⌘G groups (the group's own motion). */
+const hasMotionKeys = (layer: EditorObject) => layer.type === "character" || isGroupRow(layer.id);
 /** Frames that hold a keyframe: where the content starts, plus every position keyframe. */
 export const layerKeyframeFrames = (layer: EditorObject, lastSceneFrame: number) => {
   const { startFrame } = layerSpan(layer, lastSceneFrame);
   const frames = new Set<number>([startFrame]);
-  if (layer.type === "character") for (const keyframe of layer.keyframes || []) frames.add(Math.round(keyframe.time * FPS));
+  if (hasMotionKeys(layer)) for (const keyframe of layer.keyframes || []) frames.add(Math.round(keyframe.time * FPS));
   return frames;
 };
 
 const frameOfTime = (time: number) => Math.round(time * FPS);
-const sortedKeys = (layer: EditorObject) => (layer.type === "character" ? [...(layer.keyframes || [])].sort((a, b) => a.time - b.time) : []);
+const sortedKeys = (layer: EditorObject) => (hasMotionKeys(layer) ? [...(layer.keyframes || [])].sort((a, b) => a.time - b.time) : []);
 /** Tweened stretches: from a keyframe whose tween is not off to the next keyframe. */
 const tweenSegments = (layer: EditorObject) => {
   const keys = sortedKeys(layer);
@@ -124,8 +151,8 @@ const tweenSegments = (layer: EditorObject) => {
 
 /** One ease control per tween (Animate's single ease value): drag left for ease in (shown as
  *  −1…−100, starts slowly), right for ease out (1…100, ends slowly); 0 = no easing.
- *  Double-click to type a value from −100 to 100. */
-const EaseControl = ({ value, onCommit }: { value: number; onCommit: (next: number) => void }) => {
+ *  Double-click to type a value from −100 to 100. onPreview gets the value during a drag, then null. */
+export const EaseControl = ({ value, onCommit, onPreview }: { value: number; onCommit: (next: number) => void; onPreview?: (next: number | null) => void }) => {
   const [preview, setPreview] = useState<number | null>(null);
   const [editing, setEditing] = useState(false);
   const shown = preview ?? value;
@@ -147,6 +174,7 @@ const EaseControl = ({ value, onCommit }: { value: number; onCommit: (next: numb
       if (Math.abs(dx) > 2) moved = true;
       latest = Math.max(-100, Math.min(100, Math.round(value + dx / 2)));
       setPreview(latest);
+      onPreview?.(latest);
     };
     const up = () => {
       release();
@@ -154,6 +182,7 @@ const EaseControl = ({ value, onCommit }: { value: number; onCommit: (next: numb
       window.removeEventListener("pointerup", up);
       setPreview(null);
       if (moved && latest !== value) onCommit(latest);
+      if (moved) onPreview?.(null);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -184,60 +213,107 @@ type RowHandlers = {
   lanePress: (event: ReactPointerEvent<HTMLDivElement>, layer: EditorObject) => void;
   laneDoubleClick: (event: ReactMouseEvent<HTMLDivElement>, layer: EditorObject) => void;
   contextMenu: (event: ReactMouseEvent<HTMLDivElement>, layer: EditorObject) => void;
-  selectLayer: (id: string) => void;
+  /** A click on the layer's name; Shift adds the layers in between, ⌘ / Ctrl adds or removes one. */
+  selectLayer: (id: string, how?: "range" | "toggle") => void;
   deleteLayer: (id: string) => void;
   toggleLoop: (id: string) => void;
   toggleHidden: (id: string) => void;
+  soloLayer: (id: string) => void;
   toggleLocked: (id: string) => void;
-  dragStart: (event: ReactDragEvent<HTMLElement>, id: string) => void;
-  dragEnd: () => void;
-  dragOver: (id: string) => void;
-  dragLeave: (id: string) => void;
-  drop: (event: ReactDragEvent<HTMLElement>, id: string) => void;
+  enterGroup: (id: string) => void;
+  namePress: (event: ReactPointerEvent<HTMLDivElement>, id: string) => void;
+  nameMenu: (event: ReactMouseEvent<HTMLDivElement>, id: string) => void;
+  startRename: (id: string) => void;
+  /** null = cancelled (Esc). */
+  finishRename: (id: string, value: string | null) => void;
   setEase: (layerId: string, keyframeId: string, easeIn: number, easeOut: number) => void;
 };
 
+/** The text box that replaces a name while it is renamed: Enter or clicking away keeps it, Esc cancels. */
+function RenameBox({ value, label, onDone }: { value: string; label: string; onDone: (value: string | null) => void }) {
+  const done = useRef(false);
+  const finish = (next: string | null) => { if (!done.current) { done.current = true; onDone(next); } };
+  return (
+    <input className="cb-layer-rename" defaultValue={value} aria-label={label} autoFocus spellCheck={false}
+      onFocus={(event) => event.currentTarget.select()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") finish(event.currentTarget.value);
+        else if (event.key === "Escape") finish(null);
+      }}
+      onBlur={(event) => finish(event.currentTarget.value)} />
+  );
+}
+
 type LayerRowProps = {
   layer: EditorObject;
-  displayIndex: number;
   cell: number;
   lastFrame: number;
   selected: boolean;
   dragging: boolean;
-  dropTarget: boolean;
+  /** Where a dragged layer or frames would land: a line above / below this row. */
+  dropLine: "above" | "below" | null;
+  /** Frames dragged here from another layer: where they would land (red when they can't). */
+  moveGhost: { from: number; to: number; invalid: boolean } | null;
   selection: FrameSelection;
   ghostFrame: number | null;
   spanEditing: boolean;
   loopLength: number;
+  /** Objects on the layer (a merged layer holds several). */
+  memberCount: number;
+  /** Its name is being typed. */
+  renaming: boolean;
   handlers: RowHandlers;
 };
 
 /** One layer row. Memoized: playback only moves the shared playhead, so rows don't redraw. */
-const LayerRow = memo(function LayerRow({ layer, displayIndex, cell, lastFrame, selected, dragging, dropTarget, selection, ghostFrame, spanEditing, loopLength, handlers }: LayerRowProps) {
+const LayerRow = memo(function LayerRow({ layer, cell, lastFrame, selected, dragging, dropLine, moveGhost, selection, ghostFrame, spanEditing, loopLength, memberCount, renaming, handlers }: LayerRowProps) {
+  // One name per layer: a merged layer's own name (else its objects' names), or the object's name.
+  const title = layer.layerName || (layer.type === "empty" && memberCount < 2 ? "Empty layer" : layer.name);
+  // A ⌘G group's row (like a symbol): its own colour and icon, and ⤵ to go inside.
+  const group = isGroupRow(layer.id);
   const span = layerSpan(layer, lastFrame);
   const keyframes = layerKeyframeFrames(layer, lastFrame);
   const animated = layer.type === "character" && layer.assetKind === "animate-createjs";
   const looping = animated && layer.loopMode === "loop";
   const spanFrames = span.endFrame - span.startFrame + 1;
   // Where each repeat of the source animation starts inside the span (looping layers only).
+  // A piece split off another layer starts part-way into the animation (sourceOffsetMs).
+  const offsetFrames = loopLength > 0 ? Math.round((Number(layer.sourceOffsetMs || 0) / 1000) * FPS) % loopLength : 0;
+  const firstLoop = loopLength - offsetFrames;
   const loopMarks = looping && loopLength > 0 && !(layer.sourceAnimationClips || []).length
-    ? Array.from({ length: Math.max(0, Math.min(200, Math.ceil(spanFrames / loopLength) - 1)) }, (_, index) => span.startFrame + (index + 1) * loopLength)
+    ? Array.from({ length: Math.max(0, Math.min(200, Math.ceil((spanFrames - firstLoop) / loopLength))) }, (_, index) => span.startFrame + firstLoop + index * loopLength).filter((frame) => frame <= span.endFrame)
     : [];
   return (
     <div
-      className={`cb-timeline-row ${selected ? "selected" : ""} ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""} ${layer.hidden ? "is-hidden" : ""} ${layer.locked ? "is-locked" : ""}`}
-      onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; handlers.dragOver(layer.id); }}
-      onDragLeave={() => handlers.dragLeave(layer.id)}
-      onDrop={(event) => handlers.drop(event, layer.id)}
+      className={`cb-timeline-row ${selected ? "selected" : ""} ${dragging ? "dragging" : ""} ${dropLine ? `drop-${dropLine}` : ""} ${layer.hidden ? "is-hidden" : ""} ${layer.locked ? "is-locked" : ""} ${group ? "is-group" : layer.type === "character" ? "is-character" : ""}`}
     >
-      <div className="cb-layer-name">
-        <button className="cb-layer-drag-handle" draggable onDragStart={(event) => handlers.dragStart(event, layer.id)} onDragEnd={handlers.dragEnd} title="Drag layer up or down">⋮⋮</button>
-        <button className="cb-layer-select" onClick={() => handlers.selectLayer(layer.id)} title={layer.name}>
-          <b>{iconFor(layer.type)}</b>
-          <span>{`Layer ${String(displayIndex + 1).padStart(2, "0")}`}<small>{layer.type === "empty" ? "Empty layer" : layer.name}</small></span>
-        </button>
+      <div className="cb-layer-name" onPointerDown={(event) => handlers.namePress(event, layer.id)} onContextMenu={(event) => handlers.nameMenu(event, layer.id)}
+        title="Drag up or down to move the layer. Double-click its name to rename it.">
+        <span className="cb-layer-drag-handle" aria-hidden="true">⋮⋮</span>
+        {renaming ? (
+          <div className="cb-layer-select cb-layer-renaming">
+            <b>{group ? "❒" : iconFor(layer.type)}</b>
+            <span><RenameBox value={title} label="Layer name" onDone={(value) => handlers.finishRename(layer.id, value)} /></span>
+          </div>
+        ) : (
+          <button className="cb-layer-select" onClick={(event) => handlers.selectLayer(layer.id, event.shiftKey ? "range" : event.metaKey || event.ctrlKey ? "toggle" : undefined)} title={title}>
+            <b>{group ? "❒" : iconFor(layer.type)}</b>
+            <span><em className="cb-layer-title" onDoubleClick={(event) => { event.stopPropagation(); handlers.startRename(layer.id); }}>{title}</em></span>
+          </button>
+        )}
         <span className="cb-layer-flags">
-          {layer.hidden && <button type="button" className="cb-layer-flag" onClick={() => handlers.toggleHidden(layer.id)} title="Hidden — click to show" aria-label={`Show ${layer.name}`}><ToolIcon kind="hide" /></button>}
+          {group && (
+            <button type="button" className="cb-layer-flag cb-layer-enter" onClick={(event) => { event.stopPropagation(); handlers.enterGroup(layer.id); }}
+              title={`Go inside ${title} (its layers show here; Esc steps out)`} aria-label={`Go inside ${title}`}>⤵</button>
+          )}
+          {/* Every layer's eye (Animate): show / hide in the editor; ⌥-click shows only this layer. Exports still include it. */}
+          <button type="button" className={`cb-layer-flag cb-layer-eye ${layer.hidden ? "off" : ""}`} aria-pressed={!layer.hidden}
+            onClick={(event) => { event.stopPropagation(); if (event.altKey) handlers.soloLayer(layer.id); else handlers.toggleHidden(layer.id); }}
+            title={layer.hidden ? "Hidden in the editor — click to show (⌥-click: show only this layer)" : "Click to hide in the editor (⌥-click: show only this layer)"}
+            aria-label={`${layer.hidden ? "Show" : "Hide"} ${layer.name}`}><ToolIcon kind={layer.hidden ? "hide" : "show"} /></button>
           {layer.locked && <button type="button" className="cb-layer-flag" onClick={() => handlers.toggleLocked(layer.id)} title="Locked — click to unlock" aria-label={`Unlock ${layer.name}`}><ToolIcon kind="lock" /></button>}
           {animated && (
             <button type="button" className={`cb-layer-loop ${looping ? "active" : ""}`} aria-pressed={looping}
@@ -250,7 +326,7 @@ const LayerRow = memo(function LayerRow({ layer, displayIndex, cell, lastFrame, 
       </div>
       <div className="cb-track-lane" onPointerDown={(event) => handlers.lanePress(event, layer)} onMouseDown={(event) => event.preventDefault()} onDoubleClick={(event) => handlers.laneDoubleClick(event, layer)} onContextMenu={(event) => handlers.contextMenu(event, layer)}>
         <span
-          className={`cb-frame-span cb-span-${layer.type} ${spanEditing ? "editing" : ""}`}
+          className={`cb-frame-span cb-span-${group ? "group" : layer.type} ${spanEditing ? "editing" : ""}`}
           style={{ left: `${span.startFrame * cell}px`, width: `${spanFrames * cell}px` }}
           title={`${layer.type === "empty" ? "Empty layer" : layer.name} · frames ${span.startFrame + 1}–${span.endFrame + 1}`}
         >
@@ -274,6 +350,7 @@ const LayerRow = memo(function LayerRow({ layer, displayIndex, cell, lastFrame, 
           );
         })}
         {selection && <span className="cb-frame-selection" style={{ left: `${selection.from * cell}px`, width: `${(selection.to - selection.from + 1) * cell}px` }} aria-hidden="true" />}
+        {moveGhost && <span className={`cb-frame-move-ghost ${moveGhost.invalid ? "invalid" : ""}`} style={{ left: `${moveGhost.from * cell}px`, width: `${(moveGhost.to - moveGhost.from + 1) * cell}px` }} aria-hidden="true" />}
         {ghostFrame != null && <span className="cb-keyframe-ghost" style={{ left: `${ghostFrame * cell}px`, width: `${cell}px` }} aria-hidden="true"><i /></span>}
         {[...keyframes].map((frame) => (
           <span key={`key-${frame}`} className={`cb-keyframe-cell ${layer.type === "empty" ? "blank" : ""}`} style={{ left: `${frame * cell}px`, width: `${cell}px` }}
@@ -343,22 +420,34 @@ type DragState = {
   lane?: HTMLElement;
   anchorRow?: number;
   lastCell?: string;
+  /** Up / down onto another layer (move, keyframe and start-cell drags on one layer). */
+  originY?: number;
+  sourceRow?: number;
+  /** The frames that go to another layer, and whether that is the layer's whole content. */
+  range?: { from: number; to: number; whole: boolean };
+  /** Set while the pointer is over another layer or a gap between layers. */
+  vertical?: { target: LayerDropTarget; shift: number; invalid: boolean } | null;
 };
 
-export default function Timeline({ layers, selectedObjectId, isPlaying, playhead, activeDuration, onSelectLayer, onPlay, onSeek, onReorderLayer, onDeleteLayer, onUpdateLayerTiming, onToggleLayerLoop, sourceDurations = {}, onClipDragChange, frameSelection = null, onSelectFrames, onFrameAction, onAddLayer, onToggleLayerHidden, onToggleLayerLocked, onMoveKeyframe, onSetTweenEase }: Props) {
+/** A layer being dragged by its name: the gap (0 = above the top layer) it would drop into. */
+type LayerDrag = { id: string; originY: number; active: boolean; gap: number | null };
+
+export default function Timeline({ layers, selectedObjectId, isPlaying, playhead, activeDuration, onSelectLayer, onSelectLayers, onPlay, onSeek, onReorderLayers, onMoveFramesToLayer, onDeleteLayer, onUpdateLayerTiming, onToggleLayerLoop, sourceDurations = {}, onClipDragChange, frameSelection = null, onSelectFrames, onFrameAction, onAddLayer, onToggleLayerHidden, onSoloLayer, onRenameLayer, onRenameObject, onEnterGroup, onMergeLayers, onSplitLayers, layerMemberCounts = {}, onToggleLayerLocked, onMoveKeyframe, onSetTweenEase }: Props) {
   const frameCount = Math.max(1, Math.ceil(activeDuration * FPS - 1e-6));
   const lastFrame = frameCount - 1;
   const playheadFrame = Math.max(0, Math.min(lastFrame, Math.floor(playhead * FPS + 1e-6)));
   const selectedLayer = layers.find((layer) => layer.id === selectedObjectId) || null;
   const timelineLayers = useMemo(() => [...layers].reverse(), [layers]);
-  const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [layerDrag, setLayerDrag] = useState<LayerDrag | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
+  /** Frames dragged up / down: the row they would land on (ghost) or the gap (line). */
+  const [frameDrop, setFrameDrop] = useState<{ row: number | null; gap: number | null; from: number; to: number; invalid: boolean } | null>(null);
   const [timelineZoom, setTimelineZoom] = useState(DEFAULT_ZOOM);
   const [layerPanelWidth, setLayerPanelWidth] = useState(210);
   const [viewWidth, setViewWidth] = useState(800);
   const [viewHeight, setViewHeight] = useState(200);
   const [menu, setMenu] = useState<{ x: number; y: number; layerIds: string[]; from: number; to: number } | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [keyframeGhost, setKeyframeGhost] = useState<{ layerId: string; frame: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [menuPosition, setMenuPosition] = useState<{ left: number; top: number } | null>(null);
@@ -488,7 +577,8 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
       if (anchorRow >= 0) { onSelectFrames?.(blockSelection(anchorRow, row, frameSelection.from, frame)); return; }
     }
     const span = layerSpan(layer, lastFrame);
-    const base = { layerId: layer.id, originX: event.clientX, startFrame: span.startFrame, endFrame: span.endFrame, pressedFrame: frame };
+    const base = { layerId: layer.id, originX: event.clientX, originY: event.clientY, sourceRow: row, startFrame: span.startFrame, endFrame: span.endFrame, pressedFrame: frame };
+    const wholeRange = { from: span.startFrame, to: span.endFrame, whole: true };
     const handle = (event.target as HTMLElement).closest<HTMLElement>(".cb-span-handle");
     if (handle && layer.type !== "empty") {
       setDrag({ ...base, mode: handle.classList.contains("left") ? "resize-start" : "resize-end", active: true });
@@ -506,18 +596,23 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
         .filter((item): item is EditorObject => Boolean(item && item.type !== "empty"))
         .map((item) => ({ id: item.id, startFrame: layerSpan(item, lastFrame).startFrame }));
       const carried = frameSelection && inSelection ? { layerIds: selectedIds, from: frameSelection.from, to: frameSelection.to } : undefined;
-      setDrag({ ...base, mode: "move", active: false, moves, carried, delta: 0 });
+      // Frames of one layer can also go up or down to another layer (a block over several layers moves in time only).
+      const range = carried && carried.layerIds.length === 1
+        ? { from: Math.max(carried.from, span.startFrame), to: Math.min(carried.to, span.endFrame), whole: layer.type === "audio" || (carried.from <= span.startFrame && carried.to >= span.endFrame) }
+        : undefined;
+      setDrag({ ...base, mode: "move", active: false, moves, carried, delta: 0, range });
     };
     // A block of selected frames moves together, keyframes included.
     if (inSelection && multiCell && insideContent) { startMove(); return; }
     // Press on a keyframe: drag it to another frame (a click still just selects the frame).
+    // Up or down, a keyframe takes the layer's whole content to the other layer.
     if (onKeyframe) {
-      setDrag({ ...base, mode: "keyframe", active: false, targetFrame: frame });
+      setDrag({ ...base, mode: "keyframe", active: false, targetFrame: frame, range: layer.type !== "empty" ? wholeRange : undefined });
       return;
     }
     // The span's first cell is its start keyframe: dragging it trims or extends the start.
     if (layer.type !== "empty" && frame === span.startFrame) {
-      setDrag({ ...base, mode: "resize-start", active: false });
+      setDrag({ ...base, mode: "resize-start", active: false, range: wholeRange });
       return;
     }
     if (inSelection && insideContent) { startMove(); return; }
@@ -559,12 +654,29 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
         return;
       }
       const dx = event.clientX - drag.originX;
+      const dy = event.clientY - (drag.originY ?? event.clientY);
       if (!drag.active) {
-        if (Math.abs(dx) < 4) return;
+        if (Math.abs(dx) < 4 && (!drag.range || Math.abs(dy) < 6)) return;
         drag.active = true;
         if (drag.mode !== "keyframe") onClipDragChange?.(true);
       }
       const delta = Math.round(dx / cell);
+      // Over another layer (or between layers): the frames would go there (Animate).
+      const over = drag.range ? dropTargetAt(event.clientY, drag.sourceRow ?? -1, drag.range.whole) : null;
+      if (over && drag.range) {
+        if (!drag.vertical) {
+          // Back to where it started in time, then show where it would land instead.
+          setKeyframeGhost(null);
+          if (drag.mode === "move" && drag.delta) { for (const item of drag.moves || []) onUpdateLayerTiming?.(item.id, { startTime: item.startFrame / FPS }); drag.delta = 0; }
+          if (drag.mode === "resize-start") onUpdateLayerTiming?.(drag.layerId, { startTime: drag.startFrame / FPS, actionDurationMs: ((drag.endFrame - drag.startFrame + 1) / FPS) * 1000 });
+        }
+        const shift = Math.max(-drag.range.from, delta);
+        drag.vertical = { target: over.target, shift, invalid: over.invalid };
+        const preview = { row: over.row, gap: over.gap, from: drag.range.from + shift, to: drag.range.to + shift, invalid: over.invalid };
+        setFrameDrop((current) => (current && current.row === preview.row && current.gap === preview.gap && current.from === preview.from && current.invalid === preview.invalid ? current : preview));
+        return;
+      }
+      if (drag.vertical) { drag.vertical = null; setFrameDrop(null); }
       if (drag.mode === "keyframe") {
         drag.targetFrame = Math.max(0, drag.pressedFrame + delta);
         setKeyframeGhost({ layerId: drag.layerId, frame: drag.targetFrame });
@@ -584,6 +696,13 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
       }
     };
     const handleUp = () => {
+      if (drag.vertical && drag.range) {
+        setFrameDrop(null);
+        if (drag.mode !== "keyframe") onClipDragChange?.(false);
+        onMoveFramesToLayer?.(drag.layerId, drag.range.from, drag.range.to, drag.vertical.shift, drag.vertical.target);
+        setDrag(null);
+        return;
+      }
       if (drag.mode === "keyframe") {
         setKeyframeGhost(null);
         if (drag.active && drag.targetFrame != null && drag.targetFrame !== drag.pressedFrame) {
@@ -610,7 +729,7 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
       window.removeEventListener("pointerup", handleUp);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cell, cells, drag, layerPanelWidth, onClipDragChange, onMoveKeyframe, onSelectFrames, onUpdateLayerTiming, timelineLayers]);
+  }, [cell, cells, drag, layerPanelWidth, onClipDragChange, onMoveFramesToLayer, onMoveKeyframe, onSelectFrames, onUpdateLayerTiming, timelineLayers]);
 
   // Right-click inside the selection keeps it (the menu acts on every selected layer).
   const openMenu = (event: ReactMouseEvent<HTMLDivElement>, layer: EditorObject) => {
@@ -622,24 +741,101 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
     setMenu({ x: event.clientX, y: event.clientY, layerIds: selectionLayerIds(selection), from: selection.from, to: selection.to });
   };
 
-  const startLayerDrag = (event: ReactDragEvent<HTMLElement>, layerId: string) => {
-    setDraggingLayerId(layerId);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", layerId);
+  /** The layer rows on screen, top to bottom. */
+  const rowRects = () => [...(tracksRef.current?.querySelectorAll<HTMLElement>(".cb-timeline-row:not(.cb-filler-row)") || [])].map((element) => element.getBoundingClientRect());
+  /** The gap (0 = above the top row … n = below the last) nearest the pointer. */
+  const gapAt = (clientY: number) => {
+    const rects = rowRects();
+    const index = rects.findIndex((rect) => clientY < rect.top + rect.height / 2);
+    return index < 0 ? rects.length : index;
+  };
+  // Scroll the layer list when a drag runs past its top or bottom.
+  const autoScrollRows = (clientY: number) => {
+    const tracks = tracksRef.current;
+    if (!tracks) return;
+    const box = tracks.getBoundingClientRect();
+    if (clientY > box.bottom - 12) tracks.scrollTop += ROW_HEIGHT / 2;
+    else if (clientY < box.top + RULER_HEIGHT + 12 && tracks.scrollTop > 0) tracks.scrollTop -= ROW_HEIGHT / 2;
+  };
+  /**
+   * Frames dragged up or down: the layer under the pointer (its middle) or the gap between two
+   * layers (near a row's edge, or below the last layer). Null on the layer they came from — and,
+   * for a whole layer, on the gaps right next to it — where the drag moves frames in time instead.
+   * A locked layer can't take them, nor can a character's layer (it holds just its character).
+   */
+  const dropTargetAt = (clientY: number, sourceRow: number, whole: boolean): { target: LayerDropTarget; row: number | null; gap: number | null; invalid: boolean } | null => {
+    autoScrollRows(clientY);
+    const rects = rowRects();
+    if (!rects.length) return null;
+    const EDGE = 6;
+    let row: number | null = null;
+    let gap: number | null = null;
+    if (clientY < rects[0].top) gap = 0;
+    else if (clientY >= rects[rects.length - 1].bottom) gap = rects.length;
+    else {
+      const index = rects.findIndex((rect) => clientY >= rect.top && clientY < rect.bottom);
+      if (index < 0) return null;
+      const rect = rects[index];
+      if (clientY < rect.top + EDGE) gap = index;
+      else if (clientY >= rect.bottom - EDGE) gap = index + 1;
+      else row = index;
+    }
+    if (row === sourceRow) return null;
+    if (gap != null && whole && (gap === sourceRow || gap === sourceRow + 1)) return null;
+    if (row != null) {
+      const layer = timelineLayers[row];
+      // A layer that holds something takes the frames too (several objects per layer). A locked layer
+      // refuses, and so does a character's layer, or a character's frames onto a non-empty layer:
+      // a character layer holds just its character.
+      // A group's row neither takes frames nor goes onto a layer that holds something.
+      const source = timelineLayers[sourceRow];
+      const clash = layer && layer.type !== "empty" && (isGroupRow(layer.id) || isGroupRow(source?.id) || !canShareLayer([layer, ...(source ? [source] : [])]));
+      return layer ? { target: { kind: "layer", id: layer.id }, row, gap: null, invalid: Boolean(layer.locked || clash) } : null;
+    }
+    return { target: { kind: "gap", belowId: timelineLayers[gap!]?.id ?? null }, row: null, gap, invalid: false };
   };
 
-  const dropLayer = (event: ReactDragEvent<HTMLElement>, targetId: string) => {
-    event.preventDefault();
-    const draggedId = draggingLayerId || event.dataTransfer.getData("text/plain");
-    setDraggingLayerId(null);
-    setDropTargetId(null);
-    if (!draggedId || draggedId === targetId) return;
-    onReorderLayer?.(draggedId, targetId);
+  // Press on a layer's name and drag it up or down (Animate); a line shows where it will go.
+  const beginLayerPress = (event: ReactPointerEvent<HTMLDivElement>, layerId: string) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest(".cb-layer-flags, .cb-layer-delete")) return;
+    setLayerDrag({ id: layerId, originY: event.clientY, active: false, gap: null });
   };
+  useEffect(() => {
+    if (!layerDrag) return;
+    let release: (() => void) | null = null;
+    const move = (event: PointerEvent) => {
+      if (!layerDrag.active) {
+        if (Math.abs(event.clientY - layerDrag.originY) < 5) return;
+        release = blockTextSelection();
+      }
+      autoScrollRows(event.clientY);
+      const gap = gapAt(event.clientY);
+      if (layerDrag.active && gap === layerDrag.gap) return;
+      setLayerDrag({ ...layerDrag, active: true, gap });
+    };
+    const up = () => {
+      const from = timelineLayers.findIndex((layer) => layer.id === layerDrag.id);
+      const gap = layerDrag.gap;
+      setLayerDrag(null);
+      if (!layerDrag.active || gap == null || from < 0 || gap === from || gap === from + 1) return;
+      const ids = timelineLayers.map((layer) => layer.id);
+      ids.splice(from, 1);
+      ids.splice(gap > from ? gap - 1 : gap, 0, layerDrag.id);
+      onReorderLayers?.(ids);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
+    return () => {
+      release?.();
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layerDrag, onReorderLayers, timelineLayers]);
 
   // Menu items are available when they apply to at least one of the selected layers.
   const menuLayers = menu ? menu.layerIds.map((id) => layers.find((layer) => layer.id === id)).filter((layer): layer is EditorObject => Boolean(layer)) : [];
-  const menuHasKeyframe = Boolean(menu && menuLayers.some((layer) => layer.type === "character" && (layer.keyframes || []).some((keyframe) => {
+  const menuHasKeyframe = Boolean(menu && menuLayers.some((layer) => hasMotionKeys(layer) && (layer.keyframes || []).some((keyframe) => {
     const frame = Math.round(keyframe.time * FPS);
     return frame >= menu.from && frame <= menu.to;
   })));
@@ -658,27 +854,69 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
 
   // Rows get one stable handler object (calling the latest implementations), so memoized rows
   // don't redraw on every playback frame.
-  const latestRef = useRef({ beginLanePress, selectLayerSpan, openMenu, startLayerDrag, dropLayer, onSelectLayer, onDeleteLayer, onToggleLayerLoop, onToggleLayerHidden, onToggleLayerLocked, onSetTweenEase });
-  latestRef.current = { beginLanePress, selectLayerSpan, openMenu, startLayerDrag, dropLayer, onSelectLayer, onDeleteLayer, onToggleLayerLoop, onToggleLayerHidden, onToggleLayerLocked, onSetTweenEase };
+  // Layer names (Animate): a click selects the layer; Shift+click every layer from the last clicked
+  // one to this one; ⌘ / Ctrl-click adds a layer to the selection or takes it out.
+  const nameAnchorRef = useRef<string | null>(null);
+  const clickLayerName = (id: string, how?: "range" | "toggle") => {
+    const order = timelineLayers.map((layer) => layer.id);
+    const current = frameSelection ? selectionLayerIds(frameSelection) : selectedObjectId ? [selectedObjectId] : [];
+    const anchor = nameAnchorRef.current && order.includes(nameAnchorRef.current) ? nameAnchorRef.current : current[0];
+    if (!how || !onSelectLayers || (how === "range" && !anchor)) {
+      nameAnchorRef.current = id;
+      onSelectLayer(id);
+      return;
+    }
+    if (how === "range") {
+      const [a, b] = [order.indexOf(anchor!), order.indexOf(id)].sort((x, y) => x - y);
+      onSelectLayers(order.slice(a, b + 1));
+      return;
+    }
+    nameAnchorRef.current = id;
+    const next = current.includes(id) ? current.filter((key) => key !== id) : [...current, id];
+    if (next.length) onSelectLayers(order.filter((key) => next.includes(key)));
+  };
+  // Right-click a layer's name: the layer menu, at the playhead.
+  const openNameMenu = (event: ReactMouseEvent<HTMLDivElement>, id: string) => {
+    event.preventDefault();
+    onSelectLayer(id);
+    setMenu({ x: event.clientX, y: event.clientY, layerIds: [id], from: playheadFrame, to: playheadFrame });
+  };
+  // A merged layer gets a name of its own; renaming a one-object layer renames its object.
+  const finishRename = (id: string, value: string | null) => {
+    setRenaming(null);
+    if (value == null) return;
+    const layer = layers.find((item) => item.id === id);
+    if (!layer) return;
+    const name = value.trim();
+    if ((layerMemberCounts[id] || 1) > 1) { if (name !== (layer.layerName || "")) onRenameLayer?.(id, name); return; }
+    if (name && (name !== layer.name || layer.layerName)) onRenameObject?.(id, name);
+  };
+  const latestRef = useRef({ clickLayerName, beginLanePress, selectLayerSpan, openMenu, openNameMenu, finishRename, beginLayerPress, onSelectLayer, onDeleteLayer, onToggleLayerLoop, onToggleLayerHidden, onSoloLayer, onToggleLayerLocked, onSetTweenEase, onEnterGroup });
+  latestRef.current = { clickLayerName, beginLanePress, selectLayerSpan, openMenu, openNameMenu, finishRename, beginLayerPress, onSelectLayer, onDeleteLayer, onToggleLayerLoop, onToggleLayerHidden, onSoloLayer, onToggleLayerLocked, onSetTweenEase, onEnterGroup };
   const rowHandlers = useMemo<RowHandlers>(() => ({
     lanePress: (event, layer) => latestRef.current.beginLanePress(event, layer),
-    laneDoubleClick: (event, layer) => latestRef.current.selectLayerSpan(event, layer),
+    laneDoubleClick: (event, layer) => (isGroupRow(layer.id) ? latestRef.current.onEnterGroup?.(layer.id) : latestRef.current.selectLayerSpan(event, layer)),
     contextMenu: (event, layer) => latestRef.current.openMenu(event, layer),
-    selectLayer: (id) => latestRef.current.onSelectLayer(id),
+    selectLayer: (id, how) => latestRef.current.clickLayerName(id, how),
     deleteLayer: (id) => latestRef.current.onDeleteLayer?.(id),
     toggleLoop: (id) => latestRef.current.onToggleLayerLoop?.(id),
     toggleHidden: (id) => latestRef.current.onToggleLayerHidden?.(id),
+    soloLayer: (id) => latestRef.current.onSoloLayer?.(id),
     toggleLocked: (id) => latestRef.current.onToggleLayerLocked?.(id),
-    dragStart: (event, id) => latestRef.current.startLayerDrag(event, id),
-    dragEnd: () => { setDraggingLayerId(null); setDropTargetId(null); },
-    dragOver: (id) => setDropTargetId(id),
-    dragLeave: (id) => setDropTargetId((current) => (current === id ? null : current)),
-    drop: (event, id) => latestRef.current.dropLayer(event, id),
+    enterGroup: (id) => latestRef.current.onEnterGroup?.(id),
+    namePress: (event, id) => latestRef.current.beginLayerPress(event, id),
+    nameMenu: (event, id) => latestRef.current.openNameMenu(event, id),
+    startRename: (id) => setRenaming(id),
+    finishRename: (id, value) => latestRef.current.finishRename(id, value),
     setEase: (layerId, keyframeId, easeIn, easeOut) => latestRef.current.onSetTweenEase?.(layerId, keyframeId, easeIn, easeOut),
   }), []);
   const selectedFrameLayers = useMemo(() => new Set(selectionLayerIds(frameSelection)), [frameSelection]);
   const fillerCount = Math.max(1, Math.ceil((viewHeight - RULER_HEIGHT) / ROW_HEIGHT) - timelineLayers.length);
   const playheadX = layerPanelWidth + playheadFrame * cell + cell / 2 - 1;
+  // The line where a dragged layer (or frames going to a new layer) would land.
+  const dropGap = layerDrag?.active ? layerDrag.gap : frameDrop?.gap ?? null;
+  const dropLineFor = (index: number): "above" | "below" | null =>
+    dropGap == null ? null : dropGap === index ? "above" : dropGap === timelineLayers.length && index === timelineLayers.length - 1 ? "below" : null;
 
   return (
     <section className="cb-timeline cb-frame-timeline" style={{ ["--cb-layer-panel-width" as string]: `${layerPanelWidth}px`, ["--cb-cell" as string]: `${cell}px`, ["--cb-lane-width" as string]: `${laneWidth}px` }}>
@@ -721,16 +959,18 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
           <LayerRow
             key={layer.id}
             layer={layer}
-            displayIndex={displayIndex}
             cell={cell}
             lastFrame={lastFrame}
-            selected={selectedObjectId === layer.id}
-            dragging={draggingLayerId === layer.id}
-            dropTarget={dropTargetId === layer.id}
+            selected={selectedObjectId === layer.id || selectedFrameLayers.has(layer.id)}
+            dragging={Boolean(layerDrag?.active && layerDrag.id === layer.id)}
+            dropLine={dropLineFor(displayIndex)}
+            moveGhost={frameDrop?.row === displayIndex ? frameDrop : null}
             selection={selectedFrameLayers.has(layer.id) ? frameSelection : null}
             ghostFrame={keyframeGhost?.layerId === layer.id ? keyframeGhost.frame : null}
             spanEditing={Boolean(drag?.active && drag.mode !== "select" && (drag.mode === "move" ? drag.moves?.some((item) => item.id === layer.id) : drag.layerId === layer.id))}
             loopLength={sourceDurations[layer.id] ? Math.round(sourceDurations[layer.id] * FPS) : 0}
+            memberCount={layerMemberCounts[layer.id] || 1}
+            renaming={renaming === layer.id}
             handlers={rowHandlers}
           />
         ))}
@@ -750,6 +990,14 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
           <span className="cb-frame-menu-sep" aria-hidden="true" />
           <button type="button" role="menuitem" disabled={!menuCanTween} onClick={() => runMenu("tween")}>Create Tween<kbd>⇧M</kbd></button>
           <button type="button" role="menuitem" disabled={!menuCanRemoveTween} onClick={() => runMenu("remove-tween")}>Remove Tween<kbd>⌥⇧M</kbd></button>
+          <span className="cb-frame-menu-sep" aria-hidden="true" />
+          <button type="button" role="menuitem" disabled={!onMergeLayers || menu.layerIds.length < 2}
+            onClick={() => { onMergeLayers?.(menu.layerIds); setMenu(null); }} title="Put the selected layers' objects on one layer">Merge Layers<kbd>⇧⌘M</kbd></button>
+          <button type="button" role="menuitem" disabled={!onSplitLayers || !menu.layerIds.some((id) => (layerMemberCounts[id] || 1) > 1)}
+            onClick={() => { onSplitLayers?.(menu.layerIds); setMenu(null); }} title="Each object of these layers on a layer of its own">Distribute to Layers<kbd>⇧⌘D</kbd></button>
+          <span className="cb-frame-menu-sep" aria-hidden="true" />
+          <button type="button" role="menuitem" disabled={!onRenameLayer || menu.layerIds.length !== 1}
+            onClick={() => { setRenaming(menu.layerIds[0]); setMenu(null); }}>Rename Layer…<kbd>double-click</kbd></button>
         </div>
       )}
     </section>
