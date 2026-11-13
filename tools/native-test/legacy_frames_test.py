@@ -81,10 +81,11 @@ try:
         return 100.0 * sum(1 for p in ImageChops.difference(a, b).getdata() if p > 40) / ink
 
     sc0 = scene(); ed0 = json.loads(json.dumps(sc0["editor_data"])); o0 = ed0["objects"][0]
-    real = json.load(open(SOURCE))[INDEX]
-    for k in ("nativePose", "nativePoseFit") + OLD: o0.pop(k, None)
-    for k in OLD:
-        if real.get(k): o0[k] = real[k]
+    if not os.environ.get("AS_IS"):  # AS_IS=1: keep the scene's own old edits (a copy of a real project) instead of seeding a fixture
+        real = json.load(open(SOURCE))[INDEX]
+        for k in ("nativePose", "nativePoseFit") + OLD: o0.pop(k, None)
+        for k in OLD:
+            if real.get(k): o0[k] = real[k]
     seeded = json.loads(json.dumps(ed0))
     patch(sc0, ed0)
     A = shots("A-old-player", scene())

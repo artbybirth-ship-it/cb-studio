@@ -64,3 +64,28 @@ assert.equal(hx.frames[0].morph[0].curves.length, 6);
 let two = o.setTween(L([{ i: 0, d: 4, elements: [sq(0, 0, 20, "#00FF00"), sq(100, 0, 20, "#00FF00")] }, { i: 4, d: 1, elements: [sq(0, 0, 20, "#00FF00")] }]), 0, "shape");
 assert.equal(two.frames[0].morph.length, 2);
 console.log("ops: all assertions passed");
+
+// Phase 4a: the eye and Delete layer
+{
+  const mk = (name, parent) => ({ name, type: "normal", parent, hidden: false, frames: [{ i: 0, d: 5, elements: [inst(0)] }] });
+  const base = mk("a", null);
+  const off = o.setLayerOff(base, true);
+  assert.equal(off.off, true); assert.notStrictEqual(off, base); assert.ok(!base.off, "input not changed");
+  assert.equal(o.setLayerOff(base, false), base, "already visible is a no-op");
+  assert.equal(o.setLayerOff(off, true), off, "already off is a no-op");
+  assert.equal(o.setLayerOff(off, false).off, false);
+  // delete: parents are renumbered, and a deleted folder's children move up
+  const ls = [mk("top", null), mk("folder", null), mk("in-folder", 1), mk("after", null), mk("in-folder2", 1)];
+  const d1 = o.deleteLayers(ls, [0]);
+  assert.deepEqual(d1.map((l) => l.name + ":" + l.parent), ["folder:null", "in-folder:0", "after:null", "in-folder2:0"], "renumbered");
+  const d2 = o.deleteLayers(ls, [1]);
+  assert.deepEqual(d2.map((l) => l.name + ":" + l.parent), ["top:null", "in-folder:null", "after:null", "in-folder2:null"], "children of a deleted folder move up");
+  const d3 = o.deleteLayers(ls, [2, 4]);
+  assert.deepEqual(d3.map((l) => l.name), ["top", "folder", "after"]);
+  assert.equal(o.deleteLayers(ls, []), ls, "nothing to delete returns the same list");
+  assert.equal(o.deleteLayers(ls, [99]), ls, "out of range ignored");
+  assert.equal(ls.length, 5, "input not changed");
+  const nested = [mk("f1", null), mk("f2", 0), mk("leaf", 1)];
+  assert.deepEqual(o.deleteLayers(nested, [1]).map((l) => l.name + ":" + l.parent), ["f1:null", "leaf:0"], "grandchild lands in the grandparent");
+  console.log("layer eye and delete ok");
+}

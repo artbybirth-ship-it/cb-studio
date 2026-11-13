@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FlaDocument, FlaElement, Layer, Matrix, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
-import { clearKeyframe, commit, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setMatrix, undo, type History } from "../lib/native/ops";
+import { clearKeyframe, commit, deleteLayers, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setLayerOff, setMatrix, undo, type History } from "../lib/native/ops";
 import { innerFrame, layerStateAt } from "../lib/native/evaluate";
 import { applyEdits, editsOf, parseEdits, serializeEdits, type NativeEdits } from "../lib/native/store";
 import { IDENTITY, importElements, invert, mul, poseScale, registerLibrary } from "../lib/native/library";
@@ -101,6 +101,23 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     if (count(next.present) !== count(hist.present)) { setElIndex(null); setOthers([]); }
     setHist(next);
   };
+  /** Delete layer: the layers of the selected parts, or the layer picked in the timeline when no part is selected. */
+  const deleteSelected = useCallback(() => {
+    if (!base) return;
+    const chosen = elIndex != null ? [layerIndex, ...others.map((o) => o.layer)] : others.length ? others.map((o) => o.layer) : [layerIndex];
+    const doomed = [...new Set(chosen)].filter((i) => i >= 0 && i < base.layers.length);
+    if (!doomed.length) return;
+    const layers = deleteLayers(base.layers, doomed);
+    const map = new Map(working);
+    map.set(symbol, { ...base, layers, length: lengthOf(layers) });
+    setHist((h) => commit(h, map));
+    setLayerIndex(0); setElIndex(null); setOthers([]);
+    setNote(`Deleted ${doomed.length > 1 ? `${doomed.length} layers` : `layer ${base.layers[doomed[0]].name}`}`);
+  }, [base, working, symbol, elIndex, layerIndex, others]);
+  const deleteRef = useRef<() => void>(() => {});
+  deleteRef.current = deleteSelected;
+  /** The eye: hides or shows one layer (undoable). */
+  const toggleEye = (index: number) => { const layer = base?.layers[index]; if (layer) { edit((l) => setLayerOff(l, !layer.off), index); } };
   const doUndo = () => stepHistory(undo);
   const doRedo = () => stepHistory(redo);
 
@@ -115,6 +132,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       if (mod && e.key.toLowerCase() === "z") { take(); if (e.shiftKey) doRedo(); else doUndo(); return; }
       if (mod && e.key.toLowerCase() === "c") { take(); copyRef.current(); return; }
       if (mod && e.key.toLowerCase() === "v") { take(); pasteRef.current(); return; }
+      if (e.key === "Delete" || e.key === "Backspace") { take(); deleteRef.current(); return; }
       if (e.key === "F5") { take(); (e.shiftKey ? commands["remove-frames"] : commands["insert-frame"])(); }
       else if (e.key === "F6") { take(); (e.shiftKey ? commands["clear-keyframe"] : commands["insert-keyframe"])(); }
       else if (e.key === "F7") { take(); commands["blank-keyframe"](); }
@@ -435,6 +453,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         <button data-testid="clear-keyframe" style={btn} onClick={commands["clear-keyframe"]}>⇧F6 Clear</button>
         <button data-testid="copy-part" style={btn} onClick={copyPart}>⌘C Copy part</button>
         <button data-testid="paste-part" style={btn} onClick={() => void pastePart()}>⌘V Paste as layer</button>
+        <button data-testid="delete-layer" style={btn} onClick={deleteSelected}>⌫ Delete layer</button>
         <button data-testid="undo" style={btn} onClick={doUndo} disabled={!hist.past.length}>Undo</button>
         <button data-testid="redo" style={btn} onClick={doRedo} disabled={!hist.future.length}>Redo</button>
         <label style={{ font: "12px system-ui" }}><input type="checkbox" checked={allLayers} onChange={(e) => setAllLayers(e.target.checked)} /> all layers</label>
@@ -456,7 +475,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
             </div>
           ))}
           {part && <div style={{ marginTop: 6 }}>x {part.m[4].toFixed(1)} · y {part.m[5].toFixed(1)}</div>}
-          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it. ⇧-click extends the frame selection. , and . step frames.</div>
+          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move; Delete removes its layer, the dot beside a layer hides it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it. ⇧-click extends the frame selection. , and . step frames.</div>
         </div>
       </div>
       {shown && (
@@ -470,7 +489,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
           {shown.layers.map((layer, index) => (
             <div key={index} style={{ display: "flex", height: ROW, borderTop: "1px solid #e4e4e4", background: index === layerIndex ? "#f4f8ff" : undefined }}>
               <div style={{ width: 170, flex: "none", font: "12px system-ui", padding: "4px 6px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {layer.type !== "normal" ? `[${layer.type}] ` : ""}{layer.name}
+                <button data-testid={`eye-${index}`} title={layer.off ? "Show layer" : "Hide layer"} aria-pressed={!layer.off} style={{ ...btn, padding: "0 4px", marginRight: 4, opacity: layer.off ? 0.4 : 1 }} onClick={() => toggleEye(index)}>{layer.off ? "○" : "●"}</button>
+                <span style={{ opacity: layer.off ? 0.5 : 1 }}>{layer.type !== "normal" ? `[${layer.type}] ` : ""}{layer.name}</span>
               </div>
               <div style={{ position: "relative", width: length * CELL + 40 * CELL, touchAction: "none" }} data-layer={index} onPointerDown={(e) => onRowDown(e, index)} onPointerMove={onRowMove} onPointerUp={onRowUp}>
                 {layer.frames.map((k) => {

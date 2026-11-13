@@ -156,6 +156,30 @@ export function setTween(layer: Layer, frame: number, tween: Keyframe["tween"] |
 
 export const setEase = (layer: Layer, frame: number, ease: Ease): Layer => withFrames(layer, layer.frames.map((k) => (k.i === frame ? { ...k, ease } : k)));
 
+// ---------- layers
+/** The eye: a layer that is off is not drawn (and cannot be picked) at any frame. */
+export const setLayerOff = (layer: Layer, off: boolean): Layer => (!!layer.off === off ? layer : { ...layer, off });
+
+/**
+ * Removes the layers at `indices`. A layer whose parent (folder or mask) was removed moves up to
+ * that parent's own parent; the rest keep their parent, renumbered for the layers that went.
+ */
+export function deleteLayers(layers: Layer[], indices: number[]): Layer[] {
+  const gone = new Set(indices.filter((i) => i >= 0 && i < layers.length));
+  if (!gone.size) return layers;
+  const survivor = (p: number | null): number | null => {
+    while (p != null && gone.has(p)) p = layers[p].parent;
+    return p;
+  };
+  const renumbered = (p: number) => p - [...gone].filter((g) => g < p).length;
+  return layers.flatMap((layer, i) => {
+    if (gone.has(i)) return [];
+    const p = survivor(layer.parent);
+    const parent = p == null ? null : renumbered(p);
+    return [parent === layer.parent ? layer : { ...layer, parent }];
+  });
+}
+
 // ---------- history
 /** Undo/redo over any immutable value (the document, or just one timeline). */
 export type History<T> = { past: T[]; present: T; future: T[] };
