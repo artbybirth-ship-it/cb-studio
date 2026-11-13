@@ -59,11 +59,211 @@
     root.scaleX = root.scaleY = s; root.x = (w - b.width * s) / 2 - b.x * s; root.y = h - (b.y + b.height) * s;
     stage.update();
   }
+  // ---- Recolour: the host character's colour rules (Find/Replace, Light/Dark, Fill/Stroke, Adjust)
+  // drawn onto this swapped-in symbol too. Same rules and maths as cb-animate-bridge.js; every
+  // colour is recomputed from its ORIGINAL, so rules never chain. Whole-character rules ("*") and
+  // rules of the part this symbol replaces apply; other parts' and pose-part ("@…") rules do not.
+  function parseColor(value) {
+    var s = String(value || '').trim(), m;
+    if ((m = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(s))) return { r: parseInt(m[1] + m[1], 16), g: parseInt(m[2] + m[2], 16), b: parseInt(m[3] + m[3], 16), a: 1 };
+    if ((m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(s))) return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16), a: 1 };
+    if ((m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(s))) return { r: +m[1], g: +m[2], b: +m[3], a: m[4] == null ? 1 : +m[4] };
+    return null;
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function hexOf(c) { return '#' + [c.r, c.g, c.b].map(function (v) { return ('0' + Math.round(clamp(v, 0, 255)).toString(16)).slice(-2); }).join(''); }
+  function cssOf(c) { return c.a >= 1 ? hexOf(c) : 'rgba(' + Math.round(c.r) + ',' + Math.round(c.g) + ',' + Math.round(c.b) + ',' + c.a + ')'; }
+  function toHsl(c) {
+    var r = c.r / 255, g = c.g / 255, b = c.b / 255, max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, h = 0, s = 0, d = max - min;
+    if (d > 1e-6) { s = l > .5 ? d / (2 - max - min) : d / (max + min); h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4; h *= 60; }
+    return { h: h, s: s, l: l };
+  }
+  function fromHsl(h, s, l, a) {
+    h = ((h % 360) + 360) % 360; s = clamp(s, 0, 1); l = clamp(l, 0, 1);
+    var c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2, r = 0, g = 0, b = 0;
+    if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; } else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; } else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+    return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255, a: a };
+  }
+  function sameFamily(a, b) {
+    if (Math.abs(a.l - b.l) > .22) return false;
+    if (a.s < .12 && b.s < .12) return true;
+    if (a.s < .12 || b.s < .12) return false;
+    var dh = Math.abs(a.h - b.h); dh = Math.min(dh, 360 - dh);
+    return dh <= 5 && Math.abs(a.s - b.s) <= .3;
+  }
+  function prepareRules(list) {
+    return (list || []).map(function (r) {
+      var scope = String(r.scope || '*');
+      if (scope !== '*' && scope !== partKey && scope.indexOf(partKey + '/') !== 0 && !(partKey && partKey.indexOf(scope + '/') === 0)) return null;
+      var from = parseColor(r.from), to = parseColor(r.to);
+      return from && to ? { target: r.target || 'both', match: r.match === 'shades' ? 'shades' : 'exact', fromHex: hexOf(from), fromHsl: toHsl(from), toRgb: to, toHsl: toHsl(to), whole: scope === '*' } : null;
+    }).filter(Boolean).sort(function (a, b) { return (b.whole ? 1 : 0) - (a.whole ? 1 : 0); });   // whole-character rules first, like the bridge
+  }
+  function mapColor(c, rules, isStroke) {
+    var exact = null, shade = null, hex = hexOf(c), hsl = null;
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (r.target !== 'both' && (r.target === 'stroke') !== isStroke) continue;
+      if (r.match === 'exact') { if (hex === r.fromHex) exact = { r: r.toRgb.r, g: r.toRgb.g, b: r.toRgb.b, a: c.a }; continue; }
+      if (!hsl) hsl = toHsl(c);
+      if (!sameFamily(hsl, r.fromHsl)) continue;
+      shade = fromHsl(r.toHsl.h + (hsl.h - r.fromHsl.h), r.toHsl.s + (hsl.s - r.fromHsl.s), r.toHsl.l + (hsl.l - r.fromHsl.l), c.a);
+    }
+    return exact || shade;
+  }
+  function graphicsList(g) { try { return (g.getInstructions ? g.getInstructions() : g._instructions) || []; } catch (e) { return []; } }
+  function originalStyle(ins) {
+    if (ins.__cbOrig === undefined) {
+      var st = ins.style;
+      ins.__cbOrig = typeof st === 'string' ? st
+        : st && st.props && (st.props.type === 'linear' || st.props.type === 'radial') ? { props: { type: st.props.type, colors: st.props.colors.slice(), ratios: st.props.ratios.slice(), x0: st.props.x0, y0: st.props.y0, r0: st.props.r0, x1: st.props.x1, y1: st.props.y1, r1: st.props.r1 } }
+        : null;
+    }
+    return ins.__cbOrig;
+  }
+  // Every shape of the symbol, including timeline instances not on the current frame.
+  function eachShape(start, fn) {
+    var seen = new Set();
+    (function visit(node) {
+      if (!node || typeof node !== 'object' || seen.has(node)) return;
+      seen.add(node);
+      if (node.graphics) fn(node);
+      var kids = node.children || [];
+      for (var i = 0; i < kids.length; i++) visit(kids[i]);
+      for (var name in node) if (/^(shape|instance)(_\d+)?$/.test(name)) visit(node[name]);
+    })(start);
+  }
+  var recolorSig = '', activeRules = [];
+  function applyRecolor(list) {
+    if (!root || !window.createjs) return;
+    var sig = JSON.stringify(list || []); if (sig === recolorSig) return;
+    recolorSig = sig;
+    var rules = activeRules = prepareRules(list), cached = [];
+    eachShape(root, function (shape) {
+      var gl = graphicsList(shape.graphics);
+      for (var i = 0; i < gl.length; i++) {
+        var ins = gl[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
+        if (!isFill && !isStroke) continue;
+        var orig = originalStyle(ins); if (orig == null) continue;
+        if (typeof orig === 'string') {
+          var c = parseColor(orig), out = c && rules.length ? mapColor(c, rules, isStroke) : null;
+          ins.style = out ? cssOf(out) : orig;
+        } else {
+          var p = orig.props, colors = p.colors.map(function (col) { var c2 = parseColor(col), o2 = c2 && rules.length ? mapColor(c2, rules, isStroke) : null; return o2 ? cssOf(o2) : col; });
+          if (p.type === 'linear') ins.linearGradient(colors, p.ratios, p.x0, p.y0, p.x1, p.y1);
+          else ins.radialGradient(colors, p.ratios, p.x0, p.y0, p.r0, p.x1, p.y1, p.r1);
+        }
+      }
+      for (var n = shape; n; n = n.parent) if (n.cacheCanvas && cached.indexOf(n) < 0) cached.push(n);
+    });
+    cached.forEach(function (n) { try { n.updateCache(); } catch (e) {} });
+    stage.update();
+  }
+
+  // ---- Colour reading for the editor's Light/Dark and Colour Dropper (same-origin, called directly,
+  // like the same-named functions of cb-animate-bridge.js). Scope is ignored: the symbol is one part.
+  function stylesOf(ins) { var o = originalStyle(ins); return o == null ? [] : (typeof o === 'string' ? [o] : o.props.colors).map(parseColor).filter(function (c) { return c && c.a >= .05; }); }
+  function collectColors(fn) {
+    if (!root || !window.createjs) return;
+    eachShape(root, function (shape) {
+      var gl = graphicsList(shape.graphics), fills = [], lines = [];
+      for (var i = 0; i < gl.length; i++) {
+        var ins = gl[i];
+        if (ins instanceof createjs.Graphics.Fill) fills = fills.concat(stylesOf(ins).map(hexOf));
+        else if (ins instanceof createjs.Graphics.Stroke) lines = lines.concat(stylesOf(ins).map(hexOf));
+      }
+      fn(fills, lines);
+    });
+  }
+  window.cbColorPalette = function () {
+    var found = {};
+    if (!root || !window.createjs) return [];
+    eachShape(root, function (shape) {
+      var gl = graphicsList(shape.graphics);
+      for (var i = 0; i < gl.length; i++) {
+        var ins = gl[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
+        if (!isFill && !isStroke) continue;
+        stylesOf(ins).forEach(function (c) {
+          var hex = hexOf(c), entry = found[hex] || (found[hex] = { color: hex, fills: 0, strokes: 0, current: hex });
+          if (isStroke) entry.strokes++; else entry.fills++;
+          var now = mapColor(c, activeRules, isStroke); if (now) entry.current = hexOf(now);
+        });
+      }
+    });
+    return Object.keys(found).map(function (k) { return found[k]; }).sort(function (a, b) { return (b.fills + b.strokes) - (a.fills + a.strokes); }).slice(0, 80);
+  };
+  // The original colour at (x, y), 0..1 of the frame: of the top-most drawn shape there, the fill or
+  // gradient stop whose current look is closest to the pixel; else the nearest colour of the symbol.
+  window.cbColorAt = function (x, y) {
+    if (!canvas || !stage || !root) return null;
+    try {
+      var cx = Math.round(clamp(x, 0, 1) * (canvas.width - 1)), cy = Math.round(clamp(y, 0, 1) * (canvas.height - 1));
+      var px = canvas.getContext('2d').getImageData(cx, cy, 1, 1).data;
+      if (px[3] < 40) return null;
+      var a = px[3] / 255, picked = { r: px[0] / a, g: px[1] / a, b: px[2] / a, a: 1 };
+      var dist = function (c) { return (c.r - picked.r) * (c.r - picked.r) + (c.g - picked.g) * (c.g - picked.g) + (c.b - picked.b) * (c.b - picked.b); };
+      var top = null;
+      (function visit(node) {
+        if (!node || node.visible === false || node.alpha === 0) return;
+        if (node.graphics && node.hitTest && node.globalToLocal) {
+          try { var l = node.globalToLocal(cx, cy); if (node.hitTest(l.x, l.y)) top = node; } catch (e) {}
+        }
+        var kids = node.children || [];
+        for (var i = 0; i < kids.length; i++) visit(kids[i]);
+      })(root);
+      if (top) {
+        var best = null, bestD = Infinity, gl = graphicsList(top.graphics);
+        for (var i = 0; i < gl.length; i++) {
+          var ins = gl[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
+          if (!isFill && !isStroke) continue;
+          stylesOf(ins).forEach(function (c) {
+            var now = mapColor(c, activeRules, isStroke) || c, d = dist(now) + (isStroke ? 2000 : 0);
+            if (d < bestD) { bestD = d; best = hexOf(c); }
+          });
+        }
+        if (best) return { picked: hexOf(picked), original: best };
+      }
+      var near = null, nearD = Infinity;
+      window.cbColorPalette().forEach(function (e) { var c = parseColor(e.current), d = dist(c); if (d < nearD) { nearD = d; near = e; } });
+      return near ? { picked: hexOf(picked), original: near.color } : null;
+    } catch (e) { return null; }
+  };
+  // What goes with a colour: outlines (darker, same hue or grey) of shapes filled with it, and darker shades of its family.
+  window.cbColorRelatives = function (hexIn) {
+    var base = parseColor(hexIn), none = { strokes: [], shadows: [] };
+    if (!base) return none;
+    var baseHex = hexOf(base), baseHsl = toHsl(base), strokes = {}, shadows = {};
+    var outlineOf = function (h) {
+      if (h === baseHex) return false;
+      var c = toHsl(parseColor(h)); if (c.l >= baseHsl.l) return false;
+      if (c.s < .08 || baseHsl.s < .12) return true;
+      var dh = Math.abs(c.h - baseHsl.h); return Math.min(dh, 360 - dh) <= 30;
+    };
+    collectColors(function (fills, lines) {
+      if (fills.indexOf(baseHex) >= 0) lines.forEach(function (h) { if (outlineOf(h)) strokes[h] = 1; });
+      fills.forEach(function (h) {
+        if (h === baseHex || shadows[h]) return;
+        var hsl = toHsl(parseColor(h));
+        if (hsl.l < baseHsl.l - .01 && sameFamily(hsl, baseHsl)) shadows[h] = 1;
+      });
+    });
+    return { strokes: Object.keys(strokes), shadows: Object.keys(shadows) };
+  };
+  var pendingRules = null;
+  // Registered at load so rules sent while the export script is still loading are kept.
+  if (!CATALOG) window.addEventListener('message', function (event) {
+    var d = event.data || {};
+    if (d.source !== 'characterbazaarstudio-editor' || d.type !== 'REPLACEMENT_COLORS') return;
+    pendingRules = d.colorReplacements || [];
+    if (root) applyRecolor(pendingRules);
+  });
+
   function play() {
     var C = lib[SYMBOL]; if (typeof C !== 'function') throw new Error('Missing library symbol ' + SYMBOL);
     root = new C(); stage = new createjs.Stage(canvas); stage.addChild(root);
     if (root.gotoAndStop) root.gotoAndStop(0);
     fit(); window.addEventListener('resize', fit);
+    if (pendingRules) applyRecolor(pendingRules);
     window.addEventListener('message', function (event) {
       var d = event.data || {};
       if (d.source !== 'characterbazaarstudio-editor' || d.type !== 'REPLACEMENT_SEEK' || !root.gotoAndStop) return;

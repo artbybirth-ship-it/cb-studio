@@ -23,7 +23,8 @@ const CELL = 12;
 const ROW = 24;
 type Working = ReadonlyMap<string, Timeline>;
 type Pose = { item: string; name: string };
-type Drag = { kind: "part"; layer: number; el: number; start: [number, number]; m: Matrix; preview?: Layer } | { kind: "key"; layer: number; from: number; start: number; to: number };
+type Sel = { layer: number; el: number };
+type Drag = { kind: "part"; start: [number, number]; held: Array<Sel & { m: Matrix }>; preview?: Map<number, Layer> } | { kind: "box"; from: [number, number]; to: [number, number] } | { kind: "key"; layer: number; from: number; start: number; to: number };
 
 const lengthOf = (layers: Layer[]) => Math.max(1, ...layers.flatMap((l) => l.frames.map((k) => k.i + k.d)));
 const short = (name: string) => name.split("/").pop() || name;
@@ -52,6 +53,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const [range, setRange] = useState<[number, number]>([0, 0]);
   const [layerIndex, setLayerIndex] = useState(0);
   const [elIndex, setElIndex] = useState<number | null>(null);
+  /** Parts selected besides the main one (layerIndex/elIndex): shift-click adds, a drag box adds, they all move together. */
+  const [others, setOthers] = useState<Sel[]>([]);
   const [allLayers, setAllLayers] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -66,7 +69,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   // The timeline on screen: the working copy with a drag in progress laid over it.
   const shown: Timeline | undefined = useMemo(() => {
     if (!base) return undefined;
-    if (drag?.kind === "part" && drag.preview) return { ...base, layers: base.layers.map((l, i) => (i === drag.layer ? drag.preview! : l)) };
+    if (drag?.kind === "part" && drag.preview) return { ...base, layers: base.layers.map((l, i) => drag.preview!.get(i) ?? l) };
     return base;
   }, [base, drag]);
   const length = shown?.length || 1;
@@ -91,8 +94,15 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     "clear-keyframe": () => edit((l) => clearKeyframe(l, frame)),
   }), [edit, frame, range]);
 
-  const doUndo = () => setHist((h) => undo(h));
-  const doRedo = () => setHist((h) => redo(h));
+  // An undo that adds or removes layers (a paste) leaves the old layer numbers pointing at other parts, so the selection goes; otherwise it stays.
+  const stepHistory = (step: (h: History<Working>) => History<Working>) => {
+    const next = step(hist);
+    const count = (w: Working) => (w.get(symbol) ?? doc.symbols.get(symbol)?.timeline)?.layers.length ?? 0;
+    if (count(next.present) !== count(hist.present)) { setElIndex(null); setOthers([]); }
+    setHist(next);
+  };
+  const doUndo = () => stepHistory(undo);
+  const doRedo = () => stepHistory(redo);
 
   // Keys are taken in the capture phase and stopped, so the scene editor behind a dialog never also acts on them (F6, ⌘Z, ⌘C, ⌘V…).
   const copyRef = useRef<() => void>(() => {});
@@ -125,14 +135,16 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   /** Where the current level's own space sits inside the pose's: the stepped-into instances' matrices, outermost first. */
   const levelToPose = useMemo(() => stack.slice(1).reduce((acc, level) => mul(acc, level.m), IDENTITY), [stack]);
   const copyPart = useCallback(() => {
-    if (!shown || elIndex == null) { setNote("Click a part on the stage first, then copy"); return; }
-    const picked = resolveElements(shown.layers[layerIndex], frame)[elIndex];
-    if (!picked) return;
-    const element = { ...picked, m: mul(levelToPose, picked.m) } as FlaElement;
-    const label = picked.k === "instance" ? short(picked.item) : picked.k;
-    copyClip({ flaUrl, docName: doc.name, rootItem: stack[0].item, rootScale: poseScale(doc, stack[0].item), elements: [element], label }, loadedHere);
+    const chosen = [...(elIndex != null ? [{ layer: layerIndex, el: elIndex }] : []), ...others];
+    if (!shown || !chosen.length) { setNote("Click a part on the stage first, then copy"); return; }
+    // Bottom-most layer first, and within a layer in stacking order, so the copy stacks as it did.
+    const picked = chosen.sort((a, b) => b.layer - a.layer || a.el - b.el).flatMap((c) => { const part = shown.layers[c.layer] && resolveElements(shown.layers[c.layer], frame)[c.el]; return part ? [part] : []; });
+    if (!picked.length) return;
+    const elements = picked.map((p) => ({ ...p, m: mul(levelToPose, p.m) }) as FlaElement);
+    const label = picked.length > 1 ? `${picked.length} parts` : picked[0].k === "instance" ? short(picked[0].item) : picked[0].k;
+    copyClip({ flaUrl, docName: doc.name, rootItem: stack[0].item, rootScale: poseScale(doc, stack[0].item), elements, label }, loadedHere);
     setNote(`Copied ${label} from ${doc.name}`);
-  }, [shown, elIndex, layerIndex, frame, levelToPose, flaUrl, doc, stack, loadedHere]);
+  }, [shown, elIndex, others, layerIndex, frame, levelToPose, flaUrl, doc, stack, loadedHere]);
   const pastePart = useCallback(async () => {
     const found = readClip();
     if (!found || !base) { setNote("Nothing copied yet: select a part, then copy it (⌘C)"); return; }
@@ -147,14 +159,14 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       const elements = pasted.map((el) => ({ ...el, m: mul(toLevel, el.m) }) as FlaElement);
       // A new layer on top, holding the part for the whole timeline. Layers that point at another layer (masks, folders) shift down with it.
       const first = pasted[0];
-      const name = `Pasted ${first.k === "instance" ? short(first.item).replace(/^Pasted from [^/]*\//, "") : first.k}`;
+      const name = pasted.length > 1 ? `Pasted ${pasted.length} parts` : `Pasted ${first.k === "instance" ? short(first.item).replace(/^Pasted from [^/]*\//, "") : first.k}`;
       const layer: Layer = { name, type: "normal", parent: null, hidden: false, frames: [{ i: 0, d: Math.max(1, base.length), elements }] };
       const layers = [layer, ...base.layers.map((l) => (l.parent != null ? { ...l, parent: l.parent + 1 } : l))];
       const map = new Map(working);
       map.set(symbol, { ...base, layers, length: lengthOf(layers) });
       setHist((h) => commit(h, map));
       setLayerIndex(0); setElIndex(0); setFrame(0); setRange([0, 0]);
-      setNote(`Pasted ${name} from ${found.clip.docName} as a new layer`);
+      setNote(`${name} from ${found.clip.docName} as a new layer`);
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Could not paste");
     }
@@ -176,7 +188,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     for (let y = 0; y < SIZE; y += 1) for (let x = 0; x < SIZE; x += 1) if (data[(y * SIZE + x) * 4 + 3] > 8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
     if (x1 < 0) { setView({ x: -250, y: -450, w: 500, h: 900 }); return; }
     setView({ x: (x0 - SIZE / 2) / S, y: (y0 - SIZE / 2) / S, w: (x1 - x0) / S, h: (y1 - y0) / S });
-    setFrame(0); setRange([0, 0]); setLayerIndex(0); setElIndex(null);
+    setFrame(0); setRange([0, 0]); setLayerIndex(0); setElIndex(null); setOthers([]);
     const landed = arriving.current;
     arriving.current = null;
     if (landed) {
@@ -206,19 +218,24 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     const { s, tx, ty } = fit(el.width, el.height);
     ctx.setTransform(s, 0, 0, s, tx, ty);
     renderer.drawSymbol(ctx, symbol, frame);
-    // The selected part's registration point.
-    const layer = shown.layers[layerIndex];
-    if (layer && elIndex != null) {
-      const e = resolveElements(layer, frame)[elIndex];
-      if (e) {
-        const pivot = e.k === "instance" ? e.pivot : [0, 0];
-        const px = e.m[0] * pivot[0] + e.m[2] * pivot[1] + e.m[4], py = e.m[1] * pivot[0] + e.m[3] * pivot[1] + e.m[5];
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.strokeStyle = "#e5007d"; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(px * s + tx, py * s + ty, 9, 0, Math.PI * 2); ctx.moveTo(px * s + tx - 14, py * s + ty); ctx.lineTo(px * s + tx + 14, py * s + ty); ctx.moveTo(px * s + tx, py * s + ty - 14); ctx.lineTo(px * s + tx, py * s + ty + 14); ctx.stroke();
-      }
+    // Each selected part's registration point (the main one in pink, the others in blue), and the drag box.
+    const marks: Array<Sel & { main: boolean }> = [...(elIndex != null ? [{ layer: layerIndex, el: elIndex, main: true }] : []), ...others.map((o) => ({ ...o, main: false }))];
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    for (const mark of marks) {
+      const layer = shown.layers[mark.layer];
+      const e = layer && resolveElements(layer, frame)[mark.el];
+      if (!e) continue;
+      const pivot = e.k === "instance" ? e.pivot : [0, 0];
+      const px = e.m[0] * pivot[0] + e.m[2] * pivot[1] + e.m[4], py = e.m[1] * pivot[0] + e.m[3] * pivot[1] + e.m[5];
+      ctx.strokeStyle = mark.main ? "#e5007d" : "#1a73e8"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px * s + tx, py * s + ty, 9, 0, Math.PI * 2); ctx.moveTo(px * s + tx - 14, py * s + ty); ctx.lineTo(px * s + tx + 14, py * s + ty); ctx.moveTo(px * s + tx, py * s + ty - 14); ctx.lineTo(px * s + tx, py * s + ty + 14); ctx.stroke();
     }
-  }, [renderer, working, shown, symbol, frame, fit, layerIndex, elIndex]);
+    if (drag?.kind === "box") {
+      ctx.strokeStyle = "#1a73e8"; ctx.fillStyle = "rgba(26,115,232,0.12)"; ctx.lineWidth = 1;
+      const x = Math.min(drag.from[0], drag.to[0]), y = Math.min(drag.from[1], drag.to[1]), w = Math.abs(drag.to[0] - drag.from[0]), h = Math.abs(drag.to[1] - drag.from[1]);
+      ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
+    }
+  }, [renderer, working, shown, symbol, frame, fit, layerIndex, elIndex, others, drag]);
 
   /** Topmost layer, and part of it, drawn at the point (x, y) of `timeline`'s own space, probed at `scale` pixels per unit. */
   function pickAt(timeline: Timeline, at: number, x: number, y: number, scale: number): { layer: number; el: number } | null {
@@ -277,28 +294,83 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     const rect = e.currentTarget.getBoundingClientRect();
     return [(e.clientX - rect.left) * (e.currentTarget.width / rect.width), (e.clientY - rect.top) * (e.currentTarget.height / rect.height)];
   };
+  /** Every part whose artwork touches the box (canvas pixels). */
+  function boxPick(x0: number, y0: number, x1: number, y1: number): Sel[] {
+    if (!shown || !canvas.current) return [];
+    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
+    const w = Math.max(1, Math.ceil(x1 - x0)), h = Math.max(1, Math.ceil(y1 - y0));
+    const found: Sel[] = [];
+    renderer.overrides.clear();
+    for (const [name, t] of working) renderer.overrides.set(name, t);
+    renderer.overrides.set(symbol, shown);
+    shown.layers.forEach((layer, i) => {
+      if (layer.type === "folder" || layer.type === "guide" || layer.type === "mask") return;
+      const state = layerStateAt(layer, frame);
+      if (!state) return;
+      resolveElements(layer, frame).forEach((part, j) => {
+        const probe = new OffscreenCanvas(w, h), ctx = probe.getContext("2d", { willReadFrequently: true })!;
+        ctx.setTransform(s, 0, 0, s, tx - x0, ty - y0);
+        const only: Layer = { ...layer, parent: null, type: "normal", frames: [{ i: state.key.i, d: state.key.d, elements: [part as FlaElement] }] };
+        renderer.drawTimeline(ctx, { name: "", layers: [only], length: shown.length }, frame);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        for (let k = 3; k < data.length; k += 4) if (data[k] > 8) { found.push({ layer: i, el: j }); return; }
+      });
+    });
+    return found;
+  }
+  const selected = (): Sel[] => [...(elIndex != null ? [{ layer: layerIndex, el: elIndex }] : []), ...others];
+  const same = (a: Sel, b: Sel) => a.layer === b.layer && a.el === b.el;
+
   const onStageDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const [cx, cy] = toCanvas(e);
     const hit = pick(cx, cy);
-    if (!hit || !shown) { setElIndex(null); return; }
-    setLayerIndex(hit.layer); setElIndex(hit.el);
-    const parts = resolveElements(shown.layers[hit.layer], frame);
-    const part = parts[hit.el];
-    if (!part) return;
+    if (!hit || !shown) {
+      // Empty stage: a drag draws a box (shift keeps what is selected already).
+      if (!e.shiftKey) { setElIndex(null); setOthers([]); }
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setDrag({ kind: "box", from: [cx, cy], to: [cx, cy] });
+      return;
+    }
+    const now = selected();
+    let next: Sel[];
+    if (e.shiftKey) next = now.some((o) => same(o, hit)) ? now.filter((o) => !same(o, hit)) : [...now, hit];
+    else next = now.some((o) => same(o, hit)) ? now : [hit];
+    setLayerIndex(hit.layer);
+    setElIndex(next.length ? next[0].el : null);
+    if (next.length) setLayerIndex(next[0].layer);
+    setOthers(next.slice(1));
+    if (e.shiftKey || !next.length) return;
+    const held = next.flatMap((o) => { const part = resolveElements(shown.layers[o.layer], frame)[o.el]; return part ? [{ ...o, m: [...part.m] as Matrix }] : []; });
+    if (!held.length) return;
     e.currentTarget.setPointerCapture(e.pointerId);
-    setDrag({ kind: "part", layer: hit.layer, el: hit.el, start: [cx, cy], m: [...part.m] as Matrix });
+    setDrag({ kind: "part", start: [cx, cy], held });
   };
   const onStageMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (drag?.kind !== "part" || !shown || !canvas.current) return;
+    if (!drag || !shown || !canvas.current) return;
     const [cx, cy] = toCanvas(e);
+    if (drag.kind === "box") { setDrag({ ...drag, to: [cx, cy] }); return; }
+    if (drag.kind !== "part") return;
     const { s } = fit(canvas.current.width, canvas.current.height);
-    const m: Matrix = [drag.m[0], drag.m[1], drag.m[2], drag.m[3], drag.m[4] + (cx - drag.start[0]) / s, drag.m[5] + (cy - drag.start[1]) / s];
-    setDrag({ ...drag, preview: setMatrix(base!.layers[drag.layer], frame, drag.el, m) });
+    const dx = (cx - drag.start[0]) / s, dy = (cy - drag.start[1]) / s;
+    const preview = new Map<number, Layer>();
+    for (const h of drag.held) preview.set(h.layer, setMatrix(preview.get(h.layer) ?? base!.layers[h.layer], frame, h.el, [h.m[0], h.m[1], h.m[2], h.m[3], h.m[4] + dx, h.m[5] + dy]));
+    setDrag({ ...drag, preview });
   };
   const onStageUp = () => {
     if (drag?.kind === "part" && drag.preview) {
       const preview = drag.preview;
-      edit(() => preview, drag.layer);
+      const layers = base!.layers.map((l, i) => preview.get(i) ?? l);
+      const map = new Map(working);
+      map.set(symbol, { ...base!, layers, length: lengthOf(layers) });
+      setHist((h) => commit(h, map));
+    } else if (drag?.kind === "box") {
+      const big = Math.abs(drag.to[0] - drag.from[0]) > 3 || Math.abs(drag.to[1] - drag.from[1]) > 3;
+      if (big) {
+        const inside = boxPick(Math.min(drag.from[0], drag.to[0]), Math.min(drag.from[1], drag.to[1]), Math.max(drag.from[0], drag.to[0]), Math.max(drag.from[1], drag.to[1]));
+        const all = [...selected(), ...inside.filter((n) => !selected().some((o) => same(o, n)))];
+        if (all.length) { setLayerIndex(all[0].layer); setElIndex(all[0].el); setOthers(all.slice(1)); }
+        setNote(`${all.length} part${all.length === 1 ? "" : "s"} selected`);
+      }
     }
     setDrag(null);
   };
@@ -372,7 +444,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         <span data-testid="note" style={{ font: "12px system-ui" }}>{note}</span>
       </div>
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-        <canvas data-testid="stage" ref={canvas} width={760} height={560} style={{ border: "1px solid #ccc", width: 570, height: 420, touchAction: "none", cursor: drag?.kind === "part" ? "grabbing" : "default" }}
+        <canvas data-testid="stage" ref={canvas} width={760} height={560} style={{ border: "1px solid #ccc", width: 570, height: 420, touchAction: "none", cursor: drag?.kind === "part" ? "grabbing" : drag?.kind === "box" ? "crosshair" : "default" }}
           onPointerDown={onStageDown} onPointerMove={onStageMove} onPointerUp={onStageUp} onDoubleClick={onStageDouble} />
         <div style={{ font: "12px system-ui", minWidth: 240 }}>
           <div><b>frame {frame + 1}</b> of {length}{range[1] > range[0] ? ` (selected ${range[0] + 1}–${range[1] + 1})` : ""} · layer {shown?.layers[layerIndex]?.name || "—"}</div>
@@ -384,7 +456,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
             </div>
           ))}
           {part && <div style={{ marginTop: 6 }}>x {part.m[4].toFixed(1)} · y {part.m[5].toFixed(1)}</div>}
-          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move; double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it. ⇧-click extends the frame selection. , and . step frames.</div>
+          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it. ⇧-click extends the frame selection. , and . step frames.</div>
         </div>
       </div>
       {shown && (

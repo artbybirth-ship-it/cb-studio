@@ -117,6 +117,39 @@ const colourForms = (hex: string) => {
   const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
   return [hex, `rgba(${r},${g},${b},`, `rgba(${r}, ${g}, ${b},`];
 };
+const scriptTextOf = (js: string) => {
+  let pending = scriptCache.get(js);
+  if (!pending) {
+    let url = js;
+    try { url = encodeURI(decodeURI(new URL(js, window.location.href).pathname)); } catch { /* used as given */ }
+    pending = fetch(url).then((response) => (response.ok ? response.text() : "")).then((text) => text.toLowerCase()).catch(() => "");
+    scriptCache.set(js, pending);
+  }
+  return pending;
+};
+/**
+ * Export scripts of the parts that came from other characters: swapped-in parts (the "js" of their
+ * symbol-player URL) and parts pasted into a pose (a foreign layer's library script).
+ */
+export const swappedScriptsOf = (object: EditorObject) => Array.from(new Set([
+  ...Object.values(object.partReplacements || {})
+    .filter((replacement) => replacement?.renderKind === "source-symbol" && replacement.assetUrl)
+    .map((replacement) => { try { return new URL(replacement.assetUrl, "http://x").searchParams.get("js") || ""; } catch { return ""; } }),
+  ...Object.values(object.symbolLayers || {}).flatMap((edit) => (edit.clones || []).map((clone) => clone.foreign?.lib || "")),
+].filter(Boolean)));
+/** Ids of the stage characters whose swapped-in parts (not only the character itself) contain the colour. */
+export async function objectsUsingColourInSwaps(objects: EditorObject[], hex: string): Promise<Set<string>> {
+  const forms = colourForms(hex);
+  const found = new Set<string>();
+  await Promise.all(objects.map(async (object) => {
+    for (const js of swappedScriptsOf(object)) {
+      const text = await scriptTextOf(js);
+      if (forms.some((form) => text.includes(form))) { found.add(object.id); return; }
+    }
+  }));
+  return found;
+}
+
 /** Library character ids (without "html5:") whose artwork contains the colour. */
 export async function charactersUsingColour(library: Html5CharacterLibraryCharacter[], ids: Iterable<string>, hex: string): Promise<Set<string>> {
   const forms = colourForms(hex);

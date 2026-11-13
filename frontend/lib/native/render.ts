@@ -189,6 +189,7 @@ export class NativeRenderer {
   }
 
   private drawLayer(ctx: Ctx, layer: Layer, frame: number, length: number) {
+    if (layer.off) return;
     // The playhead loops: past the end the layer shows frame % length. A keyframe that holds the
     // whole timeline is the same object after the wrap, so what runs inside it keeps its clock.
     const state: LayerState | null = layerStateAt(layer, frame % length);

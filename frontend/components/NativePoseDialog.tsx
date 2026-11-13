@@ -10,23 +10,49 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import NativePoseEditor from "./NativePoseEditor";
 import { loadNativeDoc, type NativeLoaded } from "../lib/native/loadDoc";
 import { registerLibrary } from "../lib/native/library";
-import type { NativeEdits } from "../lib/native/store";
+import { editsOf, type NativeEdits } from "../lib/native/store";
+import { convertLegacy, type LegacyFields } from "../lib/native/legacy";
+import { buildClones } from "../lib/native/legacyClones";
 
-export default function NativePoseDialog({ flaUrl, item, title, initial, onDone, onCancel }: {
-  flaUrl: string; item: string; title: string; initial?: NativeEdits | null;
+export default function NativePoseDialog({ flaUrl, item, title, js, initial, legacy, onDone, onCancel }: {
+  flaUrl: string; item: string; title: string; /** The pose's class in the player (what old edits call it). */ js?: string; initial?: NativeEdits | null;
+  /** What older versions saved inside this character: turned into native edits the first time the pose opens here (when it has none of its own). */
+  legacy?: LegacyFields;
   onDone: (edits: NativeEdits | null) => void; onCancel: () => void;
 }) {
   const [loaded, setLoaded] = useState<NativeLoaded | null>(null);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState(0);
+  const [converted, setConverted] = useState("");
+  const [seed, setSeed] = useState<NativeEdits | null>(null);
   const latest = useRef<NativeEdits | null>(initial ?? null);
 
   useEffect(() => {
     let alive = true;
-    loadNativeDoc(flaUrl, (f) => alive && setProgress(f)).then((result) => {
+    loadNativeDoc(flaUrl, (f) => alive && setProgress(f)).then(async (result) => {
       if (!alive) return;
       if (!result.doc.symbols.has(item)) { setError(`This pose ("${item}") is not in the character's Animate file.`); return; }
       // Symbols pasted in from other characters on an earlier visit are put back before the pose is drawn.
+      if (!initial && legacy) {
+        // Pictures, library symbols and parts of other characters the old editor placed as layers are built first (they load files).
+        const prepared: Record<string, Awaited<ReturnType<typeof buildClones>>> = {};
+        for (const [cls, edit] of Object.entries(legacy.layers || {})) {
+          if (!edit.clones?.some((c) => c.symbol || c.image)) continue;
+          // Only a pose's own layers can take them: the clone's place is given in the pose's space.
+          const library = cls === js ? item : null;
+          if (library) prepared[cls] = await buildClones(result, edit, item, result.doc.symbols.get(library)?.timeline.length || 1);
+        }
+        if (!alive) return;
+        const made = convertLegacy(result.doc.symbols, legacy, js ? { [js]: item } : {}, prepared);
+        // The native drawing replaces the player for the whole character, so it is only taken over when every old edit converted.
+        if (Object.keys(made.symbols).length && !made.left.length) {
+          // Through editsOf so the pictures and parts of other characters the converted layers use are saved with them.
+          const edits = editsOf(result.doc, new Map(Object.entries(made.symbols)));
+          latest.current = edits;
+          setSeed(edits);
+          setConverted(`Older edits on this character were converted (${made.converted.join(", ")}).`);
+        } else if (made.left.length) setConverted(`Older edits were not converted, so this character keeps using them as they are: ${made.left.join("; ")}.`);
+      }
       registerLibrary(result, initial?.library).then(() => alive && setLoaded(result), (e) => alive && setError(e instanceof Error ? e.message : String(e)));
     }).catch((e) => alive && setError(e instanceof Error ? e.message : String(e)));
     return () => { alive = false; };
@@ -55,7 +81,8 @@ export default function NativePoseDialog({ flaUrl, item, title, initial, onDone,
         </div>
         {error ? <div style={{ font: "13px system-ui", color: "#b00020" }}>{error}</div>
           : !loaded ? <div style={{ font: "13px system-ui" }}>Loading the character&apos;s Animate file… {Math.round(progress * 100)}%</div>
-          : <NativePoseEditor flaUrl={flaUrl} doc={loaded.doc} renderer={loaded.renderer} poses={[{ item, name: item.split("/").pop() || item }]} initialEdits={initial} onChange={onChange} />}
+          : <NativePoseEditor flaUrl={flaUrl} doc={loaded.doc} renderer={loaded.renderer} poses={[{ item, name: item.split("/").pop() || item }]} initialEdits={initial ?? seed} onChange={onChange} />}
+        {converted && <div data-testid="native-converted" style={{ font: "12px system-ui", color: "#555", marginTop: 6 }}>{converted}</div>}
       </div>
     </div>
   );

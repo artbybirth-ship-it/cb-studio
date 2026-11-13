@@ -19,6 +19,7 @@ export type ImportedLibrary = { symbols: Record<string, LibrarySymbol>; bitmaps:
 
 const empty = (): ImportedLibrary => ({ symbols: {}, bitmaps: {}, brushes: {} });
 const imported = new WeakMap<FlaDocument, ImportedLibrary>();
+const decoding = new WeakMap<FlaDocument, Map<string, Promise<void>>>();
 export const importedOf = (doc: FlaDocument): ImportedLibrary => imported.get(doc) ?? imported.set(doc, empty()).get(doc)!;
 
 // ---------- matrices (a·b applies b first, then a)
@@ -114,15 +115,23 @@ export async function registerLibrary(target: NativeLoaded, lib: ImportedLibrary
   const fresh: Record<string, Brush> = {};
   for (const [id, brush] of Object.entries(lib.brushes)) { if (!doc.brushes[id]) { doc.brushes[id] = brush; fresh[id] = brush; } record.brushes[id] = brush; }
   if (Object.keys(fresh).length) await renderer.loadBrushes(fresh);
-  for (const [name, saved] of Object.entries(lib.bitmaps)) {
+  // Two characters placed from the same file register the same picture at once: the second waits for the first's decode.
+  const waiting = decoding.get(doc) ?? decoding.set(doc, new Map()).get(doc)!;
+  await Promise.all(Object.entries(lib.bitmaps).map(([name, saved]) => {
     record.bitmaps[name] = saved;
-    if (doc.bitmaps.has(name)) continue;
+    const pending = waiting.get(name);
+    if (pending) return pending;
+    if (doc.bitmaps.has(name)) return undefined;
     const data = saved.data ? fromBase64(saved.data) : undefined;
     const item: BitmapItem = { name, data, width: saved.width, height: saved.height };
     doc.bitmaps.set(name, item);
-    const decoded = await decodeBitmap(data);
-    if (decoded) renderer.assets.images.set(name, await createImageBitmap(new Blob([decoded.bytes as BlobPart])) as never);
-  }
+    const done = (async () => {
+      const decoded = await decodeBitmap(data);
+      if (decoded) renderer.assets.images.set(name, await createImageBitmap(new Blob([decoded.bytes as BlobPart])) as never);
+    })();
+    waiting.set(name, done);
+    return done;
+  }));
 }
 
 /**

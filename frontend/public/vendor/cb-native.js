@@ -981,6 +981,8 @@ class NativeRenderer {
         ctx.restore();
     }
     drawLayer(ctx, layer, frame, length) {
+        if (layer.off)
+            return;
         // The playhead loops: past the end the layer shows frame % length. A keyframe that holds the
         // whole timeline is the same object after the wrap, so what runs inside it keeps its clock.
         const state = (0, evaluate_1.layerStateAt)(layer, frame % length);
@@ -1227,6 +1229,7 @@ exports.libraryUsedBy = libraryUsedBy;
 const bitmaps_1 = require("lib/fla/bitmaps");
 const empty = () => ({ symbols: {}, bitmaps: {}, brushes: {} });
 const imported = new WeakMap();
+const decoding = new WeakMap();
 const importedOf = (doc) => imported.get(doc) ?? imported.set(doc, empty()).get(doc);
 exports.importedOf = importedOf;
 // ---------- matrices (a·b applies b first, then a)
@@ -1354,17 +1357,26 @@ async function registerLibrary(target, lib) {
     }
     if (Object.keys(fresh).length)
         await renderer.loadBrushes(fresh);
-    for (const [name, saved] of Object.entries(lib.bitmaps)) {
+    // Two characters placed from the same file register the same picture at once: the second waits for the first's decode.
+    const waiting = decoding.get(doc) ?? decoding.set(doc, new Map()).get(doc);
+    await Promise.all(Object.entries(lib.bitmaps).map(([name, saved]) => {
         record.bitmaps[name] = saved;
+        const pending = waiting.get(name);
+        if (pending)
+            return pending;
         if (doc.bitmaps.has(name))
-            continue;
+            return undefined;
         const data = saved.data ? fromBase64(saved.data) : undefined;
         const item = { name, data, width: saved.width, height: saved.height };
         doc.bitmaps.set(name, item);
-        const decoded = await (0, bitmaps_1.decodeBitmap)(data);
-        if (decoded)
-            renderer.assets.images.set(name, await createImageBitmap(new Blob([decoded.bytes])));
-    }
+        const done = (async () => {
+            const decoded = await (0, bitmaps_1.decodeBitmap)(data);
+            if (decoded)
+                renderer.assets.images.set(name, await createImageBitmap(new Blob([decoded.bytes])));
+        })();
+        waiting.set(name, done);
+        return done;
+    }));
 }
 /**
  * Copies `elements` (taken from `source`) so they can live in `target`: returns them renamed to the

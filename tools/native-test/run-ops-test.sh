@@ -16,5 +16,10 @@ cp "$here/keys_tween.test.js" "$here/bridge_tween.test.js" "$out/"
 node "$out/keys_tween.test.js"
 node "$here/bridge_tween.test.js"
 
+# old per-feature edits converted into native timelines
+(cd "$here/../../frontend" && npx tsc lib/native/legacy.ts --outDir "$out" --module commonjs --target es2020 --skipLibCheck --moduleResolution node)
+cp "$here/legacy.test.js" "$out/legacy.test.js"
+node "$out/legacy.test.js"
+
 # the renderer's browser bundle must match the sources
 node "$here/build-native-bundle.js" --check

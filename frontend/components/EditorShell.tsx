@@ -30,7 +30,7 @@ import NativePoseDialog from "./NativePoseDialog";
 import { findFlaUrl } from "@/lib/native/loadDoc";
 import { playerFitOf } from "@/lib/native/character";
 import FindReplaceDialog from "./FindReplaceDialog";
-import { addColorRule, addCounts, applyToEditorData, charactersUsingColour, describeCounts, emptyCounts, libraryIdOf, normalizeHex, totalCount, visibleAt, type FindRequest } from "@/lib/findReplace";
+import { addColorRule, addCounts, applyToEditorData, charactersUsingColour, objectsUsingColourInSwaps, describeCounts, emptyCounts, libraryIdOf, normalizeHex, totalCount, visibleAt, type FindRequest } from "@/lib/findReplace";
 import { followColour, shiftLightness, shiftLike } from "@/lib/color";
 import ColourPicker from "./ColourPicker";
 import PanelClose from "./PanelClose";
@@ -891,6 +891,23 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // outline colours of the shapes filled with it, Include Shadow the darker colours of its shading
   // family (cbColorRelatives). Repeated clicks keep adjusting the same rules; a colour back at its
   // original loses its rule.
+  // A part swapped in from another character is drawn by its own small player, over the character's.
+  // swapPlayerAt: the swapped part's player under the pointer (opaque pixel) with the original colour
+  // there, else null — every colour tool tries this before the character's own player.
+  type SwapColourPlayer = Window & { cbColorAt?: (x: number, y: number) => { original: string } | null; cbColorPalette?: () => { color: string; current: string; fills: number; strokes: number }[] };
+  const swapPlayerAt = (objectId: string, clientX: number, clientY: number) => {
+    for (const candidate of Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe.cb-part-replacement-source-frame"))) {
+      try {
+        const query = new URL(candidate.src, window.location.href).searchParams;
+        if (query.get("objectId") !== objectId) continue;
+        const box = candidate.getBoundingClientRect();
+        if (clientX < box.left || clientX > box.right || clientY < box.top || clientY > box.bottom || box.width <= 0 || box.height <= 0) continue;
+        const original = normalizeHex((candidate.contentWindow as SwapColourPlayer | null)?.cbColorAt?.((clientX - box.left) / box.width, (clientY - box.top) / box.height)?.original);
+        if (original) return { frame: candidate, partKey: query.get("partKey") || "", original };
+      } catch { /* a frame that cannot be read is skipped */ }
+    }
+    return null;
+  };
   const adjustTone = (clientX: number, clientY: number, reverse: boolean, fine: boolean) => {
     const darker = (toneDirection === "dark") !== reverse;
     const delta = (darker ? -1 : 1) * (fine ? 0.03 : 0.08);
@@ -908,9 +925,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       return;
     }
     if (colourItem?.type !== "character") { showNotice("Select a character first, then click its colours, or click a text layer."); return; }
-    const scope = activeCharacterPart || poseColourScope || "*";
+    const swap = swapPlayerAt(colourItem.id, clientX, clientY);
+    const swapFrame = swap?.frame;
+    const swapPart = swap?.partKey || "";
+    const scope = swapPart || activeCharacterPart || poseColourScope || "*";
     const scopeArg = scope === "*" ? "" : scope;
-    const frame = frameAccessRef.current?.(colourItem.id);
+    const frame = swapFrame || frameAccessRef.current?.(colourItem.id);
     const rect = frame?.getBoundingClientRect();
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
     type PlayerColours = Window & {
@@ -966,9 +986,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const object = holder ? draft.objects.find((item) => item.id === holder.getAttribute("data-editor-object-id")) : undefined;
     let colour: string | null = null;
     if (object?.type === "character") {
+      const swap = swapPlayerAt(object.id, clientX, clientY);
       const frame = frameAccessRef.current?.(object.id);
       const rect = frame?.getBoundingClientRect();
-      try {
+      if (swap) colour = swap.original;
+      else try {
         const colorAt = (frame?.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null | undefined)?.cbColorAt;
         if (rect && typeof colorAt === "function") colour = colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, "")?.original || null;
       } catch { colour = null; }
@@ -1043,12 +1065,15 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     }
 
     let using = new Set<string>();
+    let usingSwaps = new Set<string>();
     let libraryCharacters = 0;
     if (request.kind === "colour") {
       const ids = request.context === "library"
         ? characterLibraryCharacters.filter((character) => character.origin === "custom").map((character) => character.id)
         : targets.flatMap((target) => (target.data.objects || []).filter((object) => object.type === "character").map(libraryIdOf));
       using = await charactersUsingColour(characterLibraryCharacters, ids, findHex);
+      // A body part swapped in from another character carries that character's colours.
+      if (request.context !== "library") usingSwaps = await objectsUsingColourInSwaps(targets.flatMap((target) => (target.data.objects || []).filter((object) => object.type === "character")), findHex);
       if (request.context === "library") {
         if (!using.size) return { message: "No character in My characters uses this colour.", changed: false };
         const byPackage = new Map<string, (typeof characterLibraryCharacters)[number]>();
@@ -1064,7 +1089,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     }
 
     const onlyIds = request.context === "frame" ? new Set(draft.objects.filter((object) => visibleAt(object, playhead)).map((object) => object.id)) : undefined;
-    const options = { onlyIds, usesColour: (object: EditorObject) => using.has(libraryIdOf(object)), charactersOnly: request.context === "library" };
+    const options = { onlyIds, usesColour: (object: EditorObject) => using.has(libraryIdOf(object)) || usingSwaps.has(object.id), charactersOnly: request.context === "library" };
     let counts = emptyCounts();
     const scenesChanged = new Set<string>();
     const projectsChanged = new Set<string>();
@@ -1189,6 +1214,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     setBoxPicking(false);
     setActiveTool("select");
     if (colourItem?.type !== "character") return;
+    const swapped = swapPlayerAt(colourItem.id, clientX, clientY);
+    if (swapped) {
+      const swappedId = colourItem.id;
+      setBoxPicks((previous) => ({ ...(previous?.objectId === swappedId && previous.scope === boxScope ? previous : {}), objectId: swappedId, scope: boxScope, [activeBox]: swapped.original }));
+      return;
+    }
     const frame = frameAccessRef.current?.(colourItem.id);
     const rect = frame?.getBoundingClientRect();
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
@@ -1230,6 +1261,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     }
     if (targets.length === 1 && targets[0].type === "character") {
       const character = targets[0];
+      const swapped = swapPlayerAt(character.id, clientX, clientY);
+      if (swapped) {
+        setBoxPicks((previous) => ({ ...(previous?.objectId === character.id && previous.scope === boxScope ? previous : {}), objectId: character.id, scope: boxScope, [activeBox]: swapped.original }));
+        showNotice(`${activeBox === "fill" ? "Fill" : "Stroke"} box: ${swapped.original}. Fill/Stroke (<) changes it.`);
+        return;
+      }
       const frame = frameAccessRef.current?.(character.id);
       const rect = frame?.getBoundingClientRect();
       if (frame && rect && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
@@ -1287,7 +1324,18 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (item.type !== "character") continue;
       try {
         const list = (frameAccessRef.current?.(item.id)?.contentWindow as (Window & { cbColorPalette?: (scope: string) => AdjustState["palettes"][string]["entries"] }) | null | undefined)?.cbColorPalette?.(scope === "*" ? "" : scope);
-        if (Array.isArray(list) && list.length) palettes[item.id] = { scope, entries: list.map((entry) => ({ ...entry })) };
+        // Swapped-in parts are drawn by their own players: their colours join the palette (whole character), or are the palette (that part).
+        const swapEntries: NonNullable<typeof list> = [];
+        for (const frame of Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe.cb-part-replacement-source-frame"))) {
+          try {
+            const query = new URL(frame.src, window.location.href).searchParams;
+            if (query.get("objectId") !== item.id || (scope !== "*" && query.get("partKey") !== scope)) continue;
+            swapEntries.push(...(((frame.contentWindow as SwapColourPlayer | null)?.cbColorPalette?.() || []) as NonNullable<typeof list>));
+          } catch { /* skipped */ }
+        }
+        const merged = [...(Array.isArray(list) ? list : [])];
+        for (const entry of swapEntries) if (!merged.some((known) => known.color === entry.color)) merged.push(entry);
+        if (merged.length) palettes[item.id] = { scope, entries: merged.map((entry) => ({ ...entry })) };
       } catch { /* player not reachable */ }
     }
     if (items.every((item) => item.type === "character" && !palettes[item.id])) { showNotice("The character is still loading. Try again in a moment."); return; }
@@ -6098,8 +6146,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               />
               {nativeEdit && nativeEdit.objectId === symbolView.objectId && (
                 <NativePoseDialog
-                  flaUrl={nativeEdit.flaUrl} item={nativeEdit.item} title={nativeEdit.title}
+                  flaUrl={nativeEdit.flaUrl} item={nativeEdit.item} title={nativeEdit.title} js={nativeEdit.js}
                   initial={object?.nativePose?.[nativeEdit.js]}
+                  legacy={object && (object.symbolKeys || object.symbolEases || object.symbolValues || object.symbolLayers) ? { keys: object.symbolKeys, eases: object.symbolEases, values: object.symbolValues, layers: object.symbolLayers } : undefined}
                   onCancel={() => setNativeEdit(null)}
                   onDone={(edits) => {
                     const target = nativeEdit;

@@ -28,7 +28,7 @@ export type InstanceElement = {
   k: "instance"; item: string; symbolType: string; m: Matrix; pivot: [number, number];
   loop: string; first: number; alpha?: number; name?: string;
 };
-export type BitmapElement = { k: "bitmap"; item: string; m: Matrix };
+export type BitmapElement = { k: "bitmap"; item: string; m: Matrix; /** Set on pictures the old editor placed as layers: what its saved values call them. */ name?: string; /** A picture placed as a layer sits centred in a container the old editor's values move: this is the picture's place inside it (m = container · local). */ local?: Matrix };
 export type FlaElement = ShapeElement | InstanceElement | BitmapElement;
 /** One shape-tween segment: start points A/B, then curves [isLine, cA.x, cA.y, aA.x, aA.y, cB.x, cB.y, aB.x, aB.y]. */
 export type MorphSegment = { a: [number, number]; b: [number, number]; curves: number[][]; f1: number; f2: number; s1: number; s2: number };
@@ -38,7 +38,8 @@ export type Keyframe = {
   tween?: "motion" | "shape" | "motion object"; ease?: Ease; rotate?: [string, number];
   morph?: MorphSegment[]; label?: string;
 };
-export type Layer = { name: string; type: string; parent: number | null; hidden: boolean; frames: Keyframe[] };
+/** off: switched off in the editor (not drawn, not picked); `hidden` is the file's own visibility flag, which the Animate publish ignores. */
+export type Layer = { name: string; type: string; parent: number | null; hidden: boolean; off?: boolean; frames: Keyframe[] };
 export type Timeline = { name: string; layers: Layer[]; length: number };
 /** warnings: what this symbol's own timeline uses that is not imported (see FlaDocument). */
 export type LibrarySymbol = { name: string; type: string; timeline: Timeline; warnings: string[] };
