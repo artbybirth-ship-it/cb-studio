@@ -89,3 +89,26 @@ console.log("ops: all assertions passed");
   assert.deepEqual(o.deleteLayers(nested, [1]).map((l) => l.name + ":" + l.parent), ["f1:null", "leaf:0"], "grandchild lands in the grandparent");
   console.log("layer eye and delete ok");
 }
+
+// Phase 4b: swap symbol
+{
+  const ins = (item, m) => ({ k: "instance", item, symbolType: "graphic", m, pivot: [1, 2], loop: "loop", first: 0, name: "n" });
+  const layer = { name: "mouth", type: "normal", parent: null, hidden: false, frames: [
+    { i: 0, d: 3, elements: [ins("Mouth_A", [1, 0, 0, 1, 10, 20]), ins("Other", [1, 0, 0, 1, 0, 0])], tween: "motion" },
+    { i: 3, d: 3, elements: [ins("Mouth_A", [0, 1, -1, 0, 30, 40])] },
+    { i: 6, d: 2, elements: [ins("Different", [1, 0, 0, 1, 5, 5])] },
+  ] };
+  const to = { k: "instance", item: "Pasted from X/Mouth_B", symbolType: "movie clip", m: [9, 9, 9, 9, 9, 9], pivot: [7, 8], loop: "loop", first: 0 };
+  const out = o.swapSymbol(layer, "Mouth_A", to, 2);
+  assert.deepEqual(out.frames[0].elements.map((e) => e.item), ["Pasted from X/Mouth_B", "Other"], "only the matching instance changes");
+  assert.deepEqual(out.frames[0].elements[0].m, [2, 0, 0, 2, 10, 20], "position kept, size scaled");
+  assert.deepEqual(out.frames[1].elements[0].m, [0, 2, -2, 0, 30, 40], "rotation kept, every keyframe swapped");
+  assert.equal(out.frames[0].elements[0].symbolType, "movie clip");
+  assert.deepEqual(out.frames[0].elements[0].pivot, [7, 8]);
+  assert.equal(out.frames[0].elements[0].name, "n", "instance name kept");
+  assert.equal(out.frames[0].tween, "motion", "tween kept");
+  assert.equal(out.frames[2].elements[0].item, "Different", "other symbols untouched");
+  assert.equal(layer.frames[0].elements[0].item, "Mouth_A", "input not changed");
+  assert.equal(o.swapSymbol(layer, "Nothing", to), layer, "no match returns the same layer");
+  console.log("swap symbol ok");
+}

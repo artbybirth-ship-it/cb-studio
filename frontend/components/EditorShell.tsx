@@ -6147,7 +6147,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               {nativeEdit && nativeEdit.objectId === symbolView.objectId && (
                 <NativePoseDialog
                   flaUrl={nativeEdit.flaUrl} item={nativeEdit.item} title={nativeEdit.title} js={nativeEdit.js}
-                  initial={object?.nativePose?.[nativeEdit.js]}
+                  initial={object?.nativePose?.[nativeEdit.js]} colours={object?.colorReplacements}
                   legacy={object && (object.symbolKeys || object.symbolEases || object.symbolValues || object.symbolLayers) ? { keys: object.symbolKeys, eases: object.symbolEases, values: object.symbolValues, layers: object.symbolLayers } : undefined}
                   onCancel={() => setNativeEdit(null)}
                   onDone={(edits) => {

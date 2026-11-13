@@ -13,6 +13,7 @@ import type { NativeEdits } from "./store";
 import { loadNativeDoc, type NativeLoaded } from "./loadDoc";
 import { registerLibrary } from "./library";
 import { NativeRenderer } from "./render";
+import type { ColourRule } from "./colour";
 import { resolvePoseSource, type PoseSource } from "./resolve";
 
 export const BOX_W = 720, BOX_H = 960;
@@ -48,12 +49,14 @@ function fitOf(key: string, loaded: NativeLoaded, item: string) {
   return fit;
 }
 
-export type NativeCharacterSource = { assetUrl?: string; loopMode?: string; nativePose?: Record<string, NativeEdits> };
+export type NativeCharacterSource = { assetUrl?: string; loopMode?: string; nativePose?: Record<string, NativeEdits>; colorReplacements?: ColourRule[] };
 
 export type NativeCharacter = {
   /** Loads the Animate file and the edits; resolves true when the character can be drawn. */
   load(): Promise<boolean>;
   readonly ready: boolean;
+  /** Colour rules to draw with (the character's Recolour rules); call draw again after changing them. */
+  setColourRules(rules: ColourRule[] | undefined): void;
   /** Draws source time `seekMs` onto `canvas`, at `resolution` times the 720 × 960 box. */
   draw(canvas: HTMLCanvasElement, seekMs: number, resolution?: number, fit?: Fit | null): void;
 };
@@ -61,8 +64,10 @@ export type NativeCharacter = {
 export function createNativeCharacter(object: NativeCharacterSource): NativeCharacter {
   let state: { source: PoseSource; renderer: NativeRenderer; loaded: NativeLoaded } | null = null;
   const edits = Object.values(object.nativePose || {});
+  let rulesNow = object.colorReplacements;
   return {
     get ready() { return Boolean(state); },
+    setColourRules(rules) { rulesNow = rules; state?.renderer.setColourRules(rules); },
     async load() {
       const source = object.assetUrl ? await resolvePoseSource(object.assetUrl) : null;
       if (!source) return false;
@@ -71,6 +76,7 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       // This character's own renderer over the shared document: its edits are laid over the pose, other placed characters keep theirs.
       const renderer = new NativeRenderer(loaded.doc, loaded.renderer.assets);
       await renderer.loadBrushes();
+      renderer.setColourRules(rulesNow);
       for (const edit of edits) for (const [name, timeline] of Object.entries(edit.symbols)) if (loaded.doc.symbols.has(name)) renderer.overrides.set(name, timeline);
       fitOf(`${source.flaUrl}|${source.item}`, loaded, source.item);
       state = { source, renderer, loaded };

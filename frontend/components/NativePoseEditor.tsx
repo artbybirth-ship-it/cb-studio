@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FlaDocument, FlaElement, Layer, Matrix, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
-import { clearKeyframe, commit, deleteLayers, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setLayerOff, setMatrix, undo, type History } from "../lib/native/ops";
+import { clearKeyframe, commit, deleteLayers, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
 import { innerFrame, layerStateAt } from "../lib/native/evaluate";
 import { applyEdits, editsOf, parseEdits, serializeEdits, type NativeEdits } from "../lib/native/store";
 import { IDENTITY, importElements, invert, mul, poseScale, registerLibrary } from "../lib/native/library";
@@ -189,6 +189,31 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       setNote(error instanceof Error ? error.message : "Could not paste");
     }
   }, [base, working, symbol, doc, stack, levelToPose, loadedHere]);
+  /** Swap: the selected part's symbol becomes the copied part (same place, same animation) on every keyframe of its layer. */
+  const swapPart = useCallback(async () => {
+    const found = readClip();
+    if (!found || !base) { setNote("Copy the part to swap in first (⌘C), then select the part to replace"); return; }
+    const target = elIndex != null ? base.layers[layerIndex] && resolveElements(base.layers[layerIndex], frame)[elIndex] : null;
+    if (!target || target.k !== "instance") { setNote("Click the part to replace on the stage first"); return; }
+    const clip = found.clip.elements;
+    if (clip.length !== 1 || clip[0].k !== "instance") { setNote("Swap needs one copied part that is a symbol: copy a single part"); return; }
+    try {
+      setNote("Swapping…");
+      const source = found.source ?? (found.clip.flaUrl ? await loadNativeDoc(found.clip.flaUrl) : null);
+      if (!source) { setNote("The copied part's character is no longer available: copy it again"); return; }
+      const [incoming] = await importElements(source, clip, loadedHere);
+      if (incoming.k !== "instance") return;
+      if (incoming.item === target.item) { setNote("That part is already in place"); return; }
+      const scale = found.clip.rootScale / poseScale(doc, stack[0].item);
+      const layers = base.layers.map((l, i) => (i === layerIndex ? swapSymbol(l, target.item, incoming, scale) : l));
+      const map = new Map(working);
+      map.set(symbol, { ...base, layers, length: lengthOf(layers) });
+      setHist((h) => commit(h, map));
+      setNote(`Swapped ${short(target.item)} for ${short(incoming.item).replace(/^Pasted from [^/]*\//, "")} on layer ${base.layers[layerIndex].name}`);
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Could not swap");
+    }
+  }, [base, working, symbol, doc, stack, elIndex, layerIndex, frame, loadedHere]);
   copyRef.current = copyPart;
   pasteRef.current = () => void pastePart();
 
@@ -453,6 +478,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         <button data-testid="clear-keyframe" style={btn} onClick={commands["clear-keyframe"]}>⇧F6 Clear</button>
         <button data-testid="copy-part" style={btn} onClick={copyPart}>⌘C Copy part</button>
         <button data-testid="paste-part" style={btn} onClick={() => void pastePart()}>⌘V Paste as layer</button>
+        <button data-testid="swap-part" style={btn} onClick={() => void swapPart()}>⇄ Swap with copied part</button>
         <button data-testid="delete-layer" style={btn} onClick={deleteSelected}>⌫ Delete layer</button>
         <button data-testid="undo" style={btn} onClick={doUndo} disabled={!hist.past.length}>Undo</button>
         <button data-testid="redo" style={btn} onClick={doRedo} disabled={!hist.future.length}>Redo</button>

@@ -7,8 +7,8 @@
  * same drawing (lib/native/character.ts) from its own page, so a pasted head, retimed frames or a
  * moved part shows in playback and in the exported video.
  *
- * Limits for now: part colour and part-transform edits made with the old tools are applied by the
- * Animate player and are not drawn here.
+ * The character's colour rules (Recolour panel) are drawn here too (lib/native/colour.ts). Limit for now:
+ * part-transform edits made with the old tools are applied by the Animate player and are not drawn here.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { EditorObject } from "@/types";
@@ -59,11 +59,13 @@ export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCan
     return () => onCanvas?.(object.id, null);
   }, [character, object.id, onCanvas]);
 
+  const rulesKey = JSON.stringify(object.colorReplacements || []);
   useEffect(() => {
     const el = canvas.current;
+    if (el && character) character.setColourRules(object.colorReplacements);
     if (el && character) character.draw(el, seekMs, Math.min(2, window.devicePixelRatio || 1), playerFitOf(playerFrame?.()) ?? savedFit ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [character, seekMs, playerReady]);
+  }, [character, seekMs, playerReady, rulesKey]);
 
   return (
     <canvas ref={canvas} width={720} height={960} data-native-character={object.id} className="cb-native-character-canvas"

@@ -13,11 +13,14 @@ import { registerLibrary } from "../lib/native/library";
 import { editsOf, type NativeEdits } from "../lib/native/store";
 import { convertLegacy, type LegacyFields } from "../lib/native/legacy";
 import { buildClones } from "../lib/native/legacyClones";
+import type { ColourRule } from "../lib/native/colour";
 
-export default function NativePoseDialog({ flaUrl, item, title, js, initial, legacy, onDone, onCancel }: {
+export default function NativePoseDialog({ flaUrl, item, title, js, initial, legacy, colours, onDone, onCancel }: {
   flaUrl: string; item: string; title: string; /** The pose's class in the player (what old edits call it). */ js?: string; initial?: NativeEdits | null;
   /** What older versions saved inside this character: turned into native edits the first time the pose opens here (when it has none of its own). */
   legacy?: LegacyFields;
+  /** The character's colour rules (Recolour panel): the pose is drawn in the character's colours here, swapped and pasted parts included. */
+  colours?: ColourRule[];
   onDone: (edits: NativeEdits | null) => void; onCancel: () => void;
 }) {
   const [loaded, setLoaded] = useState<NativeLoaded | null>(null);
@@ -26,6 +29,8 @@ export default function NativePoseDialog({ flaUrl, item, title, js, initial, leg
   const [converted, setConverted] = useState("");
   const [seed, setSeed] = useState<NativeEdits | null>(null);
   const latest = useRef<NativeEdits | null>(initial ?? null);
+  const coloursRef = useRef(colours);
+  coloursRef.current = colours;
 
   useEffect(() => {
     let alive = true;
@@ -53,11 +58,14 @@ export default function NativePoseDialog({ flaUrl, item, title, js, initial, leg
           setConverted(`Older edits on this character were converted (${made.converted.join(", ")}).`);
         } else if (made.left.length) setConverted(`Older edits were not converted, so this character keeps using them as they are: ${made.left.join("; ")}.`);
       }
-      registerLibrary(result, initial?.library).then(() => alive && setLoaded(result), (e) => alive && setError(e instanceof Error ? e.message : String(e)));
+      registerLibrary(result, initial?.library).then(() => { if (!alive) return; result.renderer.setColourRules(coloursRef.current); setLoaded(result); }, (e) => alive && setError(e instanceof Error ? e.message : String(e)));
     }).catch((e) => alive && setError(e instanceof Error ? e.message : String(e)));
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flaUrl, item]);
+
+  // The shared drawing goes back to the file's own colours when the editor closes.
+  useEffect(() => () => loaded?.renderer.setColourRules(undefined), [loaded]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !(e.target instanceof HTMLElement && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName))) onCancel(); };

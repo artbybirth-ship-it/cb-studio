@@ -156,6 +156,30 @@ export function setTween(layer: Layer, frame: number, tween: Keyframe["tween"] |
 
 export const setEase = (layer: Layer, frame: number, ease: Ease): Layer => withFrames(layer, layer.frames.map((k) => (k.i === frame ? { ...k, ease } : k)));
 
+// ---------- swap symbol
+/**
+ * Animate's Swap Symbol, for the whole layer: every keyframe's instance of `from` becomes an
+ * instance of `to`, keeping where it is, how it is turned and its tween. `scale` sizes the new
+ * symbol (1 for another variant of the same character; the pose-size ratio for a part from
+ * another character). The new symbol brings its own transformation point.
+ */
+export function swapSymbol(layer: Layer, from: string, to: InstanceElement, scale = 1): Layer {
+  let changed = false;
+  const frames = layer.frames.map((k) => {
+    if (!k.elements.some((el) => el.k === "instance" && el.item === from)) return k;
+    changed = true;
+    return {
+      ...k,
+      elements: k.elements.map((el) => {
+        if (el.k !== "instance" || el.item !== from) return el;
+        const [a, b, c, d, tx, ty] = el.m;
+        return { ...el, item: to.item, symbolType: to.symbolType, pivot: to.pivot, m: [a * scale, b * scale, c * scale, d * scale, tx, ty] } as InstanceElement;
+      }),
+    };
+  });
+  return changed ? withFrames(layer, frames) : layer;
+}
+
 // ---------- layers
 /** The eye: a layer that is off is not drawn (and cannot be picked) at any frame. */
 export const setLayerOff = (layer: Layer, off: boolean): Layer => (!!layer.off === off ? layer : { ...layer, off });

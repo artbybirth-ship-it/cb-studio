@@ -64,8 +64,10 @@ function fitOf(key, loaded, item) {
 function createNativeCharacter(object) {
     let state = null;
     const edits = Object.values(object.nativePose || {});
+    let rulesNow = object.colorReplacements;
     return {
         get ready() { return Boolean(state); },
+        setColourRules(rules) { rulesNow = rules; state?.renderer.setColourRules(rules); },
         async load() {
             const source = object.assetUrl ? await (0, resolve_1.resolvePoseSource)(object.assetUrl) : null;
             if (!source)
@@ -76,6 +78,7 @@ function createNativeCharacter(object) {
             // This character's own renderer over the shared document: its edits are laid over the pose, other placed characters keep theirs.
             const renderer = new render_1.NativeRenderer(loaded.doc, loaded.renderer.assets);
             await renderer.loadBrushes();
+            renderer.setColourRules(rulesNow);
             for (const edit of edits)
                 for (const [name, timeline] of Object.entries(edit.symbols))
                     if (loaded.doc.symbols.has(name))
@@ -775,6 +778,7 @@ defs["lib/native/render"] = function (exports, require) {
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NativeRenderer = void 0;
+const colour_1 = require("lib/native/colour");
 const evaluate_1 = require("lib/native/evaluate");
 const GRADIENT_HALF = 819.2;
 const CAPS = { none: "butt", round: "round", square: "square" };
@@ -848,7 +852,13 @@ class NativeRenderer {
         this.brushImages = new Map();
         this.pathCache = new WeakMap();
         this.styleCache = new WeakMap();
+        /** The character's colour rules, applied to every shape as it is drawn (originals are never changed, so rules never chain). */
+        this.rules = [];
+        /** Names of the instances being drawn, outermost first: what part-scoped colour rules are matched against. */
+        this.trail = [];
     }
+    setColourRules(list) { this.rules = (0, colour_1.prepareRules)(list); }
+    rulesHere() { return this.rules.length ? (0, colour_1.rulesAt)(this.rules, this.trail.join("/")) : this.rules; }
     /** Art-brush pictures must be decoded before the first draw that uses them. */
     async loadBrushes(brushes = this.doc.brushes) {
         await Promise.all(Object.entries(brushes).map(([id, brush]) => new Promise((done) => {
@@ -891,10 +901,12 @@ class NativeRenderer {
             cached = { fills: build(el.fills), strokes: build(el.strokes) };
             this.pathCache.set(el, cached);
         }
+        const rules = this.rulesHere();
         ctx.save();
         ctx.transform(...el.m);
-        el.fills.forEach((f, i) => paint(ctx, f.style, cached.fills[i], "evenodd"));
-        el.strokes.forEach((s, i) => {
+        el.fills.forEach((f, i) => paint(ctx, (0, colour_1.recolourFill)(f.style, rules, false), cached.fills[i], "evenodd"));
+        el.strokes.forEach((s0, i) => {
+            const s = { ...s0, style: (0, colour_1.recolourStroke)(s0.style, rules) };
             if (s.style.brush && s.paths.every((c) => this.drawBrush(ctx, s.style, c[0][1], c[0][2], ...lastPoint(c))))
                 return;
             strokeSetup(ctx, s.style);
@@ -913,7 +925,7 @@ class NativeRenderer {
     }
     /** Shape tween: Animate's matched start/end curves (timeline space), blended at t. */
     drawMorph(ctx, key, next, t) {
-        const A = this.stylesOf(key), B = this.stylesOf(next);
+        const A = this.stylesOf(key), B = this.stylesOf(next), rules = this.rulesHere();
         const groups = new Map();
         for (const seg of key.morph || []) {
             const p = new Path2D();
@@ -936,7 +948,7 @@ class NativeRenderer {
         for (const { seg, path, ends } of groups.values()) {
             const fa = A.fills[seg.f1], fb = B.fills[seg.f2] || fa;
             if (fa) {
-                paint(ctx, mixFill(fa, fb, t), path, "evenodd");
+                paint(ctx, (0, colour_1.recolourFill)(mixFill(fa, fb, t), rules, false), path, "evenodd");
                 continue;
             }
             const sa = A.strokes[seg.s1], sb = B.strokes[seg.s2] || sa;
@@ -945,7 +957,7 @@ class NativeRenderer {
             if (sa.brush && ends.every((e) => this.drawBrush(ctx, sa, ...e)))
                 continue;
             strokeSetup(ctx, sa, (0, evaluate_1.lerp)(sa.w, sb.w, t));
-            paint(ctx, mixFill(sa.fill, sb.fill, t), path, null, true);
+            paint(ctx, (0, colour_1.recolourFill)(mixFill(sa.fill, sb.fill, t), rules, true), path, null, true);
         }
         this.stats.morphs += 1;
     }
@@ -977,7 +989,11 @@ class NativeRenderer {
         const alpha = override?.alpha ?? el.alpha;
         if (alpha != null)
             ctx.globalAlpha *= alpha;
+        if (el.name)
+            this.trail.push(el.name);
         this.drawTimeline(ctx, timeline, (0, evaluate_1.innerFrame)(el, offset, timeline.length));
+        if (el.name)
+            this.trail.pop();
         ctx.restore();
     }
     drawLayer(ctx, layer, frame, length) {
@@ -1053,6 +1069,147 @@ class NativeRenderer {
     }
 }
 exports.NativeRenderer = NativeRenderer;
+
+};
+defs["lib/native/colour"] = function (exports, require) {
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.recolourStroke = void 0;
+exports.parseColour = parseColour;
+exports.toHsl = toHsl;
+exports.fromHsl = fromHsl;
+exports.prepareRules = prepareRules;
+exports.rulesAt = rulesAt;
+exports.mapColour = mapColour;
+exports.recolourFill = recolourFill;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+function parseColour(value) {
+    const s = String(value || "").trim();
+    let m = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(s);
+    if (m)
+        return { r: parseInt(m[1] + m[1], 16), g: parseInt(m[2] + m[2], 16), b: parseInt(m[3] + m[3], 16), a: 1 };
+    m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(s);
+    if (m)
+        return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16), a: 1 };
+    m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(s);
+    if (m)
+        return { r: +m[1], g: +m[2], b: +m[3], a: m[4] == null ? 1 : +m[4] };
+    return null;
+}
+const hexOf = (c) => "#" + [c.r, c.g, c.b].map((v) => ("0" + Math.round(clamp(v, 0, 255)).toString(16)).slice(-2)).join("");
+function toHsl(c) {
+    const r = c.r / 255, g = c.g / 255, b = c.b / 255, max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, d = max - min;
+    let h = 0, s = 0;
+    if (d > 1e-6) {
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+        h *= 60;
+    }
+    return { h, s, l };
+}
+function fromHsl(h0, s0, l0, a) {
+    const h = ((h0 % 360) + 360) % 360, s = clamp(s0, 0, 1), l = clamp(l0, 0, 1);
+    const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = l - c / 2;
+    let r = 0, g = 0, b = 0;
+    if (h < 60) {
+        r = c;
+        g = x;
+    }
+    else if (h < 120) {
+        r = x;
+        g = c;
+    }
+    else if (h < 180) {
+        g = c;
+        b = x;
+    }
+    else if (h < 240) {
+        g = x;
+        b = c;
+    }
+    else if (h < 300) {
+        r = x;
+        b = c;
+    }
+    else {
+        r = c;
+        b = x;
+    }
+    return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255, a };
+}
+function sameFamily(a, b) {
+    if (Math.abs(a.l - b.l) > 0.22)
+        return false;
+    if (a.s < 0.12 && b.s < 0.12)
+        return true;
+    if (a.s < 0.12 || b.s < 0.12)
+        return false;
+    let dh = Math.abs(a.h - b.h);
+    dh = Math.min(dh, 360 - dh);
+    return dh <= 5 && Math.abs(a.s - b.s) <= 0.3;
+}
+/** Rules ready to apply. Whole-character rules ("*") come first, then part rules, in the order given (as the player does). */
+function prepareRules(list) {
+    const rules = (list || []).flatMap((r) => {
+        const from = parseColour(r.from), to = parseColour(r.to);
+        if (!from || !to)
+            return [];
+        return [{ target: r.target || "both", match: r.match === "shades" ? "shades" : "exact", fromHex: hexOf(from), fromHsl: toHsl(from), toRgb: to, toHsl: toHsl(to), scope: String(r.scope || "*") }];
+    });
+    return [...rules.filter((r) => r.scope === "*"), ...rules.filter((r) => r.scope !== "*")];
+}
+/** The rules that apply to a shape drawn inside the instances named `path` (outermost first): whole-character rules, and rules of any part the shape is inside. */
+function rulesAt(rules, path) {
+    return rules.filter((r) => r.scope === "*" || path === r.scope || path.startsWith(r.scope + "/"));
+}
+/** One colour through the rules: an exact match wins over a shades match; null when no rule touches it. */
+function mapColour(c, rules, isStroke) {
+    let exact = null, shade = null, hsl = null;
+    const hex = hexOf(c);
+    for (const r of rules) {
+        if (r.target !== "both" && (r.target === "stroke") !== isStroke)
+            continue;
+        if (r.match === "exact") {
+            if (hex === r.fromHex)
+                exact = { r: r.toRgb.r, g: r.toRgb.g, b: r.toRgb.b, a: c.a };
+            continue;
+        }
+        if (!hsl)
+            hsl = toHsl(c);
+        if (!sameFamily(hsl, r.fromHsl))
+            continue;
+        shade = fromHsl(r.toHsl.h + (hsl.h - r.fromHsl.h), r.toHsl.s + (hsl.s - r.fromHsl.s), r.toHsl.l + (hsl.l - r.fromHsl.l), c.a);
+    }
+    return exact || shade;
+}
+const hexString = (c) => hexOf(c);
+function recolourStop(color, alpha, rules, isStroke) {
+    const parsed = parseColour(color);
+    const out = parsed && mapColour({ ...parsed, a: alpha }, rules, isStroke);
+    return out ? [hexString(out), out.a] : [color, alpha];
+}
+/** A fill (or a stroke's fill) through the rules: the same object back when nothing changes. */
+function recolourFill(style, rules, isStroke) {
+    if (!rules.length)
+        return style;
+    if (style.t === "solid") {
+        const [color, alpha] = recolourStop(style.color, style.alpha, rules, isStroke);
+        return color === style.color && alpha === style.alpha ? style : { ...style, color, alpha };
+    }
+    let changed = false;
+    const stops = style.stops.map(([ratio, color, alpha]) => {
+        const [c, a] = recolourStop(color, alpha, rules, isStroke);
+        if (c !== color || a !== alpha)
+            changed = true;
+        return [ratio, c, a];
+    });
+    return changed ? { ...style, stops } : style;
+}
+const recolourStroke = (style, rules) => {
+    const fill = recolourFill(style.fill, rules, true);
+    return fill === style.fill ? style : { ...style, fill };
+};
+exports.recolourStroke = recolourStroke;
 
 };
 defs["lib/native/evaluate"] = function (exports, require) {

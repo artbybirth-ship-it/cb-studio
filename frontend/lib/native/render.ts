@@ -5,6 +5,7 @@
  * (which matched Animate's own HTML5 publish to 0.44% of pixels, edges only).
  */
 import type { Brush, Cmd, FlaDocument, FlaElement, Fill, InstanceElement, Keyframe, Layer, Matrix, Path, ShapeElement, Stroke, Timeline } from "../fla/xfl";
+import { prepareRules, recolourFill, recolourStroke, rulesAt, type ColourRule, type PreparedRule } from "./colour";
 import { frameStyles, innerFrame, layerStateAt, lerp, tweenMatrix, tweenProgress, type LayerState } from "./evaluate";
 
 export type NativeAssets = {
@@ -76,7 +77,15 @@ export class NativeRenderer {
   private pathCache = new WeakMap<ShapeElement, { fills: Path2D[]; strokes: Path2D[] }>();
   private styleCache = new WeakMap<Keyframe, ReturnType<typeof frameStyles>>();
 
+  /** The character's colour rules, applied to every shape as it is drawn (originals are never changed, so rules never chain). */
+  private rules: PreparedRule[] = [];
+  /** Names of the instances being drawn, outermost first: what part-scoped colour rules are matched against. */
+  private trail: string[] = [];
+
   constructor(readonly doc: FlaDocument, readonly assets: NativeAssets) {}
+
+  setColourRules(list: ColourRule[] | undefined) { this.rules = prepareRules(list); }
+  private rulesHere() { return this.rules.length ? rulesAt(this.rules, this.trail.join("/")) : this.rules; }
 
   /** Art-brush pictures must be decoded before the first draw that uses them. */
   async loadBrushes(brushes: Record<string, Brush> = this.doc.brushes) {
@@ -118,10 +127,12 @@ export class NativeRenderer {
       cached = { fills: build(el.fills), strokes: build(el.strokes) };
       this.pathCache.set(el, cached);
     }
+    const rules = this.rulesHere();
     ctx.save();
     ctx.transform(...el.m);
-    el.fills.forEach((f, i) => paint(ctx, f.style, cached!.fills[i], "evenodd"));
-    el.strokes.forEach((s, i) => {
+    el.fills.forEach((f, i) => paint(ctx, recolourFill(f.style, rules, false), cached!.fills[i], "evenodd"));
+    el.strokes.forEach((s0, i) => {
+      const s = { ...s0, style: recolourStroke(s0.style, rules) };
       if (s.style.brush && s.paths.every((c) => this.drawBrush(ctx, s.style, c[0][1] as number, c[0][2] as number, ...lastPoint(c)))) return;
       strokeSetup(ctx, s.style);
       paint(ctx, s.style.fill, cached!.strokes[i], null, true);
@@ -138,7 +149,7 @@ export class NativeRenderer {
 
   /** Shape tween: Animate's matched start/end curves (timeline space), blended at t. */
   private drawMorph(ctx: Ctx, key: Keyframe, next: Keyframe, t: number) {
-    const A = this.stylesOf(key), B = this.stylesOf(next);
+    const A = this.stylesOf(key), B = this.stylesOf(next), rules = this.rulesHere();
     const groups = new Map<string, { seg: NonNullable<Keyframe["morph"]>[number]; path: Path2D; ends: Array<[number, number, number, number]> }>();
     for (const seg of key.morph || []) {
       const p = new Path2D();
@@ -156,12 +167,12 @@ export class NativeRenderer {
     }
     for (const { seg, path, ends } of groups.values()) {
       const fa = A.fills[seg.f1], fb = B.fills[seg.f2] || fa;
-      if (fa) { paint(ctx, mixFill(fa, fb, t), path, "evenodd"); continue; }
+      if (fa) { paint(ctx, recolourFill(mixFill(fa, fb, t), rules, false), path, "evenodd"); continue; }
       const sa = A.strokes[seg.s1], sb = B.strokes[seg.s2] || sa;
       if (!sa) continue;
       if (sa.brush && ends.every((e) => this.drawBrush(ctx, sa, ...e))) continue;
       strokeSetup(ctx, sa, lerp(sa.w, sb.w, t));
-      paint(ctx, mixFill(sa.fill, sb.fill, t), path, null, true);
+      paint(ctx, recolourFill(mixFill(sa.fill, sb.fill, t), rules, true), path, null, true);
     }
     this.stats.morphs += 1;
   }
@@ -184,7 +195,9 @@ export class NativeRenderer {
     ctx.transform(...(override?.m || el.m));
     const alpha = override?.alpha ?? el.alpha;
     if (alpha != null) ctx.globalAlpha *= alpha;
+    if (el.name) this.trail.push(el.name);
     this.drawTimeline(ctx, timeline, innerFrame(el, offset, timeline.length));
+    if (el.name) this.trail.pop();
     ctx.restore();
   }
 
