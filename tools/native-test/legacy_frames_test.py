@@ -15,7 +15,7 @@ PROJECT, OUT = sys.argv[1], sys.argv[2]
 INDEX = int(os.environ.get("LEGACY_INDEX", "3"))
 TIMES = [float(t) for t in os.environ.get("TIMES", "0,0.4,0.9,1.5,2.2").split(",")]
 MARGIN = float(os.environ.get("MARGIN", "3.0"))
-SOURCE = "/private/tmp/claude-501/-Users-amazdraw-Downloads-CharacterBazaarStudio-MVP-v112/e20824a2-161c-45d0-b24c-cb95fad8f3b3/scratchpad/legacy_objects.json"
+SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "legacy_objects.json")
 os.makedirs(OUT, exist_ok=True)
 OLD = ("symbolKeys", "symbolValues", "symbolEases", "symbolLayers")
 chrome = subprocess.Popen(["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--headless=new", "--remote-debugging-port=9667",

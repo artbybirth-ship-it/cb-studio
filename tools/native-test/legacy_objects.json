@@ -1,0 +1,671 @@
+[
+ {
+  "name": "Rajkumar (Yashvardhan)",
+  "source_project": "739d7e3c",
+  "symbolKeys": {
+   "Headcopy2": {
+    "1": {
+     "props": [
+      "instance_1"
+     ],
+     "anchors": [
+      [
+       0,
+       0
+      ],
+      [
+       16,
+       16
+      ],
+      [
+       29,
+       29
+      ],
+      [
+       39,
+       39
+      ],
+      [
+       49,
+       49
+      ],
+      [
+       89,
+       89
+      ],
+      [
+       99,
+       99
+      ],
+      [
+       114,
+       114
+      ],
+      [
+       127,
+       127
+      ],
+      [
+       211,
+       211
+      ]
+     ]
+    }
+   }
+  },
+  "symbolLayers": {
+   "Yashvardhancopy2": {
+    "spec": {
+     "order": [
+      [
+       "instance_1"
+      ],
+      [
+       "instance"
+      ],
+      [
+       "instance_2"
+      ],
+      [
+       "instance_3"
+      ],
+      [
+       "instance_4"
+      ],
+      [
+       "instance_5"
+      ],
+      [
+       "instance_6"
+      ],
+      [
+       "instance_7"
+      ],
+      [
+       "instance_8"
+      ],
+      [
+       "instance_9"
+      ],
+      [
+       "instance_10"
+      ],
+      [
+       "instance_11"
+      ],
+      [
+       "instance_12"
+      ],
+      [
+       "instance_13"
+      ],
+      [
+       "instance_14"
+      ],
+      [
+       "instance_15"
+      ],
+      [
+       "instance_16"
+      ],
+      [
+       "instance_17"
+      ],
+      [
+       "instance_18"
+      ],
+      [
+       "instance_19"
+      ],
+      [
+       "instance_20"
+      ],
+      [
+       "instance_21"
+      ],
+      [
+       "instance_22"
+      ],
+      [
+       "instance_23"
+      ],
+      [
+       "instance_24"
+      ],
+      [
+       "instance_25"
+      ]
+     ],
+     "hidden": []
+    },
+    "order": [
+     1000,
+     1,
+     0,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20,
+     21,
+     22,
+     23,
+     24,
+     25
+    ],
+    "extras": [
+     {
+      "id": 1000,
+      "name": "Layer 1",
+      "type": "normal"
+     }
+    ],
+    "hidden": [],
+    "parents": {
+     "1": null,
+     "1000": null
+    }
+   }
+  }
+ },
+ {
+  "name": "Sardar",
+  "source_project": "943609ca",
+  "symbolKeys": {
+   "Sardar_01": {
+    "19": {
+     "props": [
+      "cbnew1"
+     ],
+     "tweens": [
+      [
+       0,
+       0
+      ],
+      [
+       15,
+       0
+      ],
+      [
+       9,
+       0
+      ],
+      [
+       69,
+       0
+      ],
+      [
+       79,
+       0
+      ]
+     ],
+     "anchors": [
+      [
+       0,
+       0
+      ],
+      [
+       9,
+       9
+      ],
+      [
+       15,
+       15
+      ],
+      [
+       27,
+       27
+      ],
+      [
+       69,
+       69
+      ],
+      [
+       79,
+       79
+      ],
+      [
+       85,
+       85
+      ],
+      [
+       100,
+       100
+      ]
+     ]
+    }
+   }
+  },
+  "symbolValues": {
+   "Sardar_01": {
+    "19:0": {
+     "v": {
+      "x": 224.12,
+      "y": 260.02,
+      "regX": 87,
+      "regY": 266.25
+     },
+     "frame": 0,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:9": {
+     "v": {
+      "x": 224.12,
+      "y": 260.02,
+      "regX": 87,
+      "regY": 266.25,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8661105369358728,
+      "scaleY": 0.8661105369358728
+     },
+     "frame": 9,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:15": {
+     "v": {
+      "x": 224.12,
+      "y": 277.93,
+      "regX": 87,
+      "regY": 266.25,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8661105369358728,
+      "scaleY": 0.8661105369358728
+     },
+     "frame": 15,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:27": {
+     "v": {
+      "x": 224.12,
+      "y": 261.98,
+      "regX": 87,
+      "regY": 266.25,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8661105369358728,
+      "scaleY": 0.8661105369358728
+     },
+     "frame": 27,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:69": {
+     "v": {
+      "x": 224.12,
+      "y": 261.98,
+      "regX": 87,
+      "regY": 266.25,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8661105369358728,
+      "scaleY": 0.8661105369358728
+     },
+     "frame": 69,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:79": {
+     "v": {
+      "x": 224.12,
+      "y": 277.93,
+      "regX": 87,
+      "regY": 266.25,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8661105369358728,
+      "scaleY": 0.8661105369358728
+     },
+     "frame": 79,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:85": {
+     "v": {
+      "x": 224.12,
+      "y": 264,
+      "regX": 87,
+      "regY": 266.25,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8661105369358728,
+      "scaleY": 0.8661105369358728
+     },
+     "frame": 85,
+     "props": [
+      "cbnew1"
+     ]
+    }
+   }
+  },
+  "symbolLayers": {
+   "Symbol9": {
+    "spec": {
+     "hidden": [
+      "instance_4"
+     ]
+    },
+    "deleted": [
+     6
+    ]
+   },
+   "Sardar_01": {
+    "spec": {
+     "order": [
+      [
+       "cbnew1"
+      ],
+      [
+       "instance"
+      ],
+      [
+       "instance_1"
+      ],
+      [
+       "instance_2"
+      ],
+      [
+       "instance_3"
+      ],
+      [
+       "instance_4"
+      ],
+      [
+       "instance_5"
+      ],
+      [
+       "instance_6"
+      ],
+      [
+       "instance_7"
+      ],
+      [
+       "instance_8"
+      ],
+      [
+       "instance_9"
+      ],
+      [
+       "instance_10"
+      ],
+      [
+       "instance_11"
+      ],
+      [
+       "instance_12"
+      ],
+      [
+       "instance_13",
+       "instance_14"
+      ],
+      [
+       "instance_15",
+       "instance_16"
+      ],
+      [
+       "instance_17"
+      ],
+      [
+       "instance_18"
+      ],
+      [
+       "instance_19"
+      ]
+     ],
+     "clones": [
+      {
+       "of": "",
+       "prop": "cbnew1",
+       "symbol": "Headcopy",
+       "foreign": {
+        "lib": "/media/character_libraries/a894e46e701d442f907ef96ea98387d4/Rajkumar%20%28Yashvardhan%29/Rajkumar%20%28Yashvardhan%29.js",
+        "loop": -1,
+        "mode": "synched",
+        "frame": 0,
+        "scale": 0.43466706038683006
+       }
+      }
+     ],
+     "hidden": [
+      "instance_3"
+     ]
+    },
+    "names": {},
+    "order": [
+     1001,
+     1000,
+     19,
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18
+    ],
+    "clones": [
+     {
+      "of": -1,
+      "name": "Head",
+      "prop": "cbnew1",
+      "symbol": "Headcopy",
+      "foreign": {
+       "lib": "/media/character_libraries/a894e46e701d442f907ef96ea98387d4/Rajkumar%20%28Yashvardhan%29/Rajkumar%20%28Yashvardhan%29.js",
+       "loop": -1,
+       "mode": "synched",
+       "frame": 0,
+       "scale": 0.43466706038683006
+      }
+     }
+    ],
+    "extras": [
+     {
+      "id": 1000,
+      "name": "Layer 1",
+      "type": "normal"
+     },
+     {
+      "id": 1001,
+      "name": "Layer 2",
+      "type": "normal"
+     }
+    ],
+    "hidden": [],
+    "deleted": [
+     4,
+     1001,
+     1000
+    ],
+    "parents": {
+     "19": null,
+     "1000": null,
+     "1001": null
+    }
+   }
+  }
+ },
+ {
+  "name": "Rajkumar (Yashvardhan)",
+  "source_project": "dfa94df2",
+  "symbolValues": {
+   "Yashvardhancopy2": {
+    "9:0": {
+     "v": {
+      "skewX": 1.62,
+      "skewY": 1.62,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "instance_9"
+     ]
+    }
+   }
+  }
+ },
+ {
+  "name": "Sardar",
+  "source_project": "75b77d53",
+  "symbolKeys": {
+   "Sardar_01": {
+    "1": {
+     "props": [
+      "instance"
+     ],
+     "anchors": [
+      [
+       0,
+       0
+      ],
+      [
+       9,
+       9
+      ],
+      [
+       15,
+       20
+      ],
+      [
+       27,
+       27
+      ],
+      [
+       69,
+       69
+      ],
+      [
+       79,
+       79
+      ],
+      [
+       85,
+       85
+      ],
+      [
+       100,
+       100
+      ]
+     ]
+    }
+   }
+  },
+  "symbolValues": {
+   "Sardar_01": {
+    "2:0": {
+     "v": {
+      "skewX": 0.1,
+      "skewY": 0.1,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "instance_1"
+     ]
+    }
+   }
+  },
+  "symbolLayers": {
+   "Symbol9": {
+    "spec": {
+     "hidden": [
+      "instance_4"
+     ]
+    },
+    "deleted": [
+     6
+    ]
+   }
+  }
+ },
+ {
+  "name": "Sardar",
+  "source_project": "bf433f9d",
+  "symbolKeys": {
+   "Sardar_01": {
+    "1": {
+     "props": [
+      "instance"
+     ],
+     "anchors": [
+      [
+       0,
+       0
+      ],
+      [
+       9,
+       9
+      ],
+      [
+       15,
+       20
+      ],
+      [
+       27,
+       27
+      ],
+      [
+       69,
+       69
+      ],
+      [
+       79,
+       79
+      ],
+      [
+       85,
+       85
+      ],
+      [
+       100,
+       100
+      ]
+     ]
+    }
+   }
+  }
+ }
+]

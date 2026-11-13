@@ -85,7 +85,7 @@ try:
     sc0 = scene(); ed0 = json.loads(json.dumps(sc0["editor_data"])); o0 = ed0["objects"][0]
     o0.pop("nativePose", None); o0.pop("nativePoseFit", None)
     if os.environ.get("LEGACY_INDEX"):
-        real = json.load(open("/private/tmp/claude-501/-Users-amazdraw-Downloads-CharacterBazaarStudio-MVP-v112/e20824a2-161c-45d0-b24c-cb95fad8f3b3/scratchpad/legacy_objects.json"))[int(os.environ["LEGACY_INDEX"])]
+        real = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "legacy_objects.json")))[int(os.environ["LEGACY_INDEX"])]
         for k in ("symbolKeys", "symbolValues", "symbolEases", "symbolLayers"):
             o0.pop(k, None)
             if real.get(k): o0[k] = real[k]
