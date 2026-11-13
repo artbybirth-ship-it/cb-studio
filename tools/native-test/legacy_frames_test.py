@@ -1,6 +1,6 @@
 """Later frames of a converted pose against the old player, on the render page (headless Chrome, dev server on :3000).
 
-usage: LEGACY_INDEX=0|3|4 python3 legacy_frames_test.py <throwaway project id> <out dir>
+usage: LEGACY_INDEX=0..4 (see legacy_objects.json; 3 is the fully convertible Sardar set, the default) python3 legacy_frames_test.py <throwaway project id> <out dir>
 Seeds the throwaway scene with one set of real old edits (legacy_objects.json), then at several times compares
   A old player drawing the old edits      B converted native drawing
   C old player, no edits                  D native drawing, no edits
