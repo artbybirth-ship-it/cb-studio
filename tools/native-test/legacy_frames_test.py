@@ -83,6 +83,14 @@ try:
     sc0 = scene(); ed0 = json.loads(json.dumps(sc0["editor_data"])); o0 = ed0["objects"][0]
     if not os.environ.get("AS_IS"):  # AS_IS=1: keep the scene's own old edits (a copy of a real project) instead of seeding a fixture
         real = json.load(open(SOURCE))[INDEX]
+        if real.get("name") and real["name"] != o0.get("name"):
+            # the fixture belongs to another character (index 0 and 2 are Rajkumar's): its class names only exist in that character's Animate file
+            # (seeded onto Sardar they read "not in the Animate file"), so the scene gets a clean copy of that character from any project that has one
+            template = next((json.loads(json.dumps(o)) for p in json.load(urllib.request.urlopen("http://localhost:3000/api/projects")) for s in p["scenes"]
+                             for o in s["editor_data"].get("objects", []) if o.get("type") == "character" and o.get("name") == real["name"] and o.get("assetUrl")), None)
+            if not template: sys.exit(f"no project has a character called {real['name']!r} to seed fixture {INDEX} onto")
+            for k in ("x", "y", "scale"): template[k] = o0.get(k, template.get(k))
+            ed0["objects"] = [template]; o0 = template
         for k in ("nativePose", "nativePoseFit") + OLD: o0.pop(k, None)
         for k in OLD:
             if real.get(k): o0[k] = real[k]
@@ -100,7 +108,20 @@ try:
     check("older edits were converted", said.startswith("Older edits on this character were converted"), said)
     click("[data-testid=native-done]"); time.sleep(2)
     sc1 = scene()
-    check("native edits saved", bool(sc1["editor_data"]["objects"][0].get("nativePose")))
+    for _ in range(10):   # the scene is saved a moment after Done
+        if sc1["editor_data"]["objects"][0].get("nativePose"): break
+        time.sleep(1); sc1 = scene()
+    saved_now = bool(sc1["editor_data"]["objects"][0].get("nativePose"))
+    if saved_now: check("native edits saved", True)
+    if not sc1["editor_data"]["objects"][0].get("nativePose"):
+        # Nothing to save: every old edit converted to the file's own values (fixture 2 is one skew of 1.62 degrees that the file already has).
+        # That is right only if the old edit changes nothing the player draws either, so the player with and without it is compared.
+        ed = json.loads(json.dumps(sc1["editor_data"])); [ed["objects"][0].pop(k, None) for k in OLD]
+        patch(sc1, ed)
+        C0 = shots("C-player-unedited", scene())
+        diffs = [pct(C0[i], A[i]) for i in range(len(TIMES))]
+        check("no native edits because the old edits change nothing the player draws", said.startswith("Older edits on this character were converted") and max(diffs) < 0.2, f"largest player difference {max(diffs):.2f}%")
+        print("FAILED:" if failed else "ALL PASSED", failed); sys.exit(1 if failed else 0)
     B = shots("B-converted-native", sc1)
 
     # controls: same character with no old edits, drawn by the player (C) and natively (D)

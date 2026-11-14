@@ -114,6 +114,7 @@ export function addLayer(layers: FlaLayer[], edit: SymbolLayerEdit | undefined, 
 /** What the player is told: the file layers' objects top to bottom, and the objects to hide (hidden, deleted, or under a hidden folder). */
 export function playerSpec(layers: FlaLayer[], edit: SymbolLayerEdit): { order?: string[][]; hidden: string[]; clones?: Array<{ of: string; prop: string; symbol?: string; image?: PoseImage; foreign?: PoseForeign; end?: number }> } {
   const ids = orderOf(layers, edit), gone = new Set([...(edit.hidden || []), ...(edit.deleted || [])]);
+  const single = edit.deletedProps || [];
   const hiddenIds = ids.filter((id) => {
     for (let up: number | null = id, guard = 0; up != null && guard < 30; up = parentOf(layers, edit, up), guard += 1) if (gone.has(up)) return true;
     return false;
@@ -121,10 +122,32 @@ export function playerSpec(layers: FlaLayer[], edit: SymbolLayerEdit): { order?:
   const withParts = ids.filter((id) => id < EXTRA_BASE && layers[id]?.props?.length);
   const moved = edit.order && edit.order.length > 0;
   const clones = (edit.clones || []).map((clone) => (clone.symbol || clone.image ? { of: "", prop: clone.prop, symbol: clone.symbol, image: clone.image, foreign: clone.foreign, end: clone.end } : { of: layers[clone.of]?.props?.[0] || "", prop: clone.prop })).filter((clone) => clone.of || clone.symbol || clone.image);
-  return { order: moved ? withParts.map((id) => layers[id].props as string[]) : undefined, hidden: hiddenIds.flatMap((id) => (id < EXTRA_BASE ? layers[id]?.props || [] : [])), clones: clones.length ? clones : undefined };
+  return { order: moved ? withParts.map((id) => layers[id].props as string[]) : undefined, hidden: [...new Set([...hiddenIds.flatMap((id) => (id < EXTRA_BASE ? layers[id]?.props || [] : [])), ...single])], clones: clones.length ? clones : undefined };
 }
 
 /** The file's layers plus the copies Duplicate Layer made (after them, in the order they were made): a copy starts as the file's layer. */
+/**
+ * Symbols that came from another character are named "<tag>~<class>" wherever the editor and the player talk about them (the
+ * keys of the edits made inside them, the player's own name for their clips), because two characters often have a symbol of
+ * the same class name ("Symbol2"): the tag is the first 8 characters of the id of the character's library folder.
+ * public/vendor/cb-animate-bridge.js makes the same tag from the library's script address.
+ */
+export const foreignTag = (lib: string) => ((lib.match(/character_libraries\/([^/]+)/)?.[1]) || "x").slice(0, 8);
+export const qualifiedClass = (tag: string, cls: string) => `${tag}~${cls}`;
+/** "tag~Class" → [tag, Class]; a plain class → [null, class]. */
+export const splitClass = (name: string): [string | null, string] => { const at = name.indexOf("~"); return at > 0 ? [name.slice(0, at), name.slice(at + 1)] : [null, name]; };
+/** A symbol file read from another character, its classes qualified (the symbol's own and those of the objects inside it). */
+export function qualifySymbol(data: FlaSymbol, tag: string): FlaSymbol {
+  const symbolsOf = (frames: FlaLayer["frames"]) => frames.map((frame) => (frame.symbols ? { ...frame, symbols: frame.symbols.map((item) => (item.js ? { ...item, js: qualifiedClass(tag, item.js) } : item)) } : frame));
+  return {
+    ...data, js: qualifiedClass(tag, data.js),
+    layers: data.layers.map((layer) => ({
+      ...layer, frames: symbolsOf(layer.frames),
+      ...(layer.classes ? { classes: Object.fromEntries(Object.entries(layer.classes).map(([prop, cls]) => [prop, qualifiedClass(tag, cls)])) } : {}),
+    })),
+  };
+}
+
 export function withClones(data: FlaSymbol, clones?: SymbolClone[]): FlaSymbol {
   if (!clones?.length) return data;
   const layers = [...data.layers];
@@ -132,8 +155,11 @@ export function withClones(data: FlaSymbol, clones?: SymbolClone[]): FlaSymbol {
     if (clone.symbol || clone.image) {
       const name = clone.name || (clone.image ? clone.image.name || "Picture" : clone.symbol!.replace(/(?:copy\d*|_\d+)+$/i, "") || "Layer");
       const shown = Math.max(1, Math.min(data.frames, clone.end ?? data.frames));
-      const body = clone.image ? { bitmaps: 1 } : { symbols: [{ name: clone.symbol! }] };
-      layers.push({ name, type: "normal", props: [clone.prop], frames: shown < data.frames ? [{ i: 0, d: shown, ...body }, { i: shown, d: data.frames - shown, blank: true, ended: true }] : [{ i: 0, d: shown, ...body }] });
+      const cls = clone.symbol ? (clone.foreign ? qualifiedClass(foreignTag(clone.foreign.lib), clone.symbol) : clone.symbol) : "";
+      const body = clone.image ? { bitmaps: 1 } : { symbols: [{ name: clone.symbol!, js: cls }] };
+      // A symbol clone can be stepped into: the class its object has (qualified when it came from another character).
+      const classes = clone.symbol ? { [clone.prop]: cls } : undefined;
+      layers.push({ name, type: "normal", props: [clone.prop], ...(classes ? { classes } : {}), frames: shown < data.frames ? [{ i: 0, d: shown, ...body }, { i: shown, d: data.frames - shown, blank: true, ended: true }] : [{ i: 0, d: shown, ...body }] });
       return;
     }
     const source = layers[clone.of];
@@ -208,4 +234,4 @@ export function arrangeSymbolLayers(layers: FlaLayer[], edit: SymbolLayerEdit | 
 
 /** Nothing in the edit changes the layers: it can be dropped. */
 export const isLayerEditEmpty = (edit: SymbolLayerEdit) =>
-  !edit.order && !(edit.names && Object.keys(edit.names).length) && !edit.hidden?.length && !edit.locked?.length && !edit.deleted?.length && !(edit.parents && Object.keys(edit.parents).length) && !edit.extras?.length && !edit.clones?.length;
+  !edit.order && !(edit.names && Object.keys(edit.names).length) && !edit.hidden?.length && !edit.locked?.length && !edit.deleted?.length && !edit.deletedProps?.length && !(edit.parents && Object.keys(edit.parents).length) && !edit.extras?.length && !edit.clones?.length;

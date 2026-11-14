@@ -55,8 +55,26 @@ assert.equal(c.rulesAt(pose, T(["Sardar_01", "instance_9"], ["Symbol_4", "x"])).
 assert.equal(c.rulesAt(pose, T(["Other", "cbnew1"])).length, 0, "the same name in another symbol is another part");
 assert.equal(c.rulesAt(pose, T(["Sardar_01", "instance_3"])).length, 0, "another instance");
 assert.equal(c.rulesAt(pose, T(["Sardar_01", ""])).length, 0, "unnamed instances never match");
-assert.equal(c.classOf("Pasted from X/Sardar 01"), "Sardar_01");
-assert.equal(c.classOf("Sardar 01"), "Sardar_01");
+assert.equal(c.classOf("Pasted from X/Sardar 01"), "Sardar01", "spaces are dropped, not turned into underscores");
+assert.equal(c.classOf("Symbol 9"), "Symbol9");
+assert.equal(c.classOf("Duplicate Items Folder/Head copy 2"), "Headcopy2", "only the last part of the path");
+assert.equal(c.classOf("Eyes&#032"), "Eyes", "entities are decoded");
+assert.equal(c.classOf("Left_arm-1"), "Left_arm1");
+// rig part names, as the player makes them
+assert.equal(c.partNameOfClass("Headcopy13"), "Head");
+assert.equal(c.partNameOfClass("Scarf_1"), "Scarf");
+assert.equal(c.partNameOfClass("Leftarm"), "Leftarm");
+assert.equal(c.partNameOfClass("Symbol3"), "Symbol3", "Symbol3 is a name (the generic test needs a word boundary after symbol)");
+assert.equal(c.partNameOfClass("Symbol"), "", "a bare generic name is not a part");
+assert.equal(c.partNameOfClass("Group_7"), "", "Animate wrappers are not parts");
+assert.equal(c.partNameOfClass("Path_38"), "");
+assert.equal(c.partNameOfClass("Instance"), "");
+// plain scopes match the rig part (or a path of instance names)
+const rig = rules([{ from: "#ff0000", to: "#444444", scope: "symbol3" }]);
+assert.equal(c.rulesAt(rig, T(["P", "instance_4"]), "symbol3").length, 1, "the shape is inside the rig part symbol3");
+assert.equal(c.rulesAt(rig, T(["P", "instance_4"]), "head").length, 0, "another part");
+assert.equal(c.rulesAt(rig, T(["P", "instance_4"]), undefined).length, 0, "no part known");
+assert.equal(c.rulesAt(rules([{ from: "#ff0000", to: "#444444", scope: "head" }]), T(["P", "instance_4"]), "head/hair").length, 1, "a nested piece is inside its part");
 
 // junk is ignored
 assert.deepEqual(rules([{ from: "nope", to: "#fff" }, { from: "#fff", to: "x" }]), []);

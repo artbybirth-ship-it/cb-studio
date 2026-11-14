@@ -33,6 +33,8 @@ export type SymbolLayerEdit = {
   hidden?: number[];
   locked?: number[];
   deleted?: number[];
+  /** Single objects (drawn shapes, instances) taken out of a layer that still has others: the layer stays, these are hidden. */
+  deletedProps?: string[];
   parents?: Record<string, number | null>;
   extras?: Array<{ id: number; name: string; type: "normal" | "folder" }>;
   /** Layers made by Duplicate Layer: a new copy (named `prop` in the player) of the layer `of` (its index, a duplicate's index follows the file's layers). */

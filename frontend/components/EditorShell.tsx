@@ -15,8 +15,8 @@ import { exportSourceOfPlayer, symbolPlayerUrl } from "@/lib/partVariants";
 import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsertPartKeyframe } from "@/lib/partKeyframes";
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
-import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, grownBlanks, grownTweens, keyframeAt, removeAnchor, removeFrames, shownFrames, spanAt, type Anchor, type Tween } from "@/lib/symbolKeys";
-import { addSymbolLayer, arrangeSymbolLayers, duplicateLayers, groupLayers, parentOf, ungroupLayer, isLayerEditEmpty, playerSpec, toggled, withClones } from "@/lib/symbolLayers";
+import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, grownBlanks, grownTweens, keyframeAt, moveAnchor, removeAnchor, removeFrames, shownFrames, spanAt, type Anchor, type Tween } from "@/lib/symbolKeys";
+import { addSymbolLayer, arrangeSymbolLayers, duplicateLayers, groupLayers, parentOf, ungroupLayer, isLayerEditEmpty, playerSpec, toggled, withClones, qualifySymbol, splitClass } from "@/lib/symbolLayers";
 import { affinePart, canTransform, flipPart, stageRectOf, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, PoseForeign, Project, RenderJob, Scene, SymbolEaseEdit, SymbolKeyEdit, SymbolLayerEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
@@ -48,7 +48,7 @@ import ScaleRotateDialog from "./ScaleRotateDialog";
 import ToolGroup from "./ToolGroup";
 import {
   AlignBottomIcon, AlignHCenterIcon, AlignIcon, AlignLeftIcon, AlignRightIcon, AlignTopIcon, AlignVCenterIcon, AdjustColourIcon, ColourIcon, DistributeHIcon, DistributeVIcon,
-  EyedropperIcon, ExportIcon, FileIcon, FillStrokeIcon, FindReplaceIcon, ImportIcon, LightDarkIcon, NewFileIcon, OpenFileIcon, ReflectIcon, SaveAsIcon, SaveIcon, ScaleIcon, SelectIcon, TextIcon, TransformIcon,
+  EyedropperIcon, ExportIcon, FileIcon, FillStrokeIcon, FindReplaceIcon, ImportIcon, LightDarkIcon, NewFileIcon, OpenFileIcon, ReflectIcon, DirectSelectIcon, SaveAsIcon, SaveIcon, ScaleIcon, SelectIcon, TextIcon, TransformIcon,
 } from "./toolIcons";
 import TextPanel, { type TextValues } from "./TextPanel";
 import TextColourPalette from "./TextColourPalette";
@@ -366,6 +366,17 @@ const readImageDimensions = (file: File): Promise<{ width: number; height: numbe
   image.src = objectUrl;
 });
 
+// The zoomed-in view (zoom + pan) is remembered per project in this browser, so a refresh keeps it.
+const canvasViewKey = (projectId: string) => `cb-canvas-view:${projectId}`;
+const readSavedCanvasView = (projectId: string): { zoom: number; panX: number; panY: number } => {
+  try {
+    if (typeof window === "undefined") return { zoom: 1, panX: 0, panY: 0 };
+    const saved = JSON.parse(window.localStorage.getItem(canvasViewKey(projectId)) || "null");
+    const zoom = Number(saved?.zoom), panX = Number(saved?.panX), panY = Number(saved?.panY);
+    if (Number.isFinite(zoom) && zoom > 0 && Number.isFinite(panX) && Number.isFinite(panY)) return { zoom: Math.max(0.1, Math.min(200, zoom)), panX, panY };
+  } catch { /* storage unavailable */ }
+  return { zoom: 1, panX: 0, panY: 0 };
+};
 const MIN_CANVAS_ZOOM = 0.1;
 const MAX_CANVAS_ZOOM = 200;
 const clampCanvasZoom = (value: number) => Math.max(MIN_CANVAS_ZOOM, Math.min(MAX_CANVAS_ZOOM, value));
@@ -388,7 +399,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const [saveState, setSaveState] = useState<"saved" | "saving" | "unsaved" | "error">("saved");
   const [openTabs, setOpenTabs] = useState<OpenProjectTab[]>([]);
   const [activeCharacterPart, setActiveCharacterPart] = useState<CharacterPartKey | null>(null);
-  const [canvasZoom, setCanvasZoom] = useState(1);
+  const [canvasZoom, setCanvasZoom] = useState(() => readSavedCanvasView(projectId).zoom);
   // View-only transparency grid (Shift+T); never saved or exported.
   const [transparencyGrid, setTransparencyGrid] = useState(false);
   // Animate's "Clip content outside the Stage" (view only, remembered per browser). Off by
@@ -456,7 +467,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const viewCenterRef = useRef<(() => { x: number; y: number }) | null>(null);
   const layerGeometryRef = useRef<((objectId: string) => LayerGeometry | null) | null>(null);
   // Tool rail groups (Illustrator): the Edit group's current tool, the Transform and Align panels.
-  const [lastEditTool, setLastEditTool] = useState<"select" | "scale" | "reflect">("select");
+  const [lastEditTool, setLastEditTool] = useState<"select" | "direct" | "scale" | "reflect">("select");
   const [transformOpen, setTransformOpen] = useState(false);
   const [transformReference, setTransformReference] = useState({ rx: 0.5, ry: 0.5 });
   const [transformLinked, setTransformLinked] = useState(true);
@@ -539,7 +550,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // Picking a colour on the canvas: Esc cancels the pick before it closes the panel that asked for it.
   useEscClose(Boolean(frPicking), () => setFrPicking(null));
   useEscClose(boxPicking, () => { setBoxPicking(false); setActiveTool("select"); });
-  const [activeTool, setActiveTool] = useState<"select" | "transform" | "scale" | "reflect" | "zoom" | "import" | "text" | "eyedropper" | "bone" | "tone" | null>("select");
+  const [activeTool, setActiveTool] = useState<"select" | "direct" | "transform" | "scale" | "reflect" | "zoom" | "import" | "text" | "eyedropper" | "bone" | "tone" | null>("select");
   const activeToolRef = useRef(activeTool);
   activeToolRef.current = activeTool;
   const audioPlayersRef = useRef<Map<string, HTMLAudioElement>>(new Map());
@@ -1241,7 +1252,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
     try {
       const colorAt = (frame.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null)?.cbColorAt;
-      const result = typeof colorAt === "function" ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, boxScope === "*" ? "" : boxScope) : null;
+      const at = (scope: string) => (typeof colorAt === "function" ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, scope) : null);
+      // Inside a pose the pipette reads whatever is under the pointer (a piece picked there only says where the colour is kept).
+      const result = symbolView ? at("") : at(boxScope === "*" ? "" : boxScope);
       const original = normalizeHex(result?.original);
       if (!original) { showNotice("No character colour there. Click on the character's artwork."); return; }
       const objectId = colourItem.id;
@@ -1259,8 +1272,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     // The colour clicked, read from the scene drawn at the playhead (only when it is needed).
     const sample = async () => normalizeHex((await sampleStageColour(clientX, clientY)) || "");
     const objects = draftRef.current?.objects || [];
-    const targets = selectedIdsRef.current.map((id) => objects.find((item) => item.id === id)).filter((item): item is EditorObject => Boolean(item) && !item!.locked);
-    const source = textLayerAt(clientX, clientY);
+    // Stepped into a character's pose, the character itself is what the colour is picked from and goes to (nothing is selected in the scene then).
+    const poseCharacter = symbolView ? objects.find((item) => item.id === symbolView.objectId && item.type === "character" && !item.locked) : undefined;
+    const targets = poseCharacter ? [poseCharacter] : selectedIdsRef.current.map((id) => objects.find((item) => item.id === id)).filter((item): item is EditorObject => Boolean(item) && !item!.locked);
+    const source = poseCharacter ? null : textLayerAt(clientX, clientY);
     const texts = targets.filter((item) => item.type === "text" && item.id !== source?.id);
     if (source && texts.length) {
       mutate((data) => {
@@ -1288,7 +1303,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (frame && rect && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
         try {
           const colorAt = (frame.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null)?.cbColorAt;
-          const original = normalizeHex(typeof colorAt === "function" ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, boxScope === "*" ? "" : boxScope)?.original : "");
+          const at = (scope: string) => (typeof colorAt === "function" ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, scope)?.original : "");
+          // The colour comes from the part being edited when the click is on it, else from anything of the character (the box keeps it for the part).
+          // Inside a pose the dropper reads whatever is under the pointer (a piece picked there only says where the colour is kept).
+          const original = symbolView ? normalizeHex(at("")) : normalizeHex(at(boxScope === "*" ? "" : boxScope)) || (boxScope === "*" ? "" : normalizeHex(at("")));
           if (original) {
             setBoxPicks((previous) => ({ ...(previous?.objectId === character.id && previous.scope === boxScope ? previous : {}), objectId: character.id, scope: boxScope, [activeBox]: original }));
             showNotice(`${activeBox === "fill" ? "Fill" : "Stroke"} box: ${original}. Fill/Stroke (<) changes it.`);
@@ -2004,6 +2022,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         // Illustrator's Reflect tool; Enter then opens the Reflect dialog (Cmd+O stays Open).
         event.preventDefault();
         setActiveTool("reflect");
+        setRailHighlight("edit");
+        return;
+      }
+      if (plainKey && !event.shiftKey && event.key.toLowerCase() === "a") {
+        // Direct select (Animate's Sub-selection tool, A).
+        event.preventDefault();
+        setActiveTool("direct");
         setRailHighlight("edit");
         return;
       }
@@ -2914,7 +2939,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // the selection hugs): X / Y are its registration point on the stage, W / H its size; size,
   // rotation and skew keep that point in place. A selected part shows its own move, size (% of the
   // part), rotation and skew, and turns around its own registration point.
-  useEffect(() => { if (activeTool === "select" || activeTool === "scale" || activeTool === "reflect") setLastEditTool(activeTool); }, [activeTool]);
+  useEffect(() => { if (activeTool === "select" || activeTool === "direct" || activeTool === "scale" || activeTool === "reflect") setLastEditTool(activeTool); }, [activeTool]);
   const layerState = (item: EditorObject) => {
     const position = item.type === "character" ? resolveCharacterTransformAtTime(item, playhead) : { x: Number(item.x || 0), y: Number(item.y || 0) };
     const orientation: Orientation = { rotation: Number(item.rotation || 0), skewX: Number(item.skewX || 0), skewY: Number(item.skewY || 0), flipX: Boolean(item.flipX) };
@@ -3411,7 +3436,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const props = Object.entries(layer.classes || {}).filter(([, name]) => name === js).map(([prop]) => prop);
     if (!props.length) { showNotice("This symbol can't be opened from here."); return; }
     try {
-      const data = await loadSymbol(view.base, js);
+      // A part that came from another character is opened from that character's own files ("tag~Class", see lib/symbolLayers.ts).
+      const [tag, plain] = splitClass(js);
+      let base = view.base;
+      if (tag) {
+        const action = characterLibraryActions.find((item) => item.flaTimeline?.includes(`/character_libraries/${tag}`));
+        if (!action?.flaTimeline) { showNotice("The character this part came from is no longer in your library, so it can't be opened.", "error"); return; }
+        base = action.flaTimeline.replace(/index\.json$/, "");
+      }
+      const loaded = await loadSymbol(base, plain);
+      const data = tag ? qualifySymbol(loaded, tag) : loaded;
       setSymbolView((state) => state && state.objectId === view.objectId ? {
         ...state, playing: false, hidden: new Set(),
         levels: [...state.levels.slice(0, -1), { ...current, frame }, { js, data, frame: 0, props }],
@@ -3419,7 +3453,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     } catch {
       showNotice("Couldn't load that symbol's timeline.", "error");
     }
-  }, [loadSymbol, showNotice, symbolView]);
+  }, [characterLibraryActions, loadSymbol, showNotice, symbolView]);
   // Native pose editor (beta): the stepped-into pose opened straight from the character's .fla; its edits live on the placed character (nativePose).
   const [nativeEdit, setNativeEdit] = useState<{ objectId: string; flaUrl: string; item: string; js: string; title: string } | null>(null);
   const openNativeEditor = useCallback(async () => {
@@ -3428,6 +3462,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const object = view ? draft?.objects.find((item) => item.id === view.objectId) : null;
     const action = object?.type === "character" ? characterLibraryActions.find((item) => item.assetUrl === object.assetUrl) : null;
     if (!view || !level || !object || !action) return;
+    if (splitClass(level.js)[0]) { showNotice("The native editor opens a character's own pose: step out to the pose first."); return; }
     try {
       const index = await (await fetch(`${view.base}index.json`)).json() as { document?: string; symbols?: Record<string, { name: string }> };
       const item = index.symbols?.[level.js]?.name;
@@ -4166,8 +4201,18 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (!ids.length) return false;
     const locked = symbolObjectNow?.symbolLayers?.[level.js]?.locked || [];
     if (ids.every((id) => locked.includes(id))) { showNotice(ids.length > 1 ? "These layers are locked." : "This layer is locked."); return true; }
-    const free = ids.filter((id) => !locked.includes(id));
-    setLayerEdit((current) => ({ ...current, deleted: [...new Set([...(current.deleted || []), ...free])] }));
+    // What was picked inside a layer that holds more (one drawn shape of a nose, say) goes alone; a layer goes whole only when all of it is picked.
+    const picked = selectedPropsRef.current, already = new Set(symbolObjectNow?.symbolLayers?.[level.js]?.deletedProps || []);
+    const wholeLayers: number[] = [], singles: string[] = [];
+    for (const id of ids.filter((layerId) => !locked.includes(layerId))) {
+      const own = level.data.layers[id]?.props || [], mine = own.filter((prop) => picked.includes(prop)), rest = own.filter((prop) => !picked.includes(prop) && !already.has(prop));
+      if (mine.length && rest.length) singles.push(...mine); else wholeLayers.push(id);
+    }
+    setLayerEdit((current) => ({
+      ...current,
+      ...(wholeLayers.length ? { deleted: [...new Set([...(current.deleted || []), ...wholeLayers])] } : {}),
+      ...(singles.length ? { deletedProps: [...new Set([...(current.deletedProps || []), ...singles])] } : {}),
+    }));
     setPickedPart(null);
     return true;
   };
@@ -4230,13 +4275,23 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       all[js] = entries; item.symbolKeys = all;
     }
   };
+  /** True when only some of the objects of a layer are picked (one shape of a nose): Delete takes just those, but a copy holds whole layers. */
+  const pickIsPartial = () => {
+    const level = symbolLevelNow;
+    if (!level) return false;
+    const picked = selectedPropsRef.current, already = new Set(symbolObjectNow?.symbolLayers?.[level.js]?.deletedProps || []);
+    return pickedLayerIds().some((id) => {
+      const own = level.data.layers[id]?.props || [];
+      return own.some((prop) => picked.includes(prop)) && own.some((prop) => !picked.includes(prop) && !already.has(prop));
+    });
+  };
   const copyPoseLayers = (quiet = false) => {
     const level = symbolLevelNow, object = symbolObjectNow;
     if (!level || !object) return false;
     const ids = pickedLayerIds().filter((id) => level.data.layers[id]?.type === "normal" && level.data.layers[id]?.props?.length);
     if (!ids.length) { if (!quiet) showNotice("Pick a part first to copy it."); return false; }
     poseClipboard.current = { js: level.js, items: ids.map((from) => ({ from, name: level.data.layers[from].name, snap: snapshotLayer(object, level.js, from, level.data.layers[from].props![0]), picture: capturePartPicture(level.data.layers[from].props![0]), source: capturePartSource(level.data.layers[from].props![0]) })) };
-    if (!quiet) showNotice(ids.length > 1 ? `Copied ${ids.length} parts` : `Copied ${level.data.layers[ids[0]].name}`);
+    if (!quiet) showNotice(pickIsPartial() ? `Copied the whole layer ${level.data.layers[ids[0]].name}: a copy holds whole layers, not single shapes.` : ids.length > 1 ? `Copied ${ids.length} parts` : `Copied ${level.data.layers[ids[0]].name}`);
     return true;
   };
   /** Pasting into a different character: the part arrives as its own vector symbol (loaded from the file it came from), or as a
@@ -4277,7 +4332,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     window.setTimeout(() => { if (pairs.length) setPartSelection(pairs.map((pair) => pair.prop)); }, 0);
     return true;
   };
-  const cutPoseLayers = () => { if (copyPoseLayers(true)) symbolDeleteRef.current?.(); else showNotice("Pick a part first to cut it."); return true; };
+  const cutPoseLayers = () => {
+    // Cut = copy + delete, and a copy holds whole layers: with only some of a layer picked it would paste more than was removed.
+    if (pickIsPartial()) { showNotice("Cut takes whole layers. Only some shapes of this layer are picked: use Delete for them, or pick the whole layer."); return true; }
+    if (copyPoseLayers(true)) symbolDeleteRef.current?.(); else showNotice("Pick a part first to cut it.");
+    return true;
+  };
   const arrangePoseLayers = (how: "forward" | "backward" | "front" | "back") => {
     const level = symbolLevelNow;
     if (!level) return false;
@@ -4307,9 +4367,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // ---- Frame operations, as in Animate: insert / remove frames, insert / clear keyframes, copy / cut / paste frames.
   // The pose's timeline keeps its length, so frames slide inside it. One operation is one undo step.
-  type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste";
+  type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move";
   type FrameSel = { layers: number[]; from: number; to: number };
-  const frameClipboard = useRef<{ layerBase: number; items: Array<{ layer: number; offset: number; values: Record<string, number> }> } | null>(null);
+  const frameClipboard = useRef<{ layerBase: number; items: Array<{ layer: number; offset: number; values: Record<string, number>; tween?: boolean }> } | null>(null);
   const [clipboardFilled, setClipboardFilled] = useState(false);
   /** A keyframe's values as the file has them (the player reads them off its tween). */
   const readKeyValues = useCallback((layerIndex: number, fileFrame: number) => new Promise<Record<string, number> | null>((resolve) => {
@@ -4325,7 +4385,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     window.addEventListener("message", onMessage);
     frame.contentWindow.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_VALUES_QUERY", js: level.js, layer: layerIndex, frame: fileFrame, props: level.data.layers[layerIndex]?.props || [], token }, "*");
   }), [symbolView]);
-  const runFrameOp = useCallback(async (op: FrameOp, sel: FrameSel) => {
+  const runFrameOp = useCallback(async (op: FrameOp, sel: FrameSel, by = 0) => {
     const level = symbolLevelNow, object = symbolObjectNow;
     if (!level || !object) return;
     const layers = level.data.layers, ready = keysEditable?.js === level.js ? keysEditable : null;
@@ -4510,9 +4570,24 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       batch(() => plans.forEach((plan) => { commit(plan.layer, plan.anchors); plan.fills.forEach((fill) => setSymbolValue(plan.layer, fill.fileFrame, fill.values as Partial<Record<SymbolValueKey, number>>)); }));
       return;
     }
+    if (op === "move") {
+      // Animate: dragging selected frames moves their keyframes (a tween goes with its keyframes: it is kept against each keyframe's file frame).
+      // Each keyframe slides by the same number of frames; one that meets a keyframe outside the selection stops against it.
+      let movedAny = false;
+      batch(() => doable.forEach((index) => {
+        let anchors = anchorsOf(index);
+        const picks: number[] = [];
+        for (let k = 1; k < anchors.length - 1; k += 1) if (anchors[k][1] >= sel.from && anchors[k][1] <= sel.to) picks.push(k);
+        if (by < 0) picks.sort((a, b) => a - b); else picks.sort((a, b) => b - a);
+        for (const k of picks) { const next = moveAnchor(anchors, k, anchors[k][1] + by); if (next) anchors = next; }
+        if (picks.length && anchors !== anchorsOf(index) && anchors.some((anchor, at) => anchor[1] !== anchorsOf(index)[at][1])) { commit(index, anchors); movedAny = true; }
+      }));
+      if (!movedAny) showNotice("No keyframes moved: select frames that hold keyframes (the first keyframe of a layer stays) with room to move into.");
+      return;
+    }
     if (op === "clear-keyframe" || op === "cut" || op === "copy") {
       // What the keyframes in the selection hold (position, rotation, scale, opacity), for copy and for clearing a tween's end.
-      const grabbed: Array<{ layer: number; offset: number; values: Record<string, number> }> = [];
+      const grabbed: Array<{ layer: number; offset: number; values: Record<string, number>; tween?: boolean }> = [];
       if (op !== "clear-keyframe") {
         for (const index of movers) {
           const anchors = anchorsOf(index);
@@ -4521,7 +4596,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
           if (!found.length) { const k = spanAt(anchors, sel.from); if (k >= 0) found.push(k); }
           for (const k of found) {
             const values = edited(index, anchors[k][0], await readKeyValues(index, anchors[k][0]));
-            if (values) grabbed.push({ layer: index, offset: Math.max(0, anchors[k][1] - sel.from), values });
+            const shownHere = shownFrames(layers[index], anchors, object.symbolKeys?.[level.js]?.[String(index)]).find((item) => item.anchor === k);
+            if (values) grabbed.push({ layer: index, offset: Math.max(0, anchors[k][1] - sel.from), values, tween: Boolean(shownHere && (shownHere.tween === "classic" || shownHere.tween === "motion")) });
           }
         }
         if (!grabbed.length) { showNotice("Only moving parts can be copied: drawn artwork has no position keyframes to copy."); return; }
@@ -4563,6 +4639,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       const base = sel.layers.find((index) => layers[index]) ?? 0, endOf = (index: number) => anchorsOf(index)[anchorsOf(index).length - 1][1];
       const working = new Map<number, Anchor[]>(), sets: Array<{ layer: number; fileFrame: number; values: Record<string, number> }> = [];
       let skipped = 0;
+      const tweenSets: Array<{ layer: number; fileFrame: number }> = [];
       for (const item of clip.items) {
         const index = base + (item.layer - clip.layerBase), at = sel.from + item.offset;
         if (!layers[index] || layers[index].type === "folder" || !ready?.editable[index] || !ready.moves[index] || ready.drawn[index] || at >= endOf(index)) { skipped += 1; continue; }
@@ -4572,9 +4649,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         if (k < 0) { skipped += 1; continue; }
         working.set(index, anchors);
         sets.push({ layer: index, fileFrame: anchors[k][0], values: item.values });
+        // A pasted keyframe that began a tween begins one again, when its end came with it.
+        if (item.tween && clip.items.some((other) => other.layer === item.layer && other.offset > item.offset)) tweenSets.push({ layer: index, fileFrame: anchors[k][0] });
       }
       if (!sets.length) { showNotice("These frames can't take the pasted keyframes (drawn artwork, or past the end of the pose)."); return; }
-      batch(() => { working.forEach((anchors, index) => commit(index, anchors)); sets.forEach((set) => setSymbolValue(set.layer, set.fileFrame, set.values as Partial<Record<SymbolValueKey, number>>)); });
+      batch(() => { working.forEach((anchors, index) => commit(index, anchors)); sets.forEach((set) => setSymbolValue(set.layer, set.fileFrame, set.values as Partial<Record<SymbolValueKey, number>>)); tweenSets.forEach((t) => setSymbolTweens(t.layer, (now) => (now.some((tween) => tween[0] === t.fileFrame) ? now : [...now, [t.fileFrame, 0] as Tween]))); });
       if (skipped) showNotice(`${skipped} keyframe${skipped > 1 ? "s" : ""} could not be pasted (drawn artwork, or past the end).`);
     }
   }, [keysEditable, readKeyValues, setSymbolBlanks, setSymbolCut, setSymbolKeys, setSymbolTweens, setSymbolValue, showNotice, symbolLevelNow, symbolObjectNow]);
@@ -5757,13 +5836,14 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         <aside className="cb-tool-rail">
           {/* Tool groups (Illustrator): a corner mark means more inside — hold, or click the mark. */}
           <ToolGroup label="Edit" panelTitle="Edit"
-            icon={lastEditTool === "scale" ? <ScaleIcon /> : lastEditTool === "reflect" ? <ReflectIcon /> : <SelectIcon />}
+            icon={lastEditTool === "scale" ? <ScaleIcon /> : lastEditTool === "reflect" ? <ReflectIcon /> : lastEditTool === "direct" ? <DirectSelectIcon /> : <SelectIcon />}
             active={railHighlight === "edit"} onPress={() => setRailHighlight("edit")}
-            title={lastEditTool === "scale" ? "Scale tool (S)" : lastEditTool === "reflect" ? "Reflect tool (O), then Enter for the Reflect dialog" : "Selection tool (V): click to select (Shift+click adds), drag to move; handles scale, rotate, stretch and skew"}
+            title={lastEditTool === "direct" ? "Direct select tool (A): like Select, but the selection is a thin light-blue outline with no transform handles" : lastEditTool === "scale" ? "Scale tool (S)" : lastEditTool === "reflect" ? "Reflect tool (O), then Enter for the Reflect dialog" : "Selection tool (V): click to select (Shift+click adds), drag to move; handles scale, rotate, stretch and skew"}
             onPrimary={() => setActiveTool(lastEditTool)}
             items={[
               // One dark box: Transform while its panel is open, else the current tool.
               { id: "select", label: "Select", shortcut: "V", icon: <SelectIcon />, active: !transformOpen && activeTool === "select", onSelect: () => setActiveTool("select") },
+              { id: "direct", label: "Direct select", shortcut: "A", icon: <DirectSelectIcon />, active: !transformOpen && activeTool === "direct", title: "Direct select (A): select and move like Select, but the selection is a thin light-blue outline with no transform handles", onSelect: () => setActiveTool("direct") },
               { id: "scale", label: "Scale", shortcut: "S", icon: <ScaleIcon />, active: !transformOpen && activeTool === "scale", onSelect: () => setActiveTool("scale") },
               { id: "reflect", label: "Reflect", shortcut: "O", icon: <ReflectIcon />, active: !transformOpen && activeTool === "reflect", onSelect: () => setActiveTool("reflect") },
               { id: "transform", label: "Transform", shortcut: spacedShortcut(transformShortcut), icon: <TransformIcon />, active: transformOpen, title: "Open or close the Transform panel", onSelect: () => setTransformOpen((open) => !open) },
@@ -6029,6 +6109,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               selectedObjectId={selectedObjectId}
               selectedObjectIds={selectedObjectIds}
               onSelectionChange={changeSelectionFromCanvas}
+              directSelect={activeTool === "direct"}
               toolMode={activeTool === "scale" ? "scale" : activeTool === "zoom" ? "zoom" : activeTool === "text" ? "text" : "transform"}
               editingText={editingText}
               onCreateText={createTextAt}
@@ -6100,6 +6181,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onColorPick={handleStageColorPress}
               onCharacterPartsReady={setCharacterPartsReady}
               zoom={canvasZoom}
+              viewStorageKey={canvasViewKey(projectId)}
               onZoomChange={(value) => setCanvasZoom(clampCanvasZoom(value))}
               onFitScaleChange={setCanvasFitScale}
               viewResetRevision={canvasViewResetRevision}

@@ -130,21 +130,21 @@ function createNativeCharacter(object) {
             const hit = renderer.hitAt(ctx, source.item, frame, 0.5, 0.5, scope);
             if (!hit)
                 return null;
-            return { picked: renderer.shownColour(hit.color, hit.stroke, hit.trail), original: (0, colour_1.hexOf)((0, colour_1.parseColour)(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }) };
+            return { picked: renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part), original: (0, colour_1.hexOf)((0, colour_1.parseColour)(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }) };
         },
         palette(scope) {
             if (!state)
                 return [];
             const found = new Map();
-            state.renderer.eachShape(state.source.item, scope, (shape, trail) => {
+            state.renderer.eachShape(state.source.item, scope, (shape, trail, _owner, part) => {
                 const note = (style, stroke) => {
                     for (const hex of huesOf(style)) {
-                        const entry = found.get(hex) ?? found.set(hex, { color: hex, current: state.renderer.shownColour(hex, stroke, trail), fills: 0, strokes: 0 }).get(hex);
+                        const entry = found.get(hex) ?? found.set(hex, { color: hex, current: state.renderer.shownColour(hex, stroke, trail, part), fills: 0, strokes: 0 }).get(hex);
                         if (stroke)
                             entry.strokes += 1;
                         else
                             entry.fills += 1;
-                        const now = state.renderer.shownColour(hex, stroke, trail);
+                        const now = state.renderer.shownColour(hex, stroke, trail, part);
                         if (now !== hex)
                             entry.current = now;
                     }
@@ -968,6 +968,7 @@ class NativeRenderer {
         this.probe = null;
         /** Library items whose Animate class is not their own name (a pose called "Symbol 1" that the player knows as "Sardar_01"). */
         this.classes = new Map();
+        this.pieceCache = new Map();
     }
     probeTest(ctx, path, style, stroke, rule) {
         const probe = this.probe;
@@ -977,8 +978,9 @@ class NativeRenderer {
         if (!color)
             return;
         const inside = stroke ? ctx.isPointInStroke(path, probe.x, probe.y) : ctx.isPointInPath(path, probe.x, probe.y, rule || "nonzero");
-        if (inside && (0, colour_2.scopeMatches)(probe.scope, this.trail))
-            probe.hit = { color, stroke, trail: this.trail.map((t) => ({ ...t })) };
+        const part = this.partOf(this.inside[0], this.trail);
+        if (inside && (0, colour_2.scopeMatches)(probe.scope, this.trail, part))
+            probe.hit = { color, stroke, trail: this.trail.map((t) => ({ ...t })), part };
     }
     /**
      * The top-most shape under one point, as the Animate player's colour picker finds it: its original
@@ -1037,8 +1039,9 @@ class NativeRenderer {
                         if (budget-- < 0)
                             return;
                         if (el.k === "shape") {
-                            if ((0, colour_2.scopeMatches)(scope, trail))
-                                fn(el, trail, name);
+                            const part = this.partOf(item, trail);
+                            if ((0, colour_2.scopeMatches)(scope, trail, part))
+                                fn(el, trail, name, part);
                             return;
                         }
                         if (el.k !== "instance")
@@ -1052,14 +1055,90 @@ class NativeRenderer {
         walk(item, 0);
     }
     /** The colour shown for an original colour at a place in the pose (the colour rules applied). */
-    shownColour(color, stroke, trail) {
+    shownColour(color, stroke, trail, part) {
         const parsed = (0, colour_1.parseColour)(color);
-        const out = parsed && this.rules.length ? (0, colour_1.mapColour)(parsed, (0, colour_2.rulesAt)(this.rules, trail), stroke) : null;
+        const out = parsed && this.rules.length ? (0, colour_1.mapColour)(parsed, (0, colour_2.rulesAt)(this.rules, trail, part), stroke) : null;
         return out ? (0, colour_1.hexOf)(out) : color;
     }
     setColourRules(list) { this.rules = (0, colour_2.prepareRules)(list); }
     classFor(item) { return this.classes.get(item) ?? (0, colour_2.classOf)(item); }
-    rulesHere() { return this.rules.length ? (0, colour_2.rulesAt)(this.rules, this.trail) : this.rules; }
+    rulesHere() { return this.rules.length ? (0, colour_2.rulesAt)(this.rules, this.trail, this.partOf(this.inside[0], this.trail)) : this.rules; }
+    /**
+     * The rig's parts as the Animate player finds them (cb-animate-bridge.js discoverNamed): the pose's instances whose symbol has a
+     * real name ("Head", "Leftarm"; copies and numbers dropped), looking through unnamed wrappers; one lone piece is opened up. Each gets
+     * the key "head", "leftArm"… (a repeat gets a number). Worked out from the pose's first frame and the file's own timelines, by the
+     * names of the instances leading to the piece. Plain colour-rule scopes ("symbol3") are matched against these.
+     */
+    piecesOf(root) {
+        let found = this.pieceCache.get(root);
+        if (found)
+            return found;
+        const collect = (item, path, depth, out) => {
+            const timeline = this.doc.symbols.get(item)?.timeline ?? this.timelineOf(item);
+            if (!timeline)
+                return;
+            const names = this.namesOf(item);
+            // Display order, back to front: the bottom layer first.
+            for (let li = timeline.layers.length - 1; li >= 0; li -= 1) {
+                const layer = timeline.layers[li];
+                if (layer.type === "folder" || layer.type === "guide")
+                    continue;
+                const state = (0, evaluate_1.layerStateAt)(layer, 0);
+                if (!state)
+                    continue;
+                state.key.elements.forEach((el, e) => {
+                    if (el.k !== "instance")
+                        return;
+                    const at = [...path, el.name || (0, names_1.autoNameAt)(names, (0, names_1.layerKey)(timeline.layers, li), state.key.i, e)];
+                    const name = (0, colour_2.partNameOfClass)((0, colour_2.classOf)(el.item));
+                    if (name)
+                        out.push({ path: at, name, item: el.item });
+                    else if (depth < 6)
+                        collect(el.item, at, depth + 1, out);
+                });
+            }
+        };
+        let pieces = [];
+        collect(root, [], 0, pieces);
+        for (let i = 0; i < 3 && pieces.length === 1; i += 1) {
+            const inner = [];
+            collect(pieces[0].item, pieces[0].path, 0, inner);
+            if (inner.length < 2)
+                break;
+            pieces = inner;
+        }
+        found = new Map();
+        if (pieces.length >= 2) {
+            const used = new Set();
+            for (const piece of pieces) {
+                const lower = piece.name.charAt(0).toLowerCase() + piece.name.slice(1);
+                let key = lower, n = 2;
+                while (used.has(key))
+                    key = lower + n++;
+                used.add(key);
+                found.set(piece.path.join("/"), key);
+            }
+        }
+        this.pieceCache.set(root, found);
+        return found;
+    }
+    /** The key of the rig part a shape drawn at `trail` is inside (the outermost one), or undefined. */
+    partOf(root, trail) {
+        if (!root || !trail.length)
+            return undefined;
+        const pieces = this.piecesOf(root);
+        if (!pieces.size)
+            return undefined;
+        const names = trail.map((t) => t.name);
+        for (let k = 1; k <= names.length; k += 1) {
+            if (names[k - 1] === "")
+                break;
+            const key = pieces.get(names.slice(0, k).join("/"));
+            if (key)
+                return key;
+        }
+        return undefined;
+    }
     /** Art-brush pictures must be decoded before the first draw that uses them. */
     async loadBrushes(brushes = this.doc.brushes) {
         await Promise.all(Object.entries(brushes).map(([id, brush]) => new Promise((done) => {
@@ -1286,11 +1365,20 @@ class NativeRenderer {
             cc.setTransform(ctx.getTransform());
             mc.setTransform(ctx.getTransform());
             cc.globalAlpha = ctx.globalAlpha;
+            // Picking a colour: the top-most shape among the masked layers counts only where the mask covers the point.
+            const outer = this.probe;
+            const inner = outer ? { ...outer, hit: null } : null;
+            this.probe = inner;
             kids.forEach((j) => this.drawLayer(cc, layers[j], frame, timeline.length, (0, names_1.layerKey)(layers, j)));
-            const keep = this.probe;
-            this.probe = null;
+            const coverage = outer ? { x: outer.x, y: outer.y, scope: "", hit: null } : null;
+            this.probe = coverage;
             this.drawLayer(mc, layers[maskIndex], frame, timeline.length, (0, names_1.layerKey)(layers, maskIndex));
-            this.probe = keep;
+            this.probe = outer;
+            if (outer) {
+                if (inner?.hit && coverage?.hit)
+                    outer.hit = inner.hit;
+                continue;
+            }
             cc.setTransform(1, 0, 0, 1, 0, 0);
             cc.globalAlpha = 1;
             cc.globalCompositeOperation = "destination-in";
@@ -1315,6 +1403,7 @@ exports.toHsl = toHsl;
 exports.fromHsl = fromHsl;
 exports.sameFamily = sameFamily;
 exports.prepareRules = prepareRules;
+exports.partNameOfClass = partNameOfClass;
 exports.scopeMatches = scopeMatches;
 exports.mapColour = mapColour;
 exports.recolourFill = recolourFill;
@@ -1395,15 +1484,27 @@ function prepareRules(list) {
     });
     return [...rules.filter((r) => r.scope === "*"), ...rules.filter((r) => r.scope !== "*")];
 }
-/** The Animate class a library item is published under: its own name with spaces and punctuation as "_" ("Sardar 01" → "Sardar_01"). */
-const classOf = (item) => (item.split("/").pop() || item).replace(/[^A-Za-z0-9_$]/g, "_");
+/**
+ * The Animate class a library item is published under: its own name (the last part of its path) with HTML entities decoded and
+ * everything but letters, digits, "_" and "$" dropped ("Symbol 9" → "Symbol9", "Head copy 2" → "Headcopy2"). Checked against the
+ * published script of a real character: 340 of its 362 library items come out as the class the script has (the rest are internal
+ * drawing items). A pose published under another linkage name ("Sardar_01" for "Symbol 1") is told to the renderer separately.
+ */
+const classOf = (item) => (item.split("/").pop() || item).replace(/&#(\d+);?/g, (_, n) => String.fromCharCode(Number(n))).replace(/[^A-Za-z0-9_$]/g, "");
 exports.classOf = classOf;
+/** Animate wrappers that are not part names. */
+const GENERIC = /^(clipgroup|group|path|symbol|tween|shape|layer|compoundpath|bitmap|image|mask|anmovieclip|instance|movieclip|container|sprite|graphic|object)\b/i;
+/** The player's name for a rig piece from its symbol's class: "Headcopy13" → "Head", "Scarf_1" → "Scarf"; generic wrappers → "". */
+function partNameOfClass(cls) {
+    const base = cls.replace(/(?:copy\d*|_\d+)+$/i, "");
+    return base && /[a-z]/i.test(base) && !GENERIC.test(base) ? base : "";
+}
 /**
  * The rules that apply to a shape drawn at `trail`. "*" is the whole character; "a/b" is the part
  * reached through instances named a, then b (rules for a part cover what is inside it); "@Class/n1+n2"
  * is a pose part made in the editor's pose view: the instances named n1 or n2 inside the symbol of that class.
  */
-function scopeMatches(scope, trail) {
+function scopeMatches(scope, trail, part) {
     if (!scope || scope === "*")
         return true;
     if (scope.charAt(0) === "@") {
@@ -1413,10 +1514,13 @@ function scopeMatches(scope, trail) {
         const cls = scope.slice(1, cut), names = scope.slice(cut + 1).split("+");
         return trail.some((t) => t.cls === cls && t.name && names.includes(t.name));
     }
+    // A plain name is a part of the rig ("head", "symbol3": the player's key for the piece the shape is inside) or a path of instance names.
+    if (part && (part === scope || part.startsWith(scope + "/")))
+        return true;
     const path = trail.map((t) => t.name).filter(Boolean).join("/");
     return path === scope || path.startsWith(scope + "/");
 }
-const rulesAt = (rules, trail) => rules.filter((r) => scopeMatches(r.scope, trail));
+const rulesAt = (rules, trail, part) => rules.filter((r) => scopeMatches(r.scope, trail, part));
 exports.rulesAt = rulesAt;
 /** One colour through the rules: an exact match wins over a shades match; null when no rule touches it. */
 function mapColour(c, rules, isStroke) {

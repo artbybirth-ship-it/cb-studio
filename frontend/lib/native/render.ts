@@ -7,7 +7,7 @@
 import type { Brush, Cmd, FlaDocument, FlaElement, Fill, InstanceElement, Keyframe, Layer, Matrix, Path, ShapeElement, Stroke, Timeline } from "../fla/xfl";
 import { hexOf, mapColour, parseColour } from "./colour";
 import { autoNameAt, autoNames, layerKey, type AutoNames } from "./names";
-import { classOf, prepareRules, recolourFill, recolourStroke, rulesAt, scopeMatches, type ColourRule, type PreparedRule, type Trail } from "./colour";
+import { classOf, partNameOfClass, prepareRules, recolourFill, recolourStroke, rulesAt, scopeMatches, type ColourRule, type PreparedRule, type Trail } from "./colour";
 import { frameStyles, innerFrame, layerStateAt, lerp, tweenMatrix, tweenProgress, type LayerState } from "./evaluate";
 
 export type NativeAssets = {
@@ -19,7 +19,7 @@ export type RenderStats = { shapes: number; instances: number; masks: number; mo
 
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 /** A shape found under a point: its original colour, whether it was an outline, and the instances it sits inside. */
-export type ShapeHit = { color: string; stroke: boolean; trail: Trail };
+export type ShapeHit = { color: string; stroke: boolean; trail: Trail; part?: string };
 /** The colour a fill stands for when picking it: the colour of a solid, the first stop of a gradient; nothing when it is see-through. */
 export const styleColour = (style: Fill): string | null => (style.t === "solid" ? (style.alpha >= 0.05 ? style.color : null) : (style.stops.find((s) => s[2] >= 0.05)?.[1] ?? null));
 const GRADIENT_HALF = 819.2;
@@ -106,7 +106,8 @@ export class NativeRenderer {
     const color = styleColour(style);
     if (!color) return;
     const inside = stroke ? ctx.isPointInStroke(path, probe.x, probe.y) : ctx.isPointInPath(path, probe.x, probe.y, rule || "nonzero");
-    if (inside && scopeMatches(probe.scope, this.trail)) probe.hit = { color, stroke, trail: this.trail.map((t) => ({ ...t })) };
+    const part = this.partOf(this.inside[0], this.trail);
+    if (inside && scopeMatches(probe.scope, this.trail, part)) probe.hit = { color, stroke, trail: this.trail.map((t) => ({ ...t })), part };
   }
   /**
    * The top-most shape under one point, as the Animate player's colour picker finds it: its original
@@ -118,7 +119,7 @@ export class NativeRenderer {
     try { this.drawSymbol(ctx, item, frame); return this.probe.hit; } finally { this.probe = null; this.trail = []; this.inside = []; }
   }
   /** Every shape of the pose (all frames, every symbol inside it), once each, with where it sits when `scope` names a part; the whole character when scope is empty. */
-  eachShape(item: string, scope: string, fn: (shape: ShapeElement, trail: Trail, owner: string) => void) {
+  eachShape(item: string, scope: string, fn: (shape: ShapeElement, trail: Trail, owner: string, part?: string) => void) {
     if (!scope) {
       const seenItems = new Set<string>(), seenShapes = new Set<ShapeElement>();
       const visit = (name: string) => {
@@ -142,7 +143,10 @@ export class NativeRenderer {
         const lkey = layerKey(timeline.layers, li);
         for (const key of layer.frames) key.elements.forEach((el, e) => {
           if (budget-- < 0) return;
-          if (el.k === "shape") { if (scopeMatches(scope, trail)) fn(el, trail, name); return; }
+          if (el.k === "shape") { const part = this.partOf(item, trail);
+            if (scopeMatches(scope, trail, part)) fn(el, trail, name, part);
+            return;
+          }
           if (el.k !== "instance") return;
           trail.push({ cls: this.classFor(name), name: el.name || autoNameAt(names, lkey, key.i, e) });
           walk(el.item, depth + 1);
@@ -153,9 +157,9 @@ export class NativeRenderer {
     walk(item, 0);
   }
   /** The colour shown for an original colour at a place in the pose (the colour rules applied). */
-  shownColour(color: string, stroke: boolean, trail: Trail): string {
+  shownColour(color: string, stroke: boolean, trail: Trail, part?: string): string {
     const parsed = parseColour(color);
-    const out = parsed && this.rules.length ? mapColour(parsed, rulesAt(this.rules, trail), stroke) : null;
+    const out = parsed && this.rules.length ? mapColour(parsed, rulesAt(this.rules, trail, part), stroke) : null;
     return out ? hexOf(out) : color;
   }
 
@@ -163,7 +167,73 @@ export class NativeRenderer {
   /** Library items whose Animate class is not their own name (a pose called "Symbol 1" that the player knows as "Sardar_01"). */
   readonly classes = new Map<string, string>();
   private classFor(item: string) { return this.classes.get(item) ?? classOf(item); }
-  private rulesHere() { return this.rules.length ? rulesAt(this.rules, this.trail) : this.rules; }
+  private rulesHere() { return this.rules.length ? rulesAt(this.rules, this.trail, this.partOf(this.inside[0], this.trail)) : this.rules; }
+
+  private pieceCache = new Map<string, Map<string, string>>();
+  /**
+   * The rig's parts as the Animate player finds them (cb-animate-bridge.js discoverNamed): the pose's instances whose symbol has a
+   * real name ("Head", "Leftarm"; copies and numbers dropped), looking through unnamed wrappers; one lone piece is opened up. Each gets
+   * the key "head", "leftArm"… (a repeat gets a number). Worked out from the pose's first frame and the file's own timelines, by the
+   * names of the instances leading to the piece. Plain colour-rule scopes ("symbol3") are matched against these.
+   */
+  private piecesOf(root: string): Map<string, string> {
+    let found = this.pieceCache.get(root);
+    if (found) return found;
+    type Piece = { path: string[]; name: string; item: string };
+    const collect = (item: string, path: string[], depth: number, out: Piece[]) => {
+      const timeline = this.doc.symbols.get(item)?.timeline ?? this.timelineOf(item);
+      if (!timeline) return;
+      const names = this.namesOf(item);
+      // Display order, back to front: the bottom layer first.
+      for (let li = timeline.layers.length - 1; li >= 0; li -= 1) {
+        const layer = timeline.layers[li];
+        if (layer.type === "folder" || layer.type === "guide") continue;
+        const state = layerStateAt(layer, 0);
+        if (!state) continue;
+        state.key.elements.forEach((el, e) => {
+          if (el.k !== "instance") return;
+          const at = [...path, el.name || autoNameAt(names, layerKey(timeline.layers, li), state.key.i, e)];
+          const name = partNameOfClass(classOf(el.item));
+          if (name) out.push({ path: at, name, item: el.item });
+          else if (depth < 6) collect(el.item, at, depth + 1, out);
+        });
+      }
+    };
+    let pieces: Piece[] = [];
+    collect(root, [], 0, pieces);
+    for (let i = 0; i < 3 && pieces.length === 1; i += 1) {
+      const inner: Piece[] = [];
+      collect(pieces[0].item, pieces[0].path, 0, inner);
+      if (inner.length < 2) break;
+      pieces = inner;
+    }
+    found = new Map();
+    if (pieces.length >= 2) {
+      const used = new Set<string>();
+      for (const piece of pieces) {
+        const lower = piece.name.charAt(0).toLowerCase() + piece.name.slice(1);
+        let key = lower, n = 2;
+        while (used.has(key)) key = lower + n++;
+        used.add(key);
+        found.set(piece.path.join("/"), key);
+      }
+    }
+    this.pieceCache.set(root, found);
+    return found;
+  }
+  /** The key of the rig part a shape drawn at `trail` is inside (the outermost one), or undefined. */
+  partOf(root: string | undefined, trail: Trail): string | undefined {
+    if (!root || !trail.length) return undefined;
+    const pieces = this.piecesOf(root);
+    if (!pieces.size) return undefined;
+    const names = trail.map((t) => t.name);
+    for (let k = 1; k <= names.length; k += 1) {
+      if (names[k - 1] === "") break;
+      const key = pieces.get(names.slice(0, k).join("/"));
+      if (key) return key;
+    }
+    return undefined;
+  }
 
   /** Art-brush pictures must be decoded before the first draw that uses them. */
   async loadBrushes(brushes: Record<string, Brush> = this.doc.brushes) {
@@ -345,10 +415,16 @@ export class NativeRenderer {
       cc.setTransform(ctx.getTransform());
       mc.setTransform(ctx.getTransform());
       cc.globalAlpha = ctx.globalAlpha;
+      // Picking a colour: the top-most shape among the masked layers counts only where the mask covers the point.
+      const outer = this.probe;
+      const inner = outer ? { ...outer, hit: null as ShapeHit | null } : null;
+      this.probe = inner;
       kids.forEach((j) => this.drawLayer(cc, layers[j], frame, timeline.length, layerKey(layers, j)));
-      const keep = this.probe; this.probe = null;
+      const coverage = outer ? { x: outer.x, y: outer.y, scope: "", hit: null as ShapeHit | null } : null;
+      this.probe = coverage;
       this.drawLayer(mc, layers[maskIndex], frame, timeline.length, layerKey(layers, maskIndex));
-      this.probe = keep;
+      this.probe = outer;
+      if (outer) { if (inner?.hit && coverage?.hit) outer.hit = inner.hit; continue; }
       cc.setTransform(1, 0, 0, 1, 0, 0);
       cc.globalAlpha = 1;
       cc.globalCompositeOperation = "destination-in";

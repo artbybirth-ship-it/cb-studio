@@ -29,7 +29,7 @@ export type FlaLayer = {
 };
 export type FlaSymbol = { version: number; js: string; fps: number; name: string; frames: number; layers: FlaLayer[] };
 
-export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste";
+export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move";
 const DEFAULT_ZOOM = 27; // about 11 px per frame, as in the scene's timeline
 let lastZoom = DEFAULT_ZOOM; // kept while stepping in and out of symbols
 const cellFor = (zoom: number) => 4 + (Math.max(1, Math.min(100, zoom)) / 100) * 26;
@@ -135,7 +135,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   /** Several rows picked here (Shift / ⌘): the layers' indexes. */
   onPickLayers?: (ids: number[]) => void;
   /** A frame operation of Animate on the selected frames (insert / remove frames, insert / clear keyframes, copy / cut / paste). */
-  onFrameOp: (op: FrameOp, selection: { layers: number[]; from: number; to: number }) => void;
+  onFrameOp: (op: FrameOp, selection: { layers: number[]; from: number; to: number }, by?: number) => void | Promise<void>;
   /** Frames were copied: Paste is available. */
   canPaste: boolean;
   /** A layer was picked by its name (null: none): its part is picked on the stage. */
@@ -166,9 +166,10 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   const rowsRef = useRef<number[]>([]);
   const selectionRef = useRef<{ layers: number[]; from: number; to: number } | null>(null);
   // Frames removed from a layer's end leave nothing selected (the frames are gone).
-  const doFrameOp = (op: FrameOp, sel: { layers: number[]; from: number; to: number }) => {
-    onFrameOp(op, sel);
+  const doFrameOp = (op: FrameOp, sel: { layers: number[]; from: number; to: number }, by?: number) => {
+    const done = onFrameOp(op, sel, by);
     if (op === "remove-frames" && sel.to >= Math.max(0, symbol.frames - 1)) setFrameSel(null);
+    return done;
   };
   const opRef = useRef(doFrameOp);
   opRef.current = doFrameOp;
@@ -188,6 +189,8 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   // Where a ⌥-dragged copy of a keyframe would land.
   const [copyGhost, setCopyGhost] = useState<{ layer: number; frame: number } | null>(null);
   const [copySource, setCopySource] = useState<{ layer: number; frame: number } | null>(null);
+  // A selected range being carried (⌥ = copy, plain = move): where it would land.
+  const [rangeGhost, setRangeGhost] = useState<{ layers: number[]; from: number; count: number } | null>(null);
   const viewRows = useMemo(() => layerRows(symbol.layers, layerEdit), [symbol.layers, layerEdit]);
   const layerAt = (id: number) => (id < EXTRA_BASE ? symbol.layers[id] : viewRows.find((row) => row.id === id)?.layer);
   const hiddenSet = new Set(layerEdit?.hidden || []), lockedSet = new Set(layerEdit?.locked || []);
@@ -261,13 +264,16 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   /** While a drag runs, the grid scrolls by itself when the pointer is near its edge (faster the nearer), so a keyframe can be taken to frames out of view; `after` runs on each scroll step to re-read where the pointer is now. */
   const edgeScroll = (after: () => void) => {
     let raf = 0, x = 0, y = 0, on = true;
-    const speed = (over: number) => Math.max(-32, Math.min(32, Math.round(over / 3)));
+    const speed = (over: number) => Math.max(-40, Math.min(40, Math.round(over / 2.5)));
     const tick = () => {
       const box = scrollRef.current;
       if (box && on) {
-        const r = box.getBoundingClientRect(), zone = 70, left = r.left + LAYER_PANEL + zone, top = r.top + zone / 2;
-        const dx = x > r.right - zone ? speed(x - (r.right - zone)) : x < left ? speed(x - left) : 0;
-        const dy = y > r.bottom - zone / 2 ? speed(y - (r.bottom - zone / 2)) : y < top ? speed(y - top) : 0;
+        // The visible part of the grid: its box, cut to the window and without its scrollbar.
+        const r = box.getBoundingClientRect(), zone = 90;
+        const right = Math.min(r.left + box.clientWidth, window.innerWidth), bottom = Math.min(r.top + box.clientHeight, window.innerHeight);
+        const left = r.left + LAYER_PANEL + zone / 2, top = r.top + zone / 2;
+        const dx = x > right - zone ? speed(x - (right - zone)) : x < left ? speed(x - left) : 0;
+        const dy = y > bottom - zone / 2 ? speed(y - (bottom - zone / 2)) : y < top ? speed(y - top) : 0;
         const before = [box.scrollLeft, box.scrollTop];
         if (dx) box.scrollLeft += dx;
         if (dy) box.scrollTop += dy;
@@ -277,6 +283,64 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
     };
     raf = requestAnimationFrame(tick);
     return { point: (event: PointerEvent) => { x = event.clientX; y = event.clientY; }, stop: () => { on = false; cancelAnimationFrame(raf); } };
+  };
+  /** The selected frames, if they are more than one cell and this layer/frame is inside them (Animate: they can be picked up as one). */
+  const insideRange = (layerIndex: number, frameNo: number) => Boolean(selection && (selection.to > selection.from || selection.layers.length > 1) && selection.layers.includes(layerIndex) && frameNo >= selection.from && frameNo <= selection.to);
+  /** Carry the selected frames: ⌥ leaves them and drops a copy, a plain drag moves them. The grid scrolls forward by itself near its edge. A press that doesn't move runs `click`. */
+  const beginRangeDrag = (event: ReactPointerEvent<HTMLElement>, layerIndex: number, click: () => void) => {
+    const sel = selection;
+    if (!sel || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setMenu(null);
+    const copy = event.altKey;
+    const startX = event.clientX, startY = event.clientY, startScroll = scrollRef.current?.scrollLeft ?? 0, order = rowsRef.current;
+    const pressRow = order.indexOf(layerIndex);
+    let moved = false, cancelled = false, lastMove: PointerEvent | null = null;
+    let target: { layers: number[]; from: number; to: number } | null = null;
+    const place = (moveEvent: PointerEvent) => {
+      const rowEl = (document.elementFromPoint(moveEvent.clientX, moveEvent.clientY) as HTMLElement | null)?.closest("[data-symbol-row]");
+      const hoverRow = rowEl ? order.indexOf(Number(rowEl.getAttribute("data-symbol-row"))) : pressRow;
+      const firstRow = order.indexOf(sel.layers[0]), lastRow = order.indexOf(sel.layers[sel.layers.length - 1]);
+      let dl = hoverRow >= 0 && pressRow >= 0 ? hoverRow - pressRow : 0;
+      dl = copy ? Math.max(-firstRow, Math.min(order.length - 1 - lastRow, dl)) : 0; // a move keeps the layers; only a copy can land on others
+      const dx = Math.round((moveEvent.clientX - startX + ((scrollRef.current?.scrollLeft ?? 0) - startScroll)) / CELL);
+      const from = Math.max(0, Math.min(last - (sel.to - sel.from), sel.from + dx));
+      const layers = sel.layers.map((id) => order[order.indexOf(id) + dl]).filter((id) => id != null);
+      target = { layers, from, to: from + (sel.to - sel.from) };
+      setRangeGhost({ layers, from, count: sel.to - sel.from + 1 });
+    };
+    const scroller = edgeScroll(() => { if (lastMove && moved) place(lastMove); });
+    scroller.point(event.nativeEvent);
+    const move = (moveEvent: PointerEvent) => {
+      if (!moved && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 5) return;
+      moved = true;
+      lastMove = moveEvent;
+      scroller.point(moveEvent);
+      place(moveEvent);
+    };
+    const key = (keyEvent: KeyboardEvent) => { if (keyEvent.key === "Escape") { keyEvent.stopPropagation(); cancelled = true; finish(); } };
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("keydown", key, true);
+      scroller.stop();
+      setRangeGhost(null);
+    };
+    const up = () => {
+      finish();
+      if (cancelled) return;
+      if (!moved) { click(); return; }
+      const drop = target;
+      if (!drop || (drop.from === sel.from && drop.layers[0] === sel.layers[0])) return;
+      void (async () => {
+        if (copy) { await doFrameOp("copy", sel); await doFrameOp("paste", drop); } else await doFrameOp("move", sel, drop.from - sel.from);
+        setFrameSel({ a: { layer: drop.layers[0], frame: drop.from }, b: { layer: drop.layers[drop.layers.length - 1], frame: drop.to } });
+      })();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("keydown", key, true);
   };
   const beginKeyDrag = (event: ReactPointerEvent<HTMLElement>, layerIndex: number, anchor: number) => {
     if (event.button !== 0) return;
@@ -348,12 +412,16 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
     onSeek(at);
     const from = event.shiftKey && frameSel ? frameSel.a : { layer: layerIndex, frame: at };
     setFrameSel({ a: from, b: { layer: layerIndex, frame: at } });
-    const move = (moveEvent: PointerEvent) => {
+    let lastMove: PointerEvent | null = null;
+    const pick = (moveEvent: PointerEvent) => {
       const row = (document.elementFromPoint(moveEvent.clientX, moveEvent.clientY) as HTMLElement | null)?.closest("[data-symbol-row]");
       const layer = row ? Number(row.getAttribute("data-symbol-row")) : layerIndex;
-      setFrameSel((current) => (current ? { ...current, b: { layer, frame: frameAt(moveEvent.clientX, lane) } } : current));
+      setFrameSel((current) => (current ? { ...current, b: { layer, frame: Math.min(last, frameAt(moveEvent.clientX, lane)) } } : current));
     };
-    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    const scroller = edgeScroll(() => { if (lastMove) pick(lastMove); });
+    scroller.point(event.nativeEvent);
+    const move = (moveEvent: PointerEvent) => { lastMove = moveEvent; scroller.point(moveEvent); pick(moveEvent); };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); scroller.stop(); };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
@@ -580,6 +648,15 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
                       onBlur={(event) => renameLayer(index, event.target.value, index < EXTRA_BASE ? symbol.layers[index]?.name || "" : "")}
                       onKeyDown={(event) => { event.stopPropagation(); if (event.key === "Enter") event.currentTarget.blur(); else if (event.key === "Escape") setRenaming(null); }} />
                   : <span className="cb-symbol-layer-name" onDoubleClick={() => setRenaming(index)}>{name}</span>}
+                {(() => {
+                  // Shapes taken out of this layer one by one (Delete on part of it): a badge brings them back.
+                  const gone = (layerEdit?.deletedProps || []).filter((prop) => (layer.props || []).includes(prop));
+                  return gone.length ? (
+                    <button type="button" className="cb-symbol-restore" data-testid={`restore-${index}`} style={{ font: "11px system-ui", padding: "0 5px", marginLeft: 4, borderRadius: 8, cursor: "pointer" }}
+                      onClick={() => onLayerEdit((current) => ({ ...current, deletedProps: (current.deletedProps || []).filter((prop) => !gone.includes(prop)) }))}
+                      aria-label={`Bring back ${gone.length} removed ${gone.length === 1 ? "shape" : "shapes"} of ${name}`} title={`${gone.length} ${gone.length === 1 ? "shape" : "shapes"} of this layer removed with Delete: click to bring ${gone.length === 1 ? "it" : "them"} back`}>↺ {gone.length}</button>
+                  ) : null;
+                })()}
                 {layer.color && <i className="cb-symbol-swatch" style={{ borderColor: layer.color }} aria-hidden="true" />}
                 <button type="button" className={`cb-symbol-eye ${shown ? "" : "off"}`} onClick={() => onLayerEdit((current) => ({ ...current, hidden: toggled(current.hidden, idsFor(index)) }))} aria-pressed={!shown}
                   aria-label={`${shown ? "Hide" : "Show"} ${name}`} title={`${shown ? "Hide" : "Show"} this layer (saved with the character, also in exports)`}><EyeIcon shown={shown} /></button>
@@ -589,6 +666,11 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
               <div className="cb-symbol-lane" style={{ width: cells * CELL }}
                 onPointerDown={(event) => {
                   const at = frameAt(event.clientX, event.currentTarget);
+                  if (layer.type !== "folder" && !locked && !event.shiftKey && insideRange(index, at)) {
+                    const lane = event.currentTarget;
+                    beginRangeDrag(event, index, () => { onSeek(at); setFrameSel({ a: { layer: index, frame: at }, b: { layer: index, frame: at } }); void lane; });
+                    return;
+                  }
                   const keyframe = shownFrames(layer, anchorsOf(index), keys?.[index]).find((item) => at >= item.i && at < item.i + item.d);
                   setPicked(keyframe && layer.type !== "folder" ? { layer: index, i: keyframe.i } : null);
                   if (keyframe && layer.type !== "folder" && !keyframe.added) { setLayerSel(index); selectKey({ layer: index, frame: keyframe.source.i }); }
@@ -608,6 +690,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
                   if (target?.js) onStepInto(index, at, target.js);
                 }}>
                 {copyGhost?.layer === index && <i className="cb-symbol-copycell" aria-hidden="true" style={{ left: copyGhost.frame * CELL, width: CELL }}><b /></i>}
+                {rangeGhost?.layers.includes(index) && <i className="cb-symbol-copycell" aria-hidden="true" style={{ left: rangeGhost.from * CELL, width: rangeGhost.count * CELL }} />}
                 {copySource?.layer === index && <i className="cb-symbol-copysrc" aria-hidden="true" style={{ left: copySource.frame * CELL, width: CELL }} />}
                 {selection && selection.layers.includes(index) && <i className="cb-symbol-sel" style={{ left: selection.from * CELL, width: (selection.to - selection.from + 1) * CELL }} aria-hidden="true" />}
                 {layer.type !== "folder" && shownFrames(layer, anchorsOf(index), keys?.[index]).map((item) => {
@@ -618,7 +701,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
                   return (
                     <span key={item.i} className={`cb-symbol-span ${kind} ${edit ? "is-edited" : ""} ${item.added || item.i !== item.source.i ? "is-moved" : ""} ${picked?.layer === index && picked.i === item.i ? "is-picked" : ""}`} style={{ left: item.i * CELL, width: item.d * CELL }} title={info}>
                       <i className={`cb-symbol-key ${item.blank ? "blank" : ""} ${item.added ? "added" : ""} ${movable ? "movable" : ""} ${editable?.[index] && !item.added ? "pickable" : ""} ${values?.[`${index}:${item.source.i}`] ? "valued" : ""} ${keySel?.layer === index && keySel.frame === item.source.i && !item.added ? "chosen" : ""}`} aria-hidden="true"
-                        onPointerDown={editable?.[index] && (!item.added || onCopyKey) ? (event) => { if (!item.added || event.altKey) beginKeyDrag(event, index, item.anchor); } : undefined} />
+                        onPointerDown={editable?.[index] && (!item.added || onCopyKey) ? (event) => { if (!event.shiftKey && !locked && insideRange(index, item.i)) { beginRangeDrag(event, index, () => { onSeek(item.i); setFrameSel({ a: { layer: index, frame: item.i }, b: { layer: index, frame: item.i } }); }); return; } if (!item.added || event.altKey) beginKeyDrag(event, index, item.anchor); } : undefined} />
                       {item.tween && item.d > 2 && <em className="cb-symbol-arrow" aria-hidden="true" />}
                       {!item.tween && item.d > 1 && <u className="cb-symbol-hold" aria-hidden="true" />}
                       {item.label && <small className="cb-symbol-label">⚑ {item.label}</small>}

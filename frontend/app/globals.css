@@ -3556,3 +3556,11 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 
 /* Rotate tool (R, Illustrator): the whole stage shows the rotate cursor; a drag turns the selection. */
 .studio-stage-host.cb-rotate-held,.studio-stage-host.cb-rotate-held *{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M18.5 9.5A7 7 0 1 0 19 15' fill='none' stroke='%23fff' stroke-width='4'/%3E%3Cpath d='M18.5 9.5A7 7 0 1 0 19 15' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M21 4v6h-6' fill='none' stroke='%23fff' stroke-width='4'/%3E%3Cpath d='M21 4v6h-6' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E") 12 12,crosshair!important}
+
+/* Direct select (A), like Animate's Sub-selection tool: the selection is a thin light-blue outline with no transform handles. */
+.cb-direct-select .cb-transform-handle,.cb-direct-select .cb-rotate-handle,.cb-direct-select .cb-skew-edge,.cb-direct-select .cb-whole-corner-control,.cb-direct-select .cb-part-corner-control,
+.cb-direct-select .cb-group-corner,.cb-direct-select .cb-symbol-handle,.cb-direct-select .cb-symbol-turn,.cb-direct-select .cb-symbol-skew,.cb-direct-select .cb-part-rotate-handle{display:none!important}
+.cb-direct-select .cb-transform-box,.cb-direct-select .cb-transform-box.part-mode,.cb-direct-select .cb-transform-box-character{border:1px solid #6fc3ff!important;box-shadow:none!important}
+.cb-direct-select .cb-group-box{border-color:#6fc3ff!important}
+.cb-direct-select .cb-symbol-box-lines polygon{stroke:#6fc3ff!important;stroke-width:1!important;filter:none!important}
+.cb-direct-select .cb-transform-center-point,.cb-direct-select .cb-symbol-pivot,.cb-direct-select .cb-group-pivot{width:9px!important;height:9px!important;border:1px solid #6fc3ff!important;background:transparent!important;box-shadow:none!important}

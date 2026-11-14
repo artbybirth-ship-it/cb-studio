@@ -5,6 +5,9 @@ const line = { fill: "none", stroke: "currentColor", strokeWidth: 1.4, strokeLin
 export const SelectIcon = () => (
   <svg viewBox="31.86 37.09 32 32" aria-hidden="true"><path d="M55.58,56.94l-5.3-.88c-.65-.11-1.58-.07-1.88.51l-2.22,5.03c-.72,1.37-2.79.92-2.87-.63l-.88-15.6c-.08-1.34,1.49-2.12,2.52-1.25l11.88,10.15c1.18,1,.28,2.92-1.24,2.67Z" fill="none" stroke="currentColor" strokeMiterlimit="10" /></svg>
 );
+export const DirectSelectIcon = () => (
+  <svg viewBox="31.86 37.09 32 32" aria-hidden="true"><path d="M55.58,56.94l-5.3-.88c-.65-.11-1.58-.07-1.88.51l-2.22,5.03c-.72,1.37-2.79.92-2.87-.63l-.88-15.6c-.08-1.34,1.49-2.12,2.52-1.25l11.88,10.15c1.18,1,.28,2.92-1.24,2.67Z" fill="currentColor" stroke="currentColor" strokeMiterlimit="10" /></svg>
+);
 export const ScaleIcon = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" strokeMiterlimit="10"><rect x="7.5" y="13.5" width="11" height="11" /><path d="M12.5 8.5h11v11" strokeDasharray="2 1.6" /><path d="M15.5 16.5l9-9M19.5 7.5h5v5" /></g></svg>
 );

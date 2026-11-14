@@ -117,19 +117,27 @@
   // its symbol's prototype, so symbol names are read from every loaded Animate library.
   var cbProtoNames = null, cbLibs = [], cbNamedMode = false, cbOrder = [], cbLastOv = {};
   var GENERIC_SYMBOL = /^(clipgroup|group|path|symbol|tween|shape|layer|compoundpath|bitmap|image|mask|anmovieclip|instance|movieclip|container|sprite|graphic|object)\b/i;
+  // Symbols from another character's library (parts pasted or swapped in, see extLib) are named "<tag>~<class>": two
+  // characters often have a symbol of the same class name ("Symbol2"), and an edit made inside one must not reach the other.
+  // The tag is the first 8 characters of the id of the character's library folder (lib/symbolLayers.ts foreignTag).
+  function libTag(url) { var m = /character_libraries\/([^/]+)/.exec(String(url || '')); return (m ? m[1] : 'x').slice(0, 8); }
+  function plainName(name) { name = String(name || ''); var at = name.indexOf('~'); return at > 0 ? name.slice(at + 1) : name; }
   function protoNames() {
     if (cbProtoNames) return cbProtoNames;
-    var map = new Map(), libs = [];
-    try { var an = window.AdobeAn; if (an && an.compositions) Object.keys(an.compositions).forEach(function (id) { try { libs.push(an.compositions[id].getLibrary()); } catch (e) {} }); } catch (e) {}
-    try { if (window.lib) libs.push(window.lib); } catch (e) {}
+    var map = new Map(), libs = [], foreign = [];
+    Object.keys(cbExtLibs || {}).forEach(function (url) { var l = cbExtLibs[url]; if (l && typeof l === 'object') foreign.push({ lib: l, tag: libTag(url) }); });
+    var isForeign = function (lib) { return foreign.some(function (f) { return f.lib === lib; }); };
+    try { var an = window.AdobeAn; if (an && an.compositions) Object.keys(an.compositions).forEach(function (id) { try { var l = an.compositions[id].getLibrary(); if (!isForeign(l)) libs.push(l); } catch (e) {} }); } catch (e) {}
+    try { if (window.lib && !isForeign(window.lib)) libs.push(window.lib); } catch (e) {}
     libs.forEach(function (lib) { Object.keys(lib || {}).forEach(function (name) { var f = lib[name]; if (typeof f === 'function' && f.prototype && !map.has(f.prototype)) map.set(f.prototype, name); }); });
+    foreign.forEach(function (f) { Object.keys(f.lib).forEach(function (name) { var fn = f.lib[name]; if (typeof fn === 'function' && fn.prototype && !map.has(fn.prototype)) map.set(fn.prototype, f.tag + '~' + name); }); });
     if (map.size) { cbProtoNames = map; cbLibs = libs; }
     return map;
   }
   function libSymbol(name) { protoNames(); for (var i = 0; i < cbLibs.length; i++) { var f = cbLibs[i] && cbLibs[i][name]; if (typeof f === 'function') return f; } return null; }
   // "Headcopy13" → "Head", "Scarf_1" → "Scarf"; generic Animate wrappers (Group_7, Path_38…) → ''.
   function partName(node) {
-    var raw = ''; try { raw = protoNames().get(Object.getPrototypeOf(node)) || ''; } catch (e) {}
+    var raw = ''; try { raw = plainName(protoNames().get(Object.getPrototypeOf(node)) || ''); } catch (e) {}
     var base = String(raw).replace(/(?:copy\d*|_\d+)+$/i, '');
     return base && /[a-z]/i.test(base) && !GENERIC_SYMBOL.test(base) ? base : '';
   }
@@ -739,7 +747,7 @@
   // of another character (a "source-symbol" part replacement).
   window.cbPartSymbolName = function (key) {
     var p = resolvePart(String(key || '')), n = p && p.node; if (!n || p.nodes) return '';
-    try { return protoNames().get(Object.getPrototypeOf(n)) || ''; } catch (e) { return ''; }
+    try { return plainName(protoNames().get(Object.getPrototypeOf(n)) || ''); } catch (e) { return ''; }
   };
   window.cbPartsToSvg = function (keys) { try { return partSvg((keys || []).map(String)); } catch (e) { return { error: String(e) }; } };
 
@@ -1303,7 +1311,8 @@
   function partTouchesRect(o, x0, y0, x1, y1) {
     var st = cbStage(), rw = x1 - x0, rh = y1 - y0;
     if (!st || !(rw > 0) || !(rh > 0) || !o.getConcatenatedMatrix) return false;
-    var k = Math.min(1, 320 / Math.max(rw, rh)), cv = document.createElement('canvas');
+    // Fine enough that a thin or tiny shape still leaves pixels: a small box is drawn magnified (up to 16 times), a big one at most as big as 480 px.
+    var k = Math.min(16, 480 / Math.max(rw, rh)), cv = document.createElement('canvas');
     cv.width = Math.max(1, Math.ceil(rw * k)); cv.height = Math.max(1, Math.ceil(rh * k));
     var ctx = cv.getContext('2d'), m = o.getConcatenatedMatrix(), inv = st.getMatrix ? st.getMatrix() : null;
     if (inv) { try { inv.invert(); m = m.clone().prependMatrix(inv); } catch (e) {} }
@@ -1325,7 +1334,10 @@
         var pts = [[b.x, b.y], [b.x + b.width, b.y], [b.x + b.width, b.y + b.height], [b.x, b.y + b.height]].map(function (p) { return o.localToLocal(p[0], p[1], st); });
         var bx0 = Math.min.apply(null, pts.map(function (p) { return p.x; })), bx1 = Math.max.apply(null, pts.map(function (p) { return p.x; }));
         var by0 = Math.min.apply(null, pts.map(function (p) { return p.y; })), by1 = Math.max.apply(null, pts.map(function (p) { return p.y; }));
-        if (bx1 >= x0 && bx0 <= x1 && by1 >= y0 && by0 <= y1 && partTouchesRect(o, x0, y0, x1, y1)) out.push(id);
+        if (!(bx1 >= x0 && bx0 <= x1 && by1 >= y0 && by0 <= y1)) return;
+        // Everything inside the box is picked, as in Animate's marquee, even a shape too small to leave a pixel; a bigger one when some of its drawing is in the box.
+        var inside = bx0 >= x0 && bx1 <= x1 && by0 >= y0 && by1 <= y1;
+        if (inside || partTouchesRect(o, x0, y0, x1, y1)) out.push(id);
       });
     }
     cbPost('SYMBOL_PARTS_RECT', { token: d.token, props: out });
@@ -1337,8 +1349,11 @@
     var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     function add(x, y) { if (isFinite(x) && isFinite(y)) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } }
     var path = { moveTo: add, lineTo: add, quadraticCurveTo: function (a, b, c, e) { add(a, b); add(c, e); }, bezierCurveTo: function (a, b, c, e, f, g) { add(a, b); add(c, e); add(f, g); }, rect: function (x, y, w, h) { add(x, y); add(x + w, y + h); }, arc: function (x, y, r) { add(x - r, y - r); add(x + r, y + r); } };
-    var ctx = new Proxy({}, { get: function (t, k) { return path[k] || function () {}; }, set: function () { return true; } });
-    try { o.graphics.draw(ctx); } catch (e) { return null; }
+    // A stand-in canvas that only notes where the path goes. Some drawing commands ask the canvas for things it does not have (its
+    // transform, a gradient): those get stand-ins too, and if one still throws, the points noted before it are the shape's outline.
+    var identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+    var ctx = new Proxy({}, { get: function (t, k) { return path[k] || (k === 'getTransform' ? function () { return identity; } : function () { return { addColorStop: function () {} }; }); }, set: function () { return true; } });
+    try { o.graphics.draw(ctx); } catch (e) { /* keep the points already noted */ }
     return x1 > x0 && y1 > y0 ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
   }
   // A part's transform and box, as the editor's selection box needs them (null when it has none to give).
@@ -1548,6 +1563,8 @@
       var now = window.AdobeAn, added = Object.keys((now && now.compositions) || {}).filter(function (id) { return before.indexOf(id) < 0; }), lib = null;
       try { if (added.length) lib = now.compositions[added[0]].getLibrary(); } catch (e) {}
       cbExtLibs[url] = lib || 'failed';
+      // The clips of this library now have names (qualified, see protoNames).
+      cbProtoNames = null; cbClipsByClass = null;
       if (cbLastEdits) { cbEasesKey = ''; try { handleEdits(cbLastEdits); } catch (e) { } }
     };
     el.onerror = function () { cbExtLibs[url] = 'failed'; };
@@ -1583,7 +1600,7 @@
   function postPartSource(d) {
     var st = cbStage(), node = cbSymbolView && cbSymbolView.node, o = node && d.prop ? node[d.prop] : null, out = { token: d.token, symbol: '' };
     try {
-      var name = o && protoNames().get(Object.getPrototypeOf(o));
+      var name = o && plainName(protoNames().get(Object.getPrototypeOf(o)));
       var scripts = [].slice.call(document.querySelectorAll('script[src]')).map(function (e) { return e.getAttribute('src'); }).filter(function (u) { return !/\/vendor\//.test(u) && /\.js(\?|$)/.test(u); });
       if (name && scripts.length) {
         var m = o.getConcatenatedMatrix(), kst = (st && st.scaleX) || 1;
@@ -1637,7 +1654,7 @@
     want.forEach(function (w) {
       if (cbClones.some(function (made) { return made.clip === w.clip && made.prop === w.prop; })) return;
       if (w.symbol || w.image) { addLibraryLayer(w, touched); changed = true; return; }
-      var src = w.clip[w.of], Ctor = src && libSymbol(protoNames().get(Object.getPrototypeOf(src)) || '');
+      var src = w.clip[w.of], Ctor = src && libSymbol(plainName(protoNames().get(Object.getPrototypeOf(src)) || ''));
       if (!Ctor) return;
       var obj = new Ctor(src.mode, src.startPosition, src.loop), list = w.clip.timeline.tweens, own = [];
       var at = list.findIndex(function (tw) { return tw.target === src; });

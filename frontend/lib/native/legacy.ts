@@ -9,6 +9,7 @@
 import type { BitmapElement, Ease, FlaElement, InstanceElement, Keyframe, Layer, Matrix, Timeline } from "../fla/xfl";
 import { easeFunction, lerp, tweenMatrix } from "./evaluate";
 import { invert, mul } from "./library";
+import { autoNameAt, autoNames, layerKey } from "./names";
 
 /** What the file's layer shows at the (possibly fractional) file frame: a classic tween applied between its keys. */
 function elementsAtFile(layer: Layer, frame: number): FlaElement[] {
@@ -92,11 +93,13 @@ function elementOf<T extends InstanceElement | BitmapElement>(el: T, p: ReturnTy
 }
 
 /** Edited values laid on one keyframe: the named objects take them (the others stay as they are). */
-export function applyValues(key: Keyframe, edit: SymbolValueEdit): Keyframe {
+export function applyValues(key: Keyframe, edit: SymbolValueEdit, nameOf?: (index: number) => string): Keyframe {
   const names = new Set(edit.props || []);
   let changed = false;
-  const elements = key.elements.map((el) => {
-    if ((el.k !== "instance" && el.k !== "bitmap") || !el.name || !names.has(el.name)) return el;
+  const elements = key.elements.map((el, index) => {
+    // The old editor names an object by the player's name for it: its own name, else "instance", "instance_1"… (lib/native/names.ts).
+    const name = (el.k !== "instance" && el.k !== "bitmap") ? "" : el.name || nameOf?.(index) || "";
+    if ((el.k !== "instance" && el.k !== "bitmap") || !name || !names.has(name)) return el;
     const p = propsOf(el);
     for (const [k, v] of Object.entries(edit.v || {})) if (typeof v === "number" && k in p) (p as Record<string, number>)[k] = v;
     changed = true;
@@ -128,6 +131,7 @@ export type LegacySymbolEdits = {
 /** A symbol's timeline with the old keyframe and ease edits applied; the same timeline when there is nothing to apply. */
 export function convertTimeline(timeline: Timeline, edits: LegacySymbolEdits): Timeline {
   let changed = false;
+  const auto = edits.values ? autoNames(timeline) : undefined;
   const layers = timeline.layers.map((layer, index) => {
     let out = layer;
     const keys = edits.keys?.[String(index)];
@@ -135,7 +139,8 @@ export function convertTimeline(timeline: Timeline, edits: LegacySymbolEdits): T
     if (keys) { const done = convertKeysWithFiles(out, keys); out = done.layer; files = done.files; }
     if (edits.values) {
       // Values are keyed by the file's frame; a keyframe the editor added (or moved) is still known by the frame it came from.
-      const frames = out.frames.map((k, n) => { const v = edits.values![`${index}:${files[n]}`]; return v ? applyValues(k, v) : k; });
+      const lkey = layerKey(timeline.layers, index);
+      const frames = out.frames.map((k, n) => { const v = edits.values![`${index}:${files[n]}`]; return v ? applyValues(k, v, (e) => autoNameAt(auto, lkey, files[n], e)) : k; });
       if (frames.some((k, n) => k !== out.frames[n])) out = { ...out, frames };
     }
     if (edits.eases) out = convertEases(out, edits.eases, index);

@@ -121,17 +121,17 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - x * BOX_W + 0.5, fit.ty - y * BOX_H + 0.5);
       const hit = renderer.hitAt(ctx, source.item, frame, 0.5, 0.5, scope);
       if (!hit) return null;
-      return { picked: renderer.shownColour(hit.color, hit.stroke, hit.trail), original: hexOf(parseColour(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }) };
+      return { picked: renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part), original: hexOf(parseColour(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }) };
     },
     palette(scope) {
       if (!state) return [];
       const found = new Map<string, ColourEntry>();
-      state.renderer.eachShape(state.source.item, scope, (shape, trail) => {
+      state.renderer.eachShape(state.source.item, scope, (shape, trail, _owner, part) => {
         const note = (style: import("../fla/xfl").Fill, stroke: boolean) => {
           for (const hex of huesOf(style)) {
-            const entry = found.get(hex) ?? found.set(hex, { color: hex, current: state!.renderer.shownColour(hex, stroke, trail), fills: 0, strokes: 0 }).get(hex)!;
+            const entry = found.get(hex) ?? found.set(hex, { color: hex, current: state!.renderer.shownColour(hex, stroke, trail, part), fills: 0, strokes: 0 }).get(hex)!;
             if (stroke) entry.strokes += 1; else entry.fills += 1;
-            const now = state!.renderer.shownColour(hex, stroke, trail);
+            const now = state!.renderer.shownColour(hex, stroke, trail, part);
             if (now !== hex) entry.current = now;
           }
         };

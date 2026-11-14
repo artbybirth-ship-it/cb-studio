@@ -71,4 +71,19 @@ assert.deepEqual(lb.timeline.layers[3].frames[0].elements[0].m.slice(4), [30 - 1
 assert.equal(built.timeline.layers[4].frames[0].elements[0].name, "cbdup2"); assert.equal(built.timeline.layers[4].frames[0].elements[0].m[4], 90, "the duplicate of a built layer is its own copy");
 let foreign = g.convertSymbol(base, { layers: { clones: [{ of: -1, prop: "cbnew1", symbol: "Headcopy", foreign: { lib: "x", scale: 1, frame: 0 } }] } });
 assert.equal(foreign.timeline, null); assert.ok(foreign.unsupported[0].includes("another character"));
+
+// value edits name objects by the player's own names: "instance", "instance_1"… for instances with no name of their own
+{
+  const unnamed = (item) => ({ k: "instance", item, symbolType: "graphic", m: [1,0,0,1,10,20], pivot: [5,6], loop: "loop", first: 0 });
+  const lay = (name, items) => ({ name, type: "normal", parent: null, hidden: false, frames: [{ i: 0, d: 10, elements: items.map(unnamed) }] });
+  const tl = { name: "T", length: 10, layers: [lay("a", ["X"]), lay("b", ["Y", "Z"])] };
+  const out = g.convertTimeline(tl, { values: { "1:0": { frame: 0, props: ["instance_2"], v: { x: 100, y: 200 } } } });
+  assert.notStrictEqual(out, tl, "an edit to instance_2 is applied (it is the second instance of layer b)");
+  assert.deepEqual(out.layers[1].frames[0].elements[1].m.slice(4), [100 - 5, 200 - 6], "its position is set (registration point 5,6)");
+  assert.deepEqual(out.layers[1].frames[0].elements[0].m, [1,0,0,1,10,20], "the other instance is left alone");
+  assert.equal(out.layers[0], tl.layers[0], "other layers untouched");
+  assert.equal(g.convertTimeline(tl, { values: { "1:0": { frame: 0, props: ["instance_9"], v: { x: 100 } } } }), tl, "a name nothing has changes nothing");
+  assert.equal(g.convertTimeline(tl, { values: { "0:0": { frame: 0, props: ["instance"], v: { alpha: 0.5 } } } }).layers[0].frames[0].elements[0].alpha, 0.5);
+  console.log("legacy value names ok");
+}
 console.log("legacy tests passed");

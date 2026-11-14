@@ -30,6 +30,8 @@ type Props = {
   onDuplicateMoved?: (moves: Array<{ id: string; x: number; y: number }>) => void;
   /** Adobe Animate tools: "select" (V) shows a blue outline; "transform" (Q) shows the handles;
    *  "scale" (S, Illustrator) drags anywhere to scale the selection about its registration point. */
+  /** Direct select (A): same picking as Select, drawn as a thin light-blue outline without handles. */
+  directSelect?: boolean;
   toolMode?: "select" | "transform" | "scale" | "zoom" | "text";
   /** Text tool (Illustrator point type): the text layer being typed into (caret at clientX/Y, else
    *  at the end). The text is uncontrolled while editing; every change goes out through onTextInput. */
@@ -131,6 +133,8 @@ type Props = {
   onZoomChange?: (zoom: number) => void;
   onFitScaleChange?: (scale: number) => void;
   viewResetRevision?: number;
+  /** localStorage key that remembers zoom + pan across page refreshes. */
+  viewStorageKey?: string;
 };
 
 export type TransformPatch = Partial<Pick<EditorObject, "x" | "y" | "scale" | "rotation" | "pivotX" | "pivotY" | "stretchX" | "stretchY" | "skewX" | "skewY">>;
@@ -289,7 +293,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, colourFrameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolBoxSelect, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, onSymbolPivotReset, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", directSelect = false, editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, colourFrameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolBoxSelect, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, onSymbolPivotReset, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0, viewStorageKey }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   // Characters drawn natively (those with edits from the native editor): the canvas that stands in for the player's, and whether it is showing yet.
@@ -314,7 +318,15 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   useEffect(() => { const timer = window.setTimeout(() => setSwapGateTimedOut(true), 6000); return () => window.clearTimeout(timer); }, []);
   const [fit, setFit] = useState<Fit>({ scale: 1, left: 0, top: 0 });
   const [hostSize, setHostSize] = useState({ width: 1, height: 1 });
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [pan, setPan] = useState(() => {
+    try {
+      if (viewStorageKey && typeof window !== "undefined") {
+        const saved = JSON.parse(window.localStorage.getItem(viewStorageKey) || "null");
+        if (saved && Number.isFinite(Number(saved.panX)) && Number.isFinite(Number(saved.panY))) return { x: Number(saved.panX), y: Number(saved.panY) };
+      }
+    } catch { /* storage unavailable */ }
+    return { x: 0, y: 0 };
+  });
   const [spacePanning, setSpacePanning] = useState(false);
   const [rotationToolActive, setRotationToolActive] = useState(false);
   // R (Illustrator's Rotate tool): stays on after the key is released; a drag anywhere turns the selection about its
@@ -921,13 +933,26 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     };
   }, [renderMode, selectedObjectId]);
 
+  const viewResetSeenRef = useRef(viewResetRevision);
   useEffect(() => {
+    // Only a real Fit/reset (revision changed) clears the pan; mount, and Strict Mode's second run, do not.
+    if (viewResetSeenRef.current === viewResetRevision) return;
+    viewResetSeenRef.current = viewResetRevision;
     setPan({ x: 0, y: 0 });
     // Fit in Window also sets zoom back to 1 in the same click. Mark that zoom as already
     // applied, so the zoom-anchor effect below doesn't move the stage off-centre again.
     previousZoomRef.current = clampZoom(Number(zoom || 1));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewResetRevision]);
+
+  // Remember the zoomed-in view (debounced) so a page refresh comes back to the same place.
+  useEffect(() => {
+    if (!viewStorageKey || renderMode) return;
+    const timer = window.setTimeout(() => {
+      try { window.localStorage.setItem(viewStorageKey, JSON.stringify({ zoom: Number(zoom || 1), panX: pan.x, panY: pan.y })); } catch { /* not persisted */ }
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [viewStorageKey, renderMode, zoom, pan.x, pan.y]);
 
   useEffect(() => {
     if (!selectedObjectId) setRotationToolActive(false);
@@ -1005,6 +1030,39 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   // is reserved only for truly detached ORIGINAL source parts that need full-stage travel.
   const useCameraRendering = !renderMode && hasDetachedSourcePartEdits;
 
+  /** Centre of the selection's visible bounding box, in stage coordinates, given the scale the DOM is drawn at. */
+  const findSelectionCentre = (drawnScale: number): { x: number; y: number } | null => {
+    const hostNode = hostRef.current;
+    // Inside a symbol or pose a part is selected while selectedIds is empty, so go by the handles on screen.
+    if (!hostNode) return null;
+    // .cb-symbol-box is a big frame around the whole character; the visible selection box is the polygon drawn inside it.
+    const symbolPolys = Array.from(hostNode.querySelectorAll<SVGPolygonElement>(".cb-symbol-box polygon"));
+    const boxes = symbolPolys.length ? (symbolPolys as unknown as HTMLElement[]) : Array.from(hostNode.querySelectorAll<HTMLElement>(".cb-symbol-box"));
+    const groups = boxes.length ? [] : Array.from(hostNode.querySelectorAll<HTMLElement>(".cb-group-box"));
+    const boxed = boxes.length || groups.length ? [] : Array.from(hostNode.querySelectorAll<HTMLElement>(".cb-transform-box"));
+    const picked = boxes.length ? boxes : groups.length ? groups : boxed.length ? boxed
+      : Array.from(hostNode.querySelectorAll<HTMLElement>(".cb-character-tight-hitbox.selected, .cb-stage-prop.selected, .cb-stage-text.selected"));
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const node of picked) {
+      const r = node.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      left = Math.min(left, r.left); top = Math.min(top, r.top); right = Math.max(right, r.right); bottom = Math.max(bottom, r.bottom);
+    }
+    if (!(Number.isFinite(left) && right > left && bottom > top)) return null;
+    const hostRect = hostNode.getBoundingClientRect();
+    const hx = ((left + right) / 2 - hostRect.left) * browserZoomFactor;
+    const hy = ((top + bottom) / 2 - hostRect.top) * browserZoomFactor;
+    return { x: (hx - fit.left - pan.x) / drawnScale, y: (hy - fit.top - pan.y) / drawnScale };
+  };
+
+  const selectionAnchorRef = useRef<{ x: number; y: number } | null>(null);
+  // After every render (handles settled): remember where the selection's registration point is on the stage.
+  useEffect(() => {
+    if (renderMode) { selectionAnchorRef.current = null; return; }
+    if (Math.abs(previousZoomRef.current - editorZoom) > 0.00001) return; // a zoom step is being applied
+    selectionAnchorRef.current = findSelectionCentre(effectiveScale);
+  });
+
   // Toolbar +/- zoom keeps the current viewport center stable instead of scaling
   // everything away from the top-left corner. Mouse-wheel zoom has its own cursor anchor.
   // A layout effect: the corrected pan renders before the browser paints, so a zoom step never
@@ -1021,7 +1079,20 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const oldScale = Math.max(0.001, fit.scale * previousZoom);
     const newScale = Math.max(0.001, fit.scale * editorZoom);
     const selectedAnchor = objects.find((item) => item.id === selectedObjectId && item.type !== "background" && item.type !== "audio") || null;
-    if (selectedAnchor) {
+    // Like Animate: zoom about the centre of what is selected (its visible box on screen), so the
+    // selection stays put while everything else grows or shrinks. The DOM already shows the new
+    // scale at the old pan, so the box's centre maps back to the stage with the new scale.
+    // The handles are positioned by later effects, so the DOM can still be at the old zoom here: use the anchor
+    // recorded while the view was settled (stage coordinates, so it does not depend on zoom or pan).
+    const selectionCentre = selectionAnchorRef.current ?? findSelectionCentre(newScale);
+    if (selectionCentre) {
+      // Animate: with a selection, every zoom step puts it in the middle of the canvas.
+      setPan({
+        x: hostSize.width / 2 - fit.left - selectionCentre.x * newScale,
+        y: hostSize.height / 2 - fit.top - selectionCentre.y * newScale,
+      });
+      zoomPanPendingRef.current = true;
+    } else if (selectedAnchor) {
       const anchor = resolveObjectTransformAtTime(selectedAnchor, playhead);
       const screenX = fit.left + pan.x + anchor.x * oldScale;
       const screenY = fit.top + pan.y + anchor.y * oldScale;
@@ -1042,7 +1113,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       zoomPanPendingRef.current = true;
     }
     previousZoomRef.current = editorZoom;
-  }, [editorZoom, fit.left, fit.scale, fit.top, hostSize.height, hostSize.width, objects, pan.x, pan.y, playhead, renderMode, selectedObjectId]);
+  }, [editorZoom, fit.left, fit.scale, fit.top, hostSize.height, hostSize.width, objects, pan.x, pan.y, playhead, renderMode, selectedObjectId, selectedIds, browserZoomFactor]);
 
   const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
     if (renderMode || !onZoomChange) return;
@@ -1054,15 +1125,19 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const mouseX = (event.clientX - rect.left) * pointerCompensation;
     const mouseY = (event.clientY - rect.top) * pointerCompensation;
     const oldScale = effectiveScale;
-    const worldX = (mouseX - fit.left - pan.x) / oldScale;
-    const worldY = (mouseY - fit.top - pan.y) / oldScale;
+    // With something selected the wheel zooms about the selection's centre (as in Animate); otherwise about the cursor.
+    const selectionCentre = findSelectionCentre(oldScale);
+    const anchorX = selectionCentre ? fit.left + pan.x + selectionCentre.x * oldScale : mouseX;
+    const anchorY = selectionCentre ? fit.top + pan.y + selectionCentre.y * oldScale : mouseY;
+    const worldX = selectionCentre ? selectionCentre.x : (mouseX - fit.left - pan.x) / oldScale;
+    const worldY = selectionCentre ? selectionCentre.y : (mouseY - fit.top - pan.y) / oldScale;
     const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
     const nextZoom = clampZoom(editorZoom * factor);
     wheelZoomTargetRef.current = nextZoom;
     const nextScale = Math.max(0.001, fit.scale * nextZoom);
     setPan({
-      x: mouseX - fit.left - worldX * nextScale,
-      y: mouseY - fit.top - worldY * nextScale,
+      x: anchorX - fit.left - worldX * nextScale,
+      y: anchorY - fit.top - worldY * nextScale,
     });
     onZoomChange(nextZoom);
   };
@@ -1116,10 +1191,12 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         zoomViewAt(nextScale / Math.max(0.001, fit.scale), hostSize.width / 2, hostSize.height / 2, centre);
         return;
       }
-      // A click: the next zoom level in or out, keeping the clicked spot under the pointer.
+      // A click: the next zoom level in or out.
       const percent = effectiveScale * 100;
       const target = out ? [...ZOOM_STEPS].reverse().find((step) => step < percent * 0.995) ?? ZOOM_STEPS[0] : ZOOM_STEPS.find((step) => step > percent * 1.005) ?? ZOOM_STEPS[ZOOM_STEPS.length - 1];
-      zoomViewAt((target / 100) / Math.max(0.001, fit.scale), (startX - hostRect.left) * compensation, (startY - hostRect.top) * compensation);
+      // As in Illustrator, the clicked spot becomes the centre of the window.
+      const clicked = { x: ((startX - hostRect.left) * compensation - fit.left - pan.x) / effectiveScale, y: ((startY - hostRect.top) * compensation - fit.top - pan.y) / effectiveScale };
+      zoomViewAt((target / 100) / Math.max(0.001, fit.scale), hostSize.width / 2, hostSize.height / 2, clicked);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up, { once: true });
@@ -3214,7 +3291,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   return (
     <div
       ref={hostRef}
-      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${rotateHeld && !renderMode ? "cb-rotate-held" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""} ${symbolView && !renderMode ? "cb-symbol-viewing" : ""} ${isolating && !renderMode ? "cb-isolating" : ""}`}
+      className={`studio-stage-host relative h-full min-h-[360px] w-full overflow-hidden ${colorPickActive ? `color-pick-active pick-${colorPickCursor}` : ""} ${spacePanning ? "space-panning" : ""} ${directSelect && !renderMode ? "cb-direct-select" : ""} ${rotateHeld && !renderMode ? "cb-rotate-held" : ""} ${rotationToolActive ? "rotation-tool-active" : ""} ${toolMode === "scale" && !renderMode ? "scale-tool-active" : ""} ${toolMode === "zoom" && !renderMode ? `zoom-tool-active ${zoomToolOut ? "zoom-out" : ""}` : ""} ${toolMode === "text" && !renderMode ? "text-tool-active" : ""} ${symbolView && !renderMode ? "cb-symbol-viewing" : ""} ${isolating && !renderMode ? "cb-isolating" : ""}`}
       onWheel={handleWheel}
       // Scale tool (S) takes the drag before objects or the marquee see it.
       onPointerDownCapture={(event) => {
@@ -3223,6 +3300,9 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         if (event.detail <= 1) gestureStartPartRef.current = { objectId: selectedObjectId, part: activeCharacterPart };
         // Hand tool (Space held): pan from anywhere on the canvas. Taken here, before any part, handle
         // or object sees the press, so nothing is picked or moved in any mode.
+        // Cmd/Ctrl + Space (Illustrator's temporary Zoom tool): drag a rectangle to zoom in, click to step in;
+        // add Option/Alt to step out. Plain Space stays the Hand tool.
+        if (spacePanning && !renderMode && event.button === 0 && (event.metaKey || event.ctrlKey)) { beginZoomTool(event); return; }
         if (spacePanning) { beginPan(event); return; }
         // Rotate tool (R): hand the press to the selection's own rotate handle (pose part, character part, then whole object),
         // so the drag turns it exactly as dragging beside a corner does.
@@ -3657,9 +3737,11 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         );
       })}
       {/* Inside a character: the stage only answers double-clicks (a part steps in, elsewhere steps out). */}
-      {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={doubleClickInsideSymbol} onContextMenu={openPartMenu} onPointerDown={(event) => {
+      {symbolView && !renderMode && <div className="cb-symbol-overlay" onDoubleClick={(event) => { if (colorPickActive) { event.preventDefault(); event.stopPropagation(); return; } doubleClickInsideSymbol(event); }} onContextMenu={openPartMenu} onPointerDown={(event) => {
           if (spacePanning) return;
           event.stopPropagation();
+          // A colour tool (Colour Dropper, Light/Dark, a Find/Replace or Fill/Stroke eyedropper) is waiting for this press: it samples, and nothing is picked or moved.
+          if (colorPickActive && onColorPick && event.button === 0) { event.preventDefault(); onColorPick(event.clientX, event.clientY, { altKey: event.altKey, shiftKey: event.shiftKey }); return; }
           // Press a part and drag: it moves. A click picks it (handles appear); a click on nothing drops it.
           if (event.button === 0 && onSymbolDragStart) trackSymbolPointer(event, (nx, ny, shift) => onSymbolDragStart(nx, ny, shift), onSymbolDeselect, onSymbolBoxSelect);
         }} title="Drag a part to move it, click it for handles; double-click a part to step inside it; double-click elsewhere (or Esc) to step out" />}

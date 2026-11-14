@@ -64,15 +64,28 @@ export function prepareRules(list: ColourRule[] | undefined): PreparedRule[] {
 
 /** Where a shape is being drawn: the instances it is inside, outermost first. cls is the Animate class of the symbol the instance sits in; name is the instance's name ("" when it has none). */
 export type Trail = Array<{ cls: string; name: string }>;
-/** The Animate class a library item is published under: its own name with spaces and punctuation as "_" ("Sardar 01" → "Sardar_01"). */
-export const classOf = (item: string) => (item.split("/").pop() || item).replace(/[^A-Za-z0-9_$]/g, "_");
+/**
+ * The Animate class a library item is published under: its own name (the last part of its path) with HTML entities decoded and
+ * everything but letters, digits, "_" and "$" dropped ("Symbol 9" → "Symbol9", "Head copy 2" → "Headcopy2"). Checked against the
+ * published script of a real character: 340 of its 362 library items come out as the class the script has (the rest are internal
+ * drawing items). A pose published under another linkage name ("Sardar_01" for "Symbol 1") is told to the renderer separately.
+ */
+export const classOf = (item: string) => (item.split("/").pop() || item).replace(/&#(\d+);?/g, (_, n) => String.fromCharCode(Number(n))).replace(/[^A-Za-z0-9_$]/g, "");
+
+/** Animate wrappers that are not part names. */
+const GENERIC = /^(clipgroup|group|path|symbol|tween|shape|layer|compoundpath|bitmap|image|mask|anmovieclip|instance|movieclip|container|sprite|graphic|object)\b/i;
+/** The player's name for a rig piece from its symbol's class: "Headcopy13" → "Head", "Scarf_1" → "Scarf"; generic wrappers → "". */
+export function partNameOfClass(cls: string): string {
+  const base = cls.replace(/(?:copy\d*|_\d+)+$/i, "");
+  return base && /[a-z]/i.test(base) && !GENERIC.test(base) ? base : "";
+}
 
 /**
  * The rules that apply to a shape drawn at `trail`. "*" is the whole character; "a/b" is the part
  * reached through instances named a, then b (rules for a part cover what is inside it); "@Class/n1+n2"
  * is a pose part made in the editor's pose view: the instances named n1 or n2 inside the symbol of that class.
  */
-export function scopeMatches(scope: string, trail: Trail): boolean {
+export function scopeMatches(scope: string, trail: Trail, part?: string): boolean {
   if (!scope || scope === "*") return true;
   if (scope.charAt(0) === "@") {
     const cut = scope.indexOf("/");
@@ -80,10 +93,12 @@ export function scopeMatches(scope: string, trail: Trail): boolean {
     const cls = scope.slice(1, cut), names = scope.slice(cut + 1).split("+");
     return trail.some((t) => t.cls === cls && t.name && names.includes(t.name));
   }
+  // A plain name is a part of the rig ("head", "symbol3": the player's key for the piece the shape is inside) or a path of instance names.
+  if (part && (part === scope || part.startsWith(scope + "/"))) return true;
   const path = trail.map((t) => t.name).filter(Boolean).join("/");
   return path === scope || path.startsWith(scope + "/");
 }
-export const rulesAt = (rules: PreparedRule[], trail: Trail): PreparedRule[] => rules.filter((r) => scopeMatches(r.scope, trail));
+export const rulesAt = (rules: PreparedRule[], trail: Trail, part?: string): PreparedRule[] => rules.filter((r) => scopeMatches(r.scope, trail, part));
 
 /** One colour through the rules: an exact match wins over a shades match; null when no rule touches it. */
 export function mapColour(c: Rgba, rules: PreparedRule[], isStroke: boolean): Rgba | null {
