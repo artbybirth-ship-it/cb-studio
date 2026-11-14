@@ -103,6 +103,20 @@ try:
     h3 = hist("[data-native-character]")
     check("a rule for a part that is not there changes nothing", green(h3) == green(h0), f"green px {green(h3)}")
 
+    # a part made in the pose view is scoped "@<pose class>/<instance name>": the player's names for the file's unnamed instances
+    whole = green(h1); found = None
+    for nm in ["instance"] + [f"instance_{i}" for i in range(1, 19)]:
+        e4 = json.loads(json.dumps(ed)); e4["objects"][0]["colorReplacements"] = [dict(rule, scope=f"@Sardar_01/{nm}")]; patch(scene(), e4)
+        load_scene(); g = green(hist("[data-native-character]"))
+        if g > 50: found = (nm, g); break
+    check("a rule for one part of the pose recolours only that part", bool(found) and found[1] < whole, f"{found} of {whole} whole-character")
+    e5 = json.loads(json.dumps(ed)); e5["objects"][0]["colorReplacements"] = [dict(rule, scope="@Sardar_01/instance_99")]; patch(scene(), e5)
+    load_scene()
+    check("a pose-part rule for an instance that is not there changes nothing", green(hist("[data-native-character]")) == green(h0))
+    e6 = json.loads(json.dumps(ed)); e6["objects"][0]["colorReplacements"] = [dict(rule, scope=f"@Other_Class/{found[0] if found else 'instance'}")]; patch(scene(), e6)
+    load_scene()
+    check("the same name under another pose class changes nothing", green(hist("[data-native-character]")) == green(h0))
+
     # the pose editor draws in the character's colours too
     patch(scene(), ed2)
     check("the pose opens in the native editor", open_pose())

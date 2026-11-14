@@ -58,14 +58,14 @@ export default function NativePoseDialog({ flaUrl, item, title, js, initial, leg
           setConverted(`Older edits on this character were converted (${made.converted.join(", ")}).`);
         } else if (made.left.length) setConverted(`Older edits were not converted, so this character keeps using them as they are: ${made.left.join("; ")}.`);
       }
-      registerLibrary(result, initial?.library).then(() => { if (!alive) return; result.renderer.setColourRules(coloursRef.current); setLoaded(result); }, (e) => alive && setError(e instanceof Error ? e.message : String(e)));
+      registerLibrary(result, initial?.library).then(() => { if (!alive) return; if (js) result.renderer.classes.set(item, js); result.renderer.setColourRules(coloursRef.current); setLoaded(result); }, (e) => alive && setError(e instanceof Error ? e.message : String(e)));
     }).catch((e) => alive && setError(e instanceof Error ? e.message : String(e)));
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flaUrl, item]);
 
   // The shared drawing goes back to the file's own colours when the editor closes.
-  useEffect(() => () => loaded?.renderer.setColourRules(undefined), [loaded]);
+  useEffect(() => () => { loaded?.renderer.setColourRules(undefined); loaded?.renderer.classes.clear(); }, [loaded]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !(e.target instanceof HTMLElement && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName))) onCancel(); };
@@ -73,7 +73,7 @@ export default function NativePoseDialog({ flaUrl, item, title, js, initial, leg
     return () => window.removeEventListener("keydown", onKey);
   }, [onCancel]);
 
-  const onChange = useCallback((edits: NativeEdits) => { latest.current = edits; }, []);
+  const onChange = useCallback((edits: NativeEdits) => { latest.current = { ...edits, pose: item }; }, [item]);
   const done = () => { const edits = latest.current; onDone(edits && Object.keys(edits.symbols).length ? edits : null); };
 
   return (

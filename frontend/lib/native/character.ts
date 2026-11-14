@@ -13,7 +13,7 @@ import type { NativeEdits } from "./store";
 import { loadNativeDoc, type NativeLoaded } from "./loadDoc";
 import { registerLibrary } from "./library";
 import { NativeRenderer } from "./render";
-import type { ColourRule } from "./colour";
+import { hexOf, parseColour, sameFamily, toHsl, type ColourRule } from "./colour";
 import { resolvePoseSource, type PoseSource } from "./resolve";
 
 export const BOX_W = 720, BOX_H = 960;
@@ -59,12 +59,20 @@ export type NativeCharacter = {
   setColourRules(rules: ColourRule[] | undefined): void;
   /** Draws source time `seekMs` onto `canvas`, at `resolution` times the 720 × 960 box. */
   draw(canvas: HTMLCanvasElement, seekMs: number, resolution?: number, fit?: Fit | null): void;
+  /** What the Animate player's colour finder answers, for this drawing (the colour tools use these when the native drawing is what is on screen). (x, y) are 0..1 over the 720 × 960 box. */
+  colourAt(x: number, y: number, scope: string): { picked: string; original: string } | null;
+  palette(scope: string): ColourEntry[];
+  relatives(hex: string, scope: string): { strokes: string[]; shadows: string[] };
 };
+export type ColourEntry = { color: string; current: string; fills: number; strokes: number };
 
 export function createNativeCharacter(object: NativeCharacterSource): NativeCharacter {
   let state: { source: PoseSource; renderer: NativeRenderer; loaded: NativeLoaded } | null = null;
   const edits = Object.values(object.nativePose || {});
   let rulesNow = object.colorReplacements;
+  /** Where the last draw put the pose: the frame and placement the colour finder looks at. */
+  let last: { frame: number; fit: Fit } | null = null;
+  const huesOf = (style: import("../fla/xfl").Fill): string[] => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [hexOf(parseColour(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
   return {
     get ready() { return Boolean(state); },
     setColourRules(rules) { rulesNow = rules; state?.renderer.setColourRules(rules); },
@@ -76,6 +84,11 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       // This character's own renderer over the shared document: its edits are laid over the pose, other placed characters keep theirs.
       const renderer = new NativeRenderer(loaded.doc, loaded.renderer.assets);
       await renderer.loadBrushes();
+      for (const [cls, edit] of Object.entries(object.nativePose || {})) {
+        const keys = Object.keys(edit.symbols);
+        const item = edit.pose ?? (keys.includes(source.item) ? source.item : keys[0]);
+        if (item) renderer.classes.set(item, cls);
+      }
       renderer.setColourRules(rulesNow);
       for (const edit of edits) for (const [name, timeline] of Object.entries(edit.symbols)) if (loaded.doc.symbols.has(name)) renderer.overrides.set(name, timeline);
       fitOf(`${source.flaUrl}|${source.item}`, loaded, source.item);
@@ -98,6 +111,64 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       const fit = fitOverride || fitOf(`${source.flaUrl}|${source.item}`, loaded, source.item);
       ctx.setTransform(fit.s * scale, 0, 0, fit.s * scale, fit.tx * scale, fit.ty * scale);
       renderer.drawSymbol(ctx, source.item, frame);
+      last = { frame, fit };
+    },
+    colourAt(x, y, scope) {
+      if (!state || !last) return null;
+      const { source, renderer } = state, { frame, fit } = last;
+      const ctx = new OffscreenCanvas(1, 1).getContext("2d")!;
+      // The pose's own placement, shifted so the asked-for point of the box lands on the middle of the one pixel.
+      ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - x * BOX_W + 0.5, fit.ty - y * BOX_H + 0.5);
+      const hit = renderer.hitAt(ctx, source.item, frame, 0.5, 0.5, scope);
+      if (!hit) return null;
+      return { picked: renderer.shownColour(hit.color, hit.stroke, hit.trail), original: hexOf(parseColour(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }) };
+    },
+    palette(scope) {
+      if (!state) return [];
+      const found = new Map<string, ColourEntry>();
+      state.renderer.eachShape(state.source.item, scope, (shape, trail) => {
+        const note = (style: import("../fla/xfl").Fill, stroke: boolean) => {
+          for (const hex of huesOf(style)) {
+            const entry = found.get(hex) ?? found.set(hex, { color: hex, current: state!.renderer.shownColour(hex, stroke, trail), fills: 0, strokes: 0 }).get(hex)!;
+            if (stroke) entry.strokes += 1; else entry.fills += 1;
+            const now = state!.renderer.shownColour(hex, stroke, trail);
+            if (now !== hex) entry.current = now;
+          }
+        };
+        shape.fills.forEach((f) => note(f.style, false));
+        shape.strokes.forEach((s) => note(s.style.fill, true));
+      });
+      return [...found.values()].sort((a, b) => b.fills + b.strokes - (a.fills + a.strokes)).slice(0, 80);
+    },
+    relatives(hexIn, scope) {
+      const none = { strokes: [], shadows: [] };
+      const base = parseColour(hexIn);
+      if (!state || !base) return none;
+      const baseHex = hexOf(base), baseHsl = toHsl(base);
+      const strokes = new Set<string>(), shadows = new Set<string>(), ownersWithBase = new Set<string>(), linesByOwner = new Map<string, Set<string>>();
+      // An outline of this colour: darker, and its hue (or grey / black), not a neighbour's outline drawn in the same shape.
+      const outlineOf = (h: string) => {
+        if (h === baseHex) return false;
+        const c = toHsl(parseColour(h)!);
+        if (c.l >= baseHsl.l) return false;
+        if (c.s < 0.08 || baseHsl.s < 0.12) return true;
+        const dh = Math.abs(c.h - baseHsl.h);
+        return Math.min(dh, 360 - dh) <= 30;
+      };
+      state.renderer.eachShape(state.source.item, scope, (shape, _trail, owner) => {
+        const fills = shape.fills.flatMap((f) => huesOf(f.style)), lines = shape.strokes.flatMap((s) => huesOf(s.style.fill));
+        if (fills.includes(baseHex)) { ownersWithBase.add(owner); lines.forEach((h) => { if (outlineOf(h)) strokes.add(h); }); }
+        const own = linesByOwner.get(owner) ?? linesByOwner.set(owner, new Set()).get(owner)!;
+        lines.forEach((h) => own.add(h));
+        for (const h of fills) {
+          if (h === baseHex || shadows.has(h)) continue;
+          const hsl = toHsl(parseColour(h)!);
+          if (hsl.l < baseHsl.l - 0.01 && sameFamily(hsl, baseHsl)) shadows.add(h);
+        }
+      });
+      // Outlines drawn as shapes of their own: those of the symbols that hold the colour.
+      if (!strokes.size) for (const owner of ownersWithBase) for (const h of linesByOwner.get(owner) ?? []) if (outlineOf(h)) strokes.add(h);
+      return { strokes: [...strokes], shadows: [...shadows] };
     },
   };
 }

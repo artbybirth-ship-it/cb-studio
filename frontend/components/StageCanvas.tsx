@@ -10,10 +10,11 @@ import type { LayerGeometry } from "@/lib/layerTransform";
 import { type CharacterTransform } from "@/lib/keyframes";
 import { groupPivotAtTime, resolveObjectTransformAtTime } from "@/lib/groupMotion";
 import NativeCharacterCanvas from "./NativeCharacterCanvas";
+import type { NativeCharacter } from "@/lib/native/character";
 import { resolvePartOverridesAtTime, resolvePartTransformAtTime, resolveSourceSeekMs, type PartTransform } from "@/lib/partKeyframes";
 import { isMultiPartKey, memberPatches, parentPartKey, partMembers } from "@/lib/partSelection";
 import { inLayerSpan } from "@/lib/layerRows";
-import { readSnapshot, snapshotKey, writeSnapshot } from "@/lib/characterSnapshot";
+import { peekSnapshot, readSnapshot, snapshotKey, writeSnapshot } from "@/lib/characterSnapshot";
 
 type Props = {
   data: EditorData;
@@ -73,6 +74,8 @@ type Props = {
   characterPartEntered?: boolean;
   /** Lets the editor reach a character's player frame (palette, eyedropper). */
   frameAccessRef?: MutableRefObject<((objectId: string) => HTMLIFrameElement | undefined) | null>;
+  /** What the colour tools look at: for a character drawn natively a stand-in with the player's colour-finder functions, else the player's frame. */
+  colourFrameAccessRef?: MutableRefObject<((objectId: string) => HTMLIFrameElement | undefined) | null>;
   /** Lighten/Darken tool or a colour eyedropper is on: double-clicks never select or enter parts. */
   blockDoubleClick?: boolean;
   /** Step inside a character (view only): the character whose own timeline is shown, the symbol
@@ -286,13 +289,15 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolBoxSelect, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, onSymbolPivotReset, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, colourFrameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolBoxSelect, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, onSymbolPivotReset, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   // Characters drawn natively (those with edits from the native editor): the canvas that stands in for the player's, and whether it is showing yet.
   const nativeCanvases = useRef(new Map<string, HTMLCanvasElement>());
   const [editsDrawn, setEditsDrawn] = useState<ReadonlySet<string>>(new Set());
   const [nativeReady, setNativeReady] = useState<ReadonlySet<string>>(new Set());
+  const nativeHandles = useRef(new Map<string, NativeCharacter>());
+  const onNativeHandle = useCallback((id: string, handle: NativeCharacter | null) => { if (handle) nativeHandles.current.set(id, handle); else nativeHandles.current.delete(id); }, []);
   const onNativeCanvas = useCallback((id: string, node: HTMLCanvasElement | null) => { if (node) nativeCanvases.current.set(id, node); else nativeCanvases.current.delete(id); }, []);
   const onNativeReady = useCallback((id: string, ready: boolean) => setNativeReady((current) => (current.has(id) === ready ? current : new Set(ready ? [...current, id] : [...current].filter((item) => item !== id)))), []);
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -335,6 +340,13 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   useEffect(() => { setUseCssZoom(supportsStandardZoom()); }, []);
 
   if (frameAccessRef) frameAccessRef.current = (objectId: string) => frameRefs.current.get(objectId);
+  if (colourFrameAccessRef) colourFrameAccessRef.current = (objectId: string) => {
+    const handle = nativeHandles.current.get(objectId), canvas = nativeCanvases.current.get(objectId);
+    if (!handle || !canvas || !nativeReady.has(objectId) || (symbolView && symbolView.objectId === objectId)) return frameRefs.current.get(objectId);
+    return { getBoundingClientRect: () => canvas.getBoundingClientRect(), contentWindow: { cbColorAt: handle.colourAt, cbColorPalette: handle.palette, cbColorRelatives: handle.relatives } } as unknown as HTMLIFrameElement;
+  };
+  // For the browser tests (tools/native-test): the colour tools' view of a character, called as the tools call it.
+  if (colourFrameAccessRef && typeof window !== "undefined") (window as unknown as { __CBS_COLOUR_FRAME__?: unknown }).__CBS_COLOUR_FRAME__ = colourFrameAccessRef.current;
 
   const getPlayerQualityScale = useCallback((sourceWidth: number, sourceHeight: number) => {
     const requestedZoom = Math.max(1, Number(zoom || 1));
@@ -400,19 +412,45 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   // ---- Snapshot of each character at frame 0, shown while its player loads (see lib/characterSnapshot.ts).
   // Only characters drawn entirely in their own canvas qualify (not swapped-in parts, which are separate players).
   const snapshotKeyOf = (object: EditorObject) => {
-    if (object.nativePose && Object.keys(object.nativePose).length) return "";
     if (Object.values(object.partReplacements || {}).some((replacement) => replacement?.renderKind === "source-symbol")) return "";
-    return snapshotKey([object.assetUrl, object.partOverrides, object.symbolLayers, object.symbolKeys, object.symbolValues, object.symbolEases, object.colorReplacements, object.colorOverrides, object.onlyParts, object.strokeScale, resolveSourceSeekMs(object, 0)]);
+    return snapshotKey([object.assetUrl, object.partOverrides, object.symbolLayers, object.symbolKeys, object.symbolValues, object.symbolEases, object.colorReplacements, object.colorOverrides, object.onlyParts, object.strokeScale, object.nativePose, object.nativePoseFit, resolveSourceSeekMs(object, 0)]);
   };
   const [snapshotUrls, setSnapshotUrls] = useState<Record<string, string>>({});
-  const [snapshotShown, setSnapshotShown] = useState<ReadonlySet<string>>(new Set());
-  // Read what an earlier session saved, once per character whose edits still match.
+  // Characters whose saved snapshot has been looked up (found or not): until then the stage shows nothing rather than the blurry thumbnail.
+  const [snapshotLooked, setSnapshotLooked] = useState<ReadonlySet<string>>(new Set());
+  // The player reports its edits applied a little before its picture is final; the saved snapshot stays on top until then.
+  const [snapshotSettled, setSnapshotSettled] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
+    const timers = [...editsDrawn].filter((id) => !snapshotSettled.has(id)).map((id) => window.setTimeout(() => setSnapshotSettled((current) => new Set(current).add(id)), 800));
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [editsDrawn, snapshotSettled]);
+  const [snapshotViews, setSnapshotViews] = useState<Record<string, { x: number; y: number; width: number; height: number } | null>>({});
+  const [snapshotShown, setSnapshotShown] = useState<ReadonlySet<string>>(new Set());
+  // Read what an earlier session saved, for each character whose edits (key) match; again whenever the key changes
+  // (the project can load its edits a moment after the first render).
+  const snapshotReadKeys = useRef(new Map<string, string>());
+  useLayoutEffect(() => {
     for (const object of characterObjects) {
       const key = snapshotKeyOf(object);
-      if (!key || snapshotUrls[object.id] !== undefined) continue;
-      setSnapshotUrls((current) => (object.id in current ? current : { ...current, [object.id]: "" }));
-      void readSnapshot(object.id, key).then((url) => { if (url) setSnapshotUrls((current) => ({ ...current, [object.id]: url })); });
+      if (!key || snapshotReadKeys.current.get(object.id) === key) continue;
+      const hadOne = snapshotReadKeys.current.has(object.id);
+      snapshotReadKeys.current.set(object.id, key);
+      if (hadOne) setSnapshotUrls((current) => ({ ...current, [object.id]: "" }));
+      else setSnapshotUrls((current) => (object.id in current ? current : { ...current, [object.id]: "" }));
+      // Already in memory: use it before the first paint.
+      const peeked = peekSnapshot(object.id, key);
+      if (peeked !== undefined) {
+        if (peeked) { setSnapshotUrls((current) => ({ ...current, [object.id]: peeked.url })); setSnapshotViews((current) => ({ ...current, [object.id]: peeked.view })); }
+        setSnapshotLooked((current) => new Set(current).add(object.id));
+        continue;
+      }
+      void readSnapshot(object.id, key).then((found) => {
+        if (found && snapshotReadKeys.current.get(object.id) === key) {
+          setSnapshotUrls((current) => ({ ...current, [object.id]: found.url }));
+          setSnapshotViews((current) => ({ ...current, [object.id]: found.view }));
+        }
+        setSnapshotLooked((current) => new Set(current).add(object.id));
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [characterObjects]);
@@ -440,21 +478,24 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const timer = window.setTimeout(() => {
       for (const object of characterObjects) {
         const key = snapshotKeyOf(object);
-        if (!key || !readyCharacterIds.has(object.id) || heldForSwaps(object)) continue;
+        const native = Boolean(object.nativePose && Object.keys(object.nativePose).length);
+        if (!key || !readyCharacterIds.has(object.id) || heldForSwaps(object) || (native && !nativeReady.has(object.id))) continue;
         try {
-          const canvas = frameRefs.current.get(object.id)?.contentDocument?.querySelector("canvas");
+          // A pose edited natively is drawn by its own canvas; the player's would be the original.
+          const canvas = native ? nativeCanvases.current.get(object.id) : frameRefs.current.get(object.id)?.contentDocument?.querySelector("canvas");
           if (!canvas || canvas.width < 8 || canvas.height < 8) continue;
           const scale = Math.min(1, 1000 / Math.max(canvas.width, canvas.height));
           const copy = document.createElement("canvas");
           copy.width = Math.round(canvas.width * scale); copy.height = Math.round(canvas.height * scale);
           copy.getContext("2d")?.drawImage(canvas, 0, 0, copy.width, copy.height);
-          void writeSnapshot(object.id, key, copy.toDataURL("image/png"));
+          const sent = native ? null : lastViewSentRef.current.get(object.id) as { x: number; y: number; width: number; height: number } | undefined;
+          void writeSnapshot(object.id, key, copy.toDataURL("image/png"), sent ? { x: sent.x, y: sent.y, width: sent.width, height: sent.height } : null);
         } catch { /* a canvas that cannot be read is skipped */ }
       }
     }, 900);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshotWatch, canSnapshot, readyCharacterIds, editsDrawn]);
+  }, [snapshotWatch, canSnapshot, readyCharacterIds, editsDrawn, nativeReady]);
 
   const getCharacterVisualBounds = useCallback((object: EditorObject): VisualBounds => {
     const sourceWidth = Math.max(1, Number(object.sourceWidth || 1920));
@@ -3405,7 +3446,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                   pointerEvents: "none",
                 }}
               >
-                {!readyCharacterIds.has(object.id) && object.previewUrl && !heldForSwaps(object) && (
+                {!editsDrawn.has(object.id) && object.previewUrl && !heldForSwaps(object) && !snapshotUrls[object.id] && (snapshotLooked.has(object.id) || !snapshotKeyOf(object)) && (
                   <img
                     src={object.previewUrl}
                     alt=""
@@ -3413,13 +3454,16 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     className="cb-character-preview-fallback"
                   />
                 )}
-                {snapshotUrls[object.id] && snapshotShown.has(object.id) && !renderMode && (
+                {snapshotUrls[object.id] && (snapshotShown.has(object.id) || !snapshotSettled.has(object.id)) && !renderMode && (
                   <img
                     src={snapshotUrls[object.id]}
                     alt=""
                     draggable={false}
                     className="cb-character-preview-fallback"
-                    style={{ objectFit: "fill", zIndex: 1, filter: `hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)` }}
+                    style={{
+                      objectFit: "fill", zIndex: 5,
+                      ...(snapshotViews[object.id] ? { inset: "auto", left: `${snapshotViews[object.id]!.x * 100}%`, top: `${snapshotViews[object.id]!.y * 100}%`, width: `${snapshotViews[object.id]!.width * 100}%`, height: `${snapshotViews[object.id]!.height * 100}%` } : {}),
+                      filter: `hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)` }}
                   />
                 )}
                 {renderCharacterTightHitArea(object, selected)}
@@ -3436,8 +3480,8 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                   style={{
                     filter: `hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)`,
                     pointerEvents: "none",
-                    transition: "opacity 180ms ease-out",
-                    opacity: (nativeReady.has(object.id) && !(symbolView && symbolView.objectId === object.id)) || heldForSwaps(object) ? 0 : undefined,
+                    transition: snapshotUrls[object.id] && !renderMode ? "none" : "opacity 180ms ease-out",
+                    opacity: (nativeReady.has(object.id) && !(symbolView && symbolView.objectId === object.id)) || heldForSwaps(object) || (!renderMode && !swapGateTimedOut && !editsDrawn.has(object.id)) ? 0 : undefined,
                   }}
                   tabIndex={-1}
                 />
@@ -3447,6 +3491,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     seekMs={resolveSourceSeekMs(object, playhead)}
                     hueFilter={`hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)`}
                     onCanvas={onNativeCanvas}
+                    onHandle={onNativeHandle}
                     onReady={onNativeReady}
                     playerFrame={() => frameRefs.current.get(object.id)}
                     playerReady={readyCharacterIds.has(object.id)}

@@ -30,7 +30,7 @@ import NativePoseDialog from "./NativePoseDialog";
 import { findFlaUrl } from "@/lib/native/loadDoc";
 import { playerFitOf } from "@/lib/native/character";
 import FindReplaceDialog from "./FindReplaceDialog";
-import { addColorRule, addCounts, applyToEditorData, charactersUsingColour, objectsUsingColourInSwaps, describeCounts, emptyCounts, libraryIdOf, normalizeHex, totalCount, visibleAt, type FindRequest } from "@/lib/findReplace";
+import { addColorRule, addCounts, applyToEditorData, charactersUsingColour, objectsUsingColourInSwaps, swappedScriptsOf, describeCounts, emptyCounts, libraryIdOf, normalizeHex, totalCount, visibleAt, type FindRequest } from "@/lib/findReplace";
 import { followColour, shiftLightness, shiftLike } from "@/lib/color";
 import ColourPicker from "./ColourPicker";
 import PanelClose from "./PanelClose";
@@ -450,6 +450,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const [boxPicking, setBoxPicking] = useState(false);
   const [boxPicker, setBoxPicker] = useState<"fill" | "stroke" | null>(null);
   const frameAccessRef = useRef<((objectId: string) => HTMLIFrameElement | undefined) | null>(null);
+  /** What the colour tools read colours from: the player's frame, or for a character drawn natively a stand-in answering the same questions. */
+  const colourFrameAccessRef = useRef<((objectId: string) => HTMLIFrameElement | undefined) | null>(null);
+  const colourFrameOf = (objectId: string) => colourFrameAccessRef.current?.(objectId) ?? frameAccessRef.current?.(objectId);
   const viewCenterRef = useRef<(() => { x: number; y: number }) | null>(null);
   const layerGeometryRef = useRef<((objectId: string) => LayerGeometry | null) | null>(null);
   // Tool rail groups (Illustrator): the Edit group's current tool, the Transform and Align panels.
@@ -930,7 +933,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const swapPart = swap?.partKey || "";
     const scope = swapPart || activeCharacterPart || poseColourScope || "*";
     const scopeArg = scope === "*" ? "" : scope;
-    const frame = swapFrame || frameAccessRef.current?.(colourItem.id);
+    const frame = swapFrame || colourFrameOf(colourItem.id);
     const rect = frame?.getBoundingClientRect();
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
     type PlayerColours = Window & {
@@ -983,11 +986,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const holder = (document.elementsFromPoint(clientX, clientY) as HTMLElement[])
       .map((element) => element.closest<HTMLElement>("[data-editor-object-id]"))
       .find((element): element is HTMLElement => Boolean(element));
-    const object = holder ? draft.objects.find((item) => item.id === holder.getAttribute("data-editor-object-id")) : undefined;
+    let object = holder ? draft.objects.find((item) => item.id === holder.getAttribute("data-editor-object-id")) : undefined;
+    // Stepped into a character's pose, an overlay covers the stage and nothing under the pointer belongs to a layer: the pose's character is what is being picked from.
+    if (!object && symbolView) object = draft.objects.find((item) => item.id === symbolView.objectId && item.type === "character");
     let colour: string | null = null;
     if (object?.type === "character") {
       const swap = swapPlayerAt(object.id, clientX, clientY);
-      const frame = frameAccessRef.current?.(object.id);
+      const frame = colourFrameOf(object.id);
       const rect = frame?.getBoundingClientRect();
       if (swap) colour = swap.original;
       else try {
@@ -1107,7 +1112,18 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
     }
 
-    if (!totalCount(counts) && !libraryCharacters) return { message: `No matches found in ${contextLabel}.`, changed: false };
+    if (!totalCount(counts) && !libraryCharacters) {
+      // Say why, so a failed search is not a mystery: an identical rule already there, or what was looked in.
+      let why = "";
+      if (request.kind === "colour") {
+        const characters = targets.flatMap((target) => (target.data.objects || []).filter((object) => object.type === "character"));
+        const already = characters.filter((object) => (object.colorReplacements || []).some((rule) => rule.scope === "*" && rule.from === findHex && rule.to === replaceHex));
+        if (already.length) why = ` ${already.map((object) => object.name).join(", ")} already has the rule ${findHex} → ${replaceHex}.`;
+        else if (characters.length) why = ` Looked in ${characters.map((object) => `${object.name}${swappedScriptsOf(object).length ? ` and ${swappedScriptsOf(object).length} pasted/swapped part file(s)` : ""}`).join(", ")} for ${findHex}.`;
+        else why = " There is no character in it.";
+      }
+      return { message: `No matches found in ${contextLabel}.${why}`, changed: false };
+    }
     const message = request.context === "library"
       ? `Saved on ${libraryCharacters} character${libraryCharacters === 1 ? "" : "s"} in My characters${totalCount(counts) ? `; ${describeCounts(counts, scenesChanged.size, "scenes").replace(/^Replaced in /, "also updated ")}` : "."}`
       : describeCounts(counts, projectsChanged.size > 1 ? projectsChanged.size : scenesChanged.size, projectsChanged.size > 1 ? "projects" : "scenes");
@@ -1139,7 +1155,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     let cancelled = false;
     const read = () => {
       try {
-        const frame = frameAccessRef.current?.(objectId);
+        const frame = colourFrameOf(objectId);
         const palette = (frame?.contentWindow as (Window & { cbColorPalette?: (scope: string) => { color: string; current: string; fills: number; strokes: number }[] }) | null | undefined)?.cbColorPalette?.(scope === "*" ? "" : scope);
         if (!cancelled && Array.isArray(palette) && palette.length) setBoxPalette({ key: `${objectId}|${scope}`, entries: palette });
       } catch { /* player not reachable yet */ }
@@ -1190,7 +1206,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       let relatives = { strokes: [] as string[], shadows: [] as string[] };
       if (effects?.stroke || effects?.shadow) {
         try {
-          const player = frameAccessRef.current?.(colourItem.id)?.contentWindow as (Window & { cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[] } }) | null | undefined;
+          const player = colourFrameOf(colourItem.id)?.contentWindow as (Window & { cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[] } }) | null | undefined;
           relatives = player?.cbColorRelatives?.(original, boxScope === "*" ? "" : boxScope) || relatives;
         } catch { /* player not reachable: the colour alone */ }
       }
@@ -1220,7 +1236,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       setBoxPicks((previous) => ({ ...(previous?.objectId === swappedId && previous.scope === boxScope ? previous : {}), objectId: swappedId, scope: boxScope, [activeBox]: swapped.original }));
       return;
     }
-    const frame = frameAccessRef.current?.(colourItem.id);
+    const frame = colourFrameOf(colourItem.id);
     const rect = frame?.getBoundingClientRect();
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
     try {
@@ -1267,7 +1283,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         showNotice(`${activeBox === "fill" ? "Fill" : "Stroke"} box: ${swapped.original}. Fill/Stroke (<) changes it.`);
         return;
       }
-      const frame = frameAccessRef.current?.(character.id);
+      const frame = colourFrameOf(character.id);
       const rect = frame?.getBoundingClientRect();
       if (frame && rect && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
         try {
@@ -1323,7 +1339,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       base[item.id] = { colorReplacements: item.colorReplacements?.map((rule) => ({ ...rule })), fillColor: item.fillColor, textStrokeColor: item.textStrokeColor, textShadowColor: item.textShadowColor };
       if (item.type !== "character") continue;
       try {
-        const list = (frameAccessRef.current?.(item.id)?.contentWindow as (Window & { cbColorPalette?: (scope: string) => AdjustState["palettes"][string]["entries"] }) | null | undefined)?.cbColorPalette?.(scope === "*" ? "" : scope);
+        const list = (colourFrameOf(item.id)?.contentWindow as (Window & { cbColorPalette?: (scope: string) => AdjustState["palettes"][string]["entries"] }) | null | undefined)?.cbColorPalette?.(scope === "*" ? "" : scope);
         // Swapped-in parts are drawn by their own players: their colours join the palette (whole character), or are the palette (that part).
         const swapEntries: NonNullable<typeof list> = [];
         for (const frame of Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe.cb-part-replacement-source-frame"))) {
@@ -6042,6 +6058,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onCharacterPartDoubleClick={handleCharacterPartDoubleClick}
               characterPartEntered={selected?.type === "character" && Boolean(activeCharacterPart) && partReplacementBrowserOpen}
               frameAccessRef={frameAccessRef}
+              colourFrameAccessRef={colourFrameAccessRef}
               viewCenterRef={viewCenterRef}
               layerGeometryRef={layerGeometryRef}
               blockDoubleClick={stageColourTool || boxPicking || Boolean(frPicking)}

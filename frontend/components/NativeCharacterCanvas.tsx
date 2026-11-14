@@ -20,12 +20,14 @@ const pending = (delta: number) => {
   w.__CBS_NATIVE_PENDING__ = Math.max(0, (w.__CBS_NATIVE_PENDING__ || 0) + delta);
 };
 
-export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCanvas, onReady, playerFrame, playerReady, savedFit }: {
+export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCanvas, onHandle, onReady, playerFrame, playerReady, savedFit }: {
   object: EditorObject;
   /** Source time to show, in ms (the same number the player is sent). */
   seekMs: number;
   hueFilter?: string;
   onCanvas?: (id: string, canvas: HTMLCanvasElement | null) => void;
+  /** The drawing itself once it is ready: the colour tools ask it for colours (what the Animate player's colour finder does for a player). */
+  onHandle?: (id: string, handle: NativeCharacter | null) => void;
   /** Told when the native drawing is ready to replace the player's. */
   onReady?: (id: string, ready: boolean) => void;
   /** The character's Animate player: the pose is placed exactly where the player placed it. */
@@ -54,6 +56,10 @@ export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCan
     onReady?.(object.id, Boolean(character));
     return () => onReady?.(object.id, false);
   }, [character, object.id, onReady]);
+  useEffect(() => {
+    onHandle?.(object.id, character);
+    return () => onHandle?.(object.id, null);
+  }, [character, object.id, onHandle]);
   useEffect(() => {
     onCanvas?.(object.id, canvas.current);
     return () => onCanvas?.(object.id, null);

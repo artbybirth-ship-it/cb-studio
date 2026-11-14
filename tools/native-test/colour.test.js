@@ -41,13 +41,22 @@ const gr = c.recolourFill(grad, exact, false);
 assert.deepEqual(gr.stops, [[0, "#00ff00", 1], [1, "#0000ff", 1]]);
 assert.equal(grad.stops[0][1], "#ff0000", "input not changed");
 
-// scope: whole-character rules, and rules for the part a shape is inside
+// scope: whole-character rules, part rules (a/b), and pose-part rules (@Class/name+name)
+const T = (...p) => p.map(([cls, name]) => ({ cls, name }));
 const scoped = rules([{ from: "#ff0000", to: "#111111", scope: "head" }, { from: "#ff0000", to: "#222222", scope: "*" }]);
-assert.equal(c.rulesAt(scoped, "").length, 1, "outside any part only the whole-character rule");
-assert.equal(c.rulesAt(scoped, "body/head").length, 1, "a part name that is not at the start does not match");
-assert.equal(c.rulesAt(scoped, "head").length, 2);
-assert.equal(c.rulesAt(scoped, "head/eye").length, 2, "inside a part's children");
-assert.equal(c.recolourFill(red, c.rulesAt(scoped, "head"), false).color, "#111111", "the part's own rule wins over the whole-character one");
+assert.equal(c.rulesAt(scoped, []).length, 1, "outside any part only the whole-character rule");
+assert.equal(c.rulesAt(scoped, T(["P", "body"], ["body", "head"])).length, 1, "a part name that is not at the start does not match");
+assert.equal(c.rulesAt(scoped, T(["P", "head"])).length, 2);
+assert.equal(c.rulesAt(scoped, T(["P", "head"], ["head", "eye"])).length, 2, "inside a part's children");
+assert.equal(c.recolourFill(red, c.rulesAt(scoped, T(["P", "head"])), false).color, "#111111", "the part's own rule wins over the whole-character one");
+const pose = rules([{ from: "#ff0000", to: "#333333", scope: "@Sardar_01/cbnew1+instance_9" }]);
+assert.equal(c.rulesAt(pose, T(["Sardar_01", "cbnew1"])).length, 1, "a pose part: that class, that name");
+assert.equal(c.rulesAt(pose, T(["Sardar_01", "instance_9"], ["Symbol_4", "x"])).length, 1, "several names; inside it too");
+assert.equal(c.rulesAt(pose, T(["Other", "cbnew1"])).length, 0, "the same name in another symbol is another part");
+assert.equal(c.rulesAt(pose, T(["Sardar_01", "instance_3"])).length, 0, "another instance");
+assert.equal(c.rulesAt(pose, T(["Sardar_01", ""])).length, 0, "unnamed instances never match");
+assert.equal(c.classOf("Pasted from X/Sardar 01"), "Sardar_01");
+assert.equal(c.classOf("Sardar 01"), "Sardar_01");
 
 // junk is ignored
 assert.deepEqual(rules([{ from: "nope", to: "#fff" }, { from: "#fff", to: "x" }]), []);

@@ -3,13 +3,15 @@
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 out=$(mktemp -d)
-(cd "$here/../../frontend" && npx tsc lib/native/ops.ts lib/native/shapeTween.ts lib/native/library.ts lib/native/colour.ts --outDir "$out" --module commonjs --target es2020 --skipLibCheck --moduleResolution node)
+(cd "$here/../../frontend" && npx tsc lib/native/ops.ts lib/native/shapeTween.ts lib/native/library.ts lib/native/colour.ts lib/native/names.ts --outDir "$out" --module commonjs --target es2020 --skipLibCheck --moduleResolution node)
 cp "$here/ops.test.js" "$out/test.js"
 node "$out/test.js"
 cp "$here/library.test.js" "$out/library.test.js"
 node "$out/library.test.js"
 cp "$here/colour.test.js" "$out/colour.test.js"
 node "$out/colour.test.js"
+cp "$here/names.test.js" "$out/names.test.js"
+node "$out/names.test.js"
 
 # tweens made in the editor: the layer's keyframe helpers, and the player-side code that makes them play
 (cd "$here/../../frontend" && npx tsc lib/symbolKeys.ts --outDir "$out" --module commonjs --target es2020 --skipLibCheck --moduleResolution node --jsx preserve --baseUrl . --paths null >/dev/null 2>&1 || true)

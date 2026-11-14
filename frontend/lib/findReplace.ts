@@ -102,13 +102,16 @@ export function applyToEditorData(data: EditorData, request: FindRequest, option
 }
 
 // ---- Which characters use a colour: their Animate export's script contains it (all poses).
-const scriptCache = new Map<string, Promise<string>>();
-const exportScript = async (character: Html5CharacterLibraryCharacter) => {
+const scriptCache = new Map<string, Promise<string | null>>();
+/** Why a colour file could not be checked, for the "No matches" message. */
+export const unreadableScripts = new Set<string>();
+const exportScript = async (character: Html5CharacterLibraryCharacter): Promise<string | null> => {
   const source = await exportSourceOf(character);
-  if (!source) return "";
+  if (!source) return null;
   let pending = scriptCache.get(source.js);
   if (!pending) {
-    pending = fetch(encodeURI(source.js)).then((response) => (response.ok ? response.text() : "")).then((text) => text.toLowerCase()).catch(() => "");
+    // A download that failed is not remembered: the next search tries again (the page may have been loaded while the media server was unreachable).
+    pending = fetch(encodeURI(source.js)).then((response) => (response.ok ? response.text() : Promise.reject(new Error(String(response.status))))).then((text) => text.toLowerCase()).catch(() => { scriptCache.delete(source.js); unreadableScripts.add(source.js); return null; });
     scriptCache.set(source.js, pending);
   }
   return pending;
@@ -117,12 +120,12 @@ const colourForms = (hex: string) => {
   const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
   return [hex, `rgba(${r},${g},${b},`, `rgba(${r}, ${g}, ${b},`];
 };
-const scriptTextOf = (js: string) => {
+const scriptTextOf = (js: string): Promise<string | null> => {
   let pending = scriptCache.get(js);
   if (!pending) {
     let url = js;
     try { url = encodeURI(decodeURI(new URL(js, window.location.href).pathname)); } catch { /* used as given */ }
-    pending = fetch(url).then((response) => (response.ok ? response.text() : "")).then((text) => text.toLowerCase()).catch(() => "");
+    pending = fetch(url).then((response) => (response.ok ? response.text() : Promise.reject(new Error(String(response.status))))).then((text) => text.toLowerCase()).catch(() => { scriptCache.delete(js); unreadableScripts.add(js); return null; });
     scriptCache.set(js, pending);
   }
   return pending;
@@ -144,7 +147,8 @@ export async function objectsUsingColourInSwaps(objects: EditorObject[], hex: st
   await Promise.all(objects.map(async (object) => {
     for (const js of swappedScriptsOf(object)) {
       const text = await scriptTextOf(js);
-      if (forms.some((form) => text.includes(form))) { found.add(object.id); return; }
+      // A part file that could not be read cannot rule the colour out: the rule is added (it does nothing where the colour is not).
+      if (text === null || forms.some((form) => text.includes(form))) { found.add(object.id); return; }
     }
   }));
   return found;
@@ -158,7 +162,7 @@ export async function charactersUsingColour(library: Html5CharacterLibraryCharac
     const character = library.find((item) => item.id === id);
     if (!character) return;
     const text = await exportScript(character);
-    if (forms.some((form) => text.includes(form))) found.add(id);
+    if (text === null || forms.some((form) => text.includes(form))) found.add(id);
   }));
   return found;
 }

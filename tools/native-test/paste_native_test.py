@@ -77,7 +77,7 @@ try:
             click("[data-testid=native-cancel]"); time.sleep(1)
         return False
     def layer_names():
-        return js("[...document.querySelectorAll('[data-layer]')].map(e=>e.previousElementSibling.textContent)")
+        return js("[...document.querySelectorAll('[data-layer]')].map(e=>e.previousElementSibling.querySelector('span').textContent)")
     keys = lambda layer: js("[...document.querySelectorAll('[data-key^=\"%d:\"]')].map(e=>e.dataset.key.split(':')[1]*1).sort((a,b)=>a-b)" % layer)
     span = lambda layer, k: js("parseInt(document.querySelector('[data-key=\"%d:%d\"]').style.width)" % (layer, k))
     note = lambda: js("document.querySelector('[data-testid=note]').textContent")

@@ -9,8 +9,8 @@ import type { Fill, Stroke } from "../fla/xfl";
 
 /** What a rule needs from the editor's ColorReplacement. */
 export type ColourRule = { from: string; to: string; target?: "fill" | "stroke" | "both"; scope?: string; match?: "exact" | "shades" };
-type Rgba = { r: number; g: number; b: number; a: number };
-type Hsl = { h: number; s: number; l: number };
+export type Rgba = { r: number; g: number; b: number; a: number };
+export type Hsl = { h: number; s: number; l: number };
 export type PreparedRule = { target: "fill" | "stroke" | "both"; match: "exact" | "shades"; fromHex: string; fromHsl: Hsl; toRgb: Rgba; toHsl: Hsl; scope: string };
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
@@ -25,7 +25,7 @@ export function parseColour(value: string | undefined): Rgba | null {
   if (m) return { r: +m[1], g: +m[2], b: +m[3], a: m[4] == null ? 1 : +m[4] };
   return null;
 }
-const hexOf = (c: Rgba) => "#" + [c.r, c.g, c.b].map((v) => ("0" + Math.round(clamp(v, 0, 255)).toString(16)).slice(-2)).join("");
+export const hexOf = (c: Rgba) => "#" + [c.r, c.g, c.b].map((v) => ("0" + Math.round(clamp(v, 0, 255)).toString(16)).slice(-2)).join("");
 
 export function toHsl(c: Rgba): Hsl {
   const r = c.r / 255, g = c.g / 255, b = c.b / 255, max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, d = max - min;
@@ -44,7 +44,7 @@ export function fromHsl(h0: number, s0: number, l0: number, a: number): Rgba {
   if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; } else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; } else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
   return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255, a };
 }
-function sameFamily(a: Hsl, b: Hsl) {
+export function sameFamily(a: Hsl, b: Hsl) {
   if (Math.abs(a.l - b.l) > 0.22) return false;
   if (a.s < 0.12 && b.s < 0.12) return true;
   if (a.s < 0.12 || b.s < 0.12) return false;
@@ -62,10 +62,28 @@ export function prepareRules(list: ColourRule[] | undefined): PreparedRule[] {
   return [...rules.filter((r) => r.scope === "*"), ...rules.filter((r) => r.scope !== "*")];
 }
 
-/** The rules that apply to a shape drawn inside the instances named `path` (outermost first): whole-character rules, and rules of any part the shape is inside. */
-export function rulesAt(rules: PreparedRule[], path: string): PreparedRule[] {
-  return rules.filter((r) => r.scope === "*" || path === r.scope || path.startsWith(r.scope + "/"));
+/** Where a shape is being drawn: the instances it is inside, outermost first. cls is the Animate class of the symbol the instance sits in; name is the instance's name ("" when it has none). */
+export type Trail = Array<{ cls: string; name: string }>;
+/** The Animate class a library item is published under: its own name with spaces and punctuation as "_" ("Sardar 01" → "Sardar_01"). */
+export const classOf = (item: string) => (item.split("/").pop() || item).replace(/[^A-Za-z0-9_$]/g, "_");
+
+/**
+ * The rules that apply to a shape drawn at `trail`. "*" is the whole character; "a/b" is the part
+ * reached through instances named a, then b (rules for a part cover what is inside it); "@Class/n1+n2"
+ * is a pose part made in the editor's pose view: the instances named n1 or n2 inside the symbol of that class.
+ */
+export function scopeMatches(scope: string, trail: Trail): boolean {
+  if (!scope || scope === "*") return true;
+  if (scope.charAt(0) === "@") {
+    const cut = scope.indexOf("/");
+    if (cut < 0) return false;
+    const cls = scope.slice(1, cut), names = scope.slice(cut + 1).split("+");
+    return trail.some((t) => t.cls === cls && t.name && names.includes(t.name));
+  }
+  const path = trail.map((t) => t.name).filter(Boolean).join("/");
+  return path === scope || path.startsWith(scope + "/");
 }
+export const rulesAt = (rules: PreparedRule[], trail: Trail): PreparedRule[] => rules.filter((r) => scopeMatches(r.scope, trail));
 
 /** One colour through the rules: an exact match wins over a shades match; null when no rule touches it. */
 export function mapColour(c: Rgba, rules: PreparedRule[], isStroke: boolean): Rgba | null {

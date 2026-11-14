@@ -17,6 +17,7 @@ exports.createNativeCharacter = createNativeCharacter;
 const loadDoc_1 = require("lib/native/loadDoc");
 const library_1 = require("lib/native/library");
 const render_1 = require("lib/native/render");
+const colour_1 = require("lib/native/colour");
 const resolve_1 = require("lib/native/resolve");
 exports.BOX_W = 720, exports.BOX_H = 960;
 const fitCache = new Map();
@@ -65,6 +66,9 @@ function createNativeCharacter(object) {
     let state = null;
     const edits = Object.values(object.nativePose || {});
     let rulesNow = object.colorReplacements;
+    /** Where the last draw put the pose: the frame and placement the colour finder looks at. */
+    let last = null;
+    const huesOf = (style) => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [(0, colour_1.hexOf)((0, colour_1.parseColour)(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
     return {
         get ready() { return Boolean(state); },
         setColourRules(rules) { rulesNow = rules; state?.renderer.setColourRules(rules); },
@@ -78,6 +82,12 @@ function createNativeCharacter(object) {
             // This character's own renderer over the shared document: its edits are laid over the pose, other placed characters keep theirs.
             const renderer = new render_1.NativeRenderer(loaded.doc, loaded.renderer.assets);
             await renderer.loadBrushes();
+            for (const [cls, edit] of Object.entries(object.nativePose || {})) {
+                const keys = Object.keys(edit.symbols);
+                const item = edit.pose ?? (keys.includes(source.item) ? source.item : keys[0]);
+                if (item)
+                    renderer.classes.set(item, cls);
+            }
             renderer.setColourRules(rulesNow);
             for (const edit of edits)
                 for (const [name, timeline] of Object.entries(edit.symbols))
@@ -108,6 +118,85 @@ function createNativeCharacter(object) {
             const fit = fitOverride || fitOf(`${source.flaUrl}|${source.item}`, loaded, source.item);
             ctx.setTransform(fit.s * scale, 0, 0, fit.s * scale, fit.tx * scale, fit.ty * scale);
             renderer.drawSymbol(ctx, source.item, frame);
+            last = { frame, fit };
+        },
+        colourAt(x, y, scope) {
+            if (!state || !last)
+                return null;
+            const { source, renderer } = state, { frame, fit } = last;
+            const ctx = new OffscreenCanvas(1, 1).getContext("2d");
+            // The pose's own placement, shifted so the asked-for point of the box lands on the middle of the one pixel.
+            ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - x * exports.BOX_W + 0.5, fit.ty - y * exports.BOX_H + 0.5);
+            const hit = renderer.hitAt(ctx, source.item, frame, 0.5, 0.5, scope);
+            if (!hit)
+                return null;
+            return { picked: renderer.shownColour(hit.color, hit.stroke, hit.trail), original: (0, colour_1.hexOf)((0, colour_1.parseColour)(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }) };
+        },
+        palette(scope) {
+            if (!state)
+                return [];
+            const found = new Map();
+            state.renderer.eachShape(state.source.item, scope, (shape, trail) => {
+                const note = (style, stroke) => {
+                    for (const hex of huesOf(style)) {
+                        const entry = found.get(hex) ?? found.set(hex, { color: hex, current: state.renderer.shownColour(hex, stroke, trail), fills: 0, strokes: 0 }).get(hex);
+                        if (stroke)
+                            entry.strokes += 1;
+                        else
+                            entry.fills += 1;
+                        const now = state.renderer.shownColour(hex, stroke, trail);
+                        if (now !== hex)
+                            entry.current = now;
+                    }
+                };
+                shape.fills.forEach((f) => note(f.style, false));
+                shape.strokes.forEach((s) => note(s.style.fill, true));
+            });
+            return [...found.values()].sort((a, b) => b.fills + b.strokes - (a.fills + a.strokes)).slice(0, 80);
+        },
+        relatives(hexIn, scope) {
+            const none = { strokes: [], shadows: [] };
+            const base = (0, colour_1.parseColour)(hexIn);
+            if (!state || !base)
+                return none;
+            const baseHex = (0, colour_1.hexOf)(base), baseHsl = (0, colour_1.toHsl)(base);
+            const strokes = new Set(), shadows = new Set(), ownersWithBase = new Set(), linesByOwner = new Map();
+            // An outline of this colour: darker, and its hue (or grey / black), not a neighbour's outline drawn in the same shape.
+            const outlineOf = (h) => {
+                if (h === baseHex)
+                    return false;
+                const c = (0, colour_1.toHsl)((0, colour_1.parseColour)(h));
+                if (c.l >= baseHsl.l)
+                    return false;
+                if (c.s < 0.08 || baseHsl.s < 0.12)
+                    return true;
+                const dh = Math.abs(c.h - baseHsl.h);
+                return Math.min(dh, 360 - dh) <= 30;
+            };
+            state.renderer.eachShape(state.source.item, scope, (shape, _trail, owner) => {
+                const fills = shape.fills.flatMap((f) => huesOf(f.style)), lines = shape.strokes.flatMap((s) => huesOf(s.style.fill));
+                if (fills.includes(baseHex)) {
+                    ownersWithBase.add(owner);
+                    lines.forEach((h) => { if (outlineOf(h))
+                        strokes.add(h); });
+                }
+                const own = linesByOwner.get(owner) ?? linesByOwner.set(owner, new Set()).get(owner);
+                lines.forEach((h) => own.add(h));
+                for (const h of fills) {
+                    if (h === baseHex || shadows.has(h))
+                        continue;
+                    const hsl = (0, colour_1.toHsl)((0, colour_1.parseColour)(h));
+                    if (hsl.l < baseHsl.l - 0.01 && (0, colour_1.sameFamily)(hsl, baseHsl))
+                        shadows.add(h);
+                }
+            });
+            // Outlines drawn as shapes of their own: those of the symbols that hold the colour.
+            if (!strokes.size)
+                for (const owner of ownersWithBase)
+                    for (const h of linesByOwner.get(owner) ?? [])
+                        if (outlineOf(h))
+                            strokes.add(h);
+            return { strokes: [...strokes], shadows: [...shadows] };
         },
     };
 }
@@ -777,9 +866,14 @@ async function decodeBitmap(data) {
 defs["lib/native/render"] = function (exports, require) {
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.NativeRenderer = void 0;
+exports.NativeRenderer = exports.styleColour = void 0;
 const colour_1 = require("lib/native/colour");
+const names_1 = require("lib/native/names");
+const colour_2 = require("lib/native/colour");
 const evaluate_1 = require("lib/native/evaluate");
+/** The colour a fill stands for when picking it: the colour of a solid, the first stop of a gradient; nothing when it is see-through. */
+const styleColour = (style) => (style.t === "solid" ? (style.alpha >= 0.05 ? style.color : null) : (style.stops.find((s) => s[2] >= 0.05)?.[1] ?? null));
+exports.styleColour = styleColour;
 const GRADIENT_HALF = 819.2;
 const CAPS = { none: "butt", round: "round", square: "square" };
 const rgba = (color, alpha) => {
@@ -843,6 +937,18 @@ function strokeSetup(ctx, s, width = s.w) {
 }
 const lastPoint = (cmds) => { const c = cmds[cmds.length - 1]; return [c[c.length - 2], c[c.length - 1]]; };
 class NativeRenderer {
+    /** The names the player gives the unnamed instances of a library symbol, from the file's own timeline. */
+    namesOf(item) {
+        let names = this.originalNames.get(item);
+        if (!names) {
+            const original = this.doc.symbols.get(item)?.timeline;
+            if (!original)
+                return undefined;
+            names = (0, names_1.autoNames)(original);
+            this.originalNames.set(item, names);
+        }
+        return names;
+    }
     constructor(doc, assets) {
         this.doc = doc;
         this.assets = assets;
@@ -854,11 +960,106 @@ class NativeRenderer {
         this.styleCache = new WeakMap();
         /** The character's colour rules, applied to every shape as it is drawn (originals are never changed, so rules never chain). */
         this.rules = [];
-        /** Names of the instances being drawn, outermost first: what part-scoped colour rules are matched against. */
+        /** The instances being drawn, outermost first, and the symbols they sit in: what part-scoped colour rules are matched against. */
         this.trail = [];
+        this.inside = [];
+        this.originalNames = new Map();
+        /** While set, drawing tests shapes against one point instead of painting (see hitAt). */
+        this.probe = null;
+        /** Library items whose Animate class is not their own name (a pose called "Symbol 1" that the player knows as "Sardar_01"). */
+        this.classes = new Map();
     }
-    setColourRules(list) { this.rules = (0, colour_1.prepareRules)(list); }
-    rulesHere() { return this.rules.length ? (0, colour_1.rulesAt)(this.rules, this.trail.join("/")) : this.rules; }
+    probeTest(ctx, path, style, stroke, rule) {
+        const probe = this.probe;
+        if (!probe)
+            return;
+        const color = (0, exports.styleColour)(style);
+        if (!color)
+            return;
+        const inside = stroke ? ctx.isPointInStroke(path, probe.x, probe.y) : ctx.isPointInPath(path, probe.x, probe.y, rule || "nonzero");
+        if (inside && (0, colour_2.scopeMatches)(probe.scope, this.trail))
+            probe.hit = { color, stroke, trail: this.trail.map((t) => ({ ...t })) };
+    }
+    /**
+     * The top-most shape under one point, as the Animate player's colour picker finds it: its original
+     * colour (the file's, before any colour rule), whether it was an outline, and where in the pose it
+     * sits. (x, y) is a device point of `ctx`, whose transform places the pose. Masks are not applied.
+     */
+    hitAt(ctx, item, frame, x, y, scope) {
+        this.probe = { x, y, scope, hit: null };
+        try {
+            this.drawSymbol(ctx, item, frame);
+            return this.probe.hit;
+        }
+        finally {
+            this.probe = null;
+            this.trail = [];
+            this.inside = [];
+        }
+    }
+    /** Every shape of the pose (all frames, every symbol inside it), once each, with where it sits when `scope` names a part; the whole character when scope is empty. */
+    eachShape(item, scope, fn) {
+        if (!scope) {
+            const seenItems = new Set(), seenShapes = new Set();
+            const visit = (name) => {
+                if (seenItems.has(name))
+                    return;
+                seenItems.add(name);
+                for (const layer of this.timelineOf(name)?.layers ?? [])
+                    for (const key of layer.frames)
+                        for (const el of key.elements) {
+                            if (el.k === "shape") {
+                                if (!seenShapes.has(el)) {
+                                    seenShapes.add(el);
+                                    fn(el, [], name);
+                                }
+                            }
+                            else if (el.k === "instance")
+                                visit(el.item);
+                        }
+            };
+            visit(item);
+            return;
+        }
+        let budget = 400000;
+        const trail = [];
+        const walk = (name, depth) => {
+            const timeline = this.timelineOf(name);
+            if (!timeline || depth > 14)
+                return;
+            const names = this.namesOf(name);
+            timeline.layers.forEach((layer, li) => {
+                if (layer.type === "folder" || layer.type === "guide")
+                    return;
+                const lkey = (0, names_1.layerKey)(timeline.layers, li);
+                for (const key of layer.frames)
+                    key.elements.forEach((el, e) => {
+                        if (budget-- < 0)
+                            return;
+                        if (el.k === "shape") {
+                            if ((0, colour_2.scopeMatches)(scope, trail))
+                                fn(el, trail, name);
+                            return;
+                        }
+                        if (el.k !== "instance")
+                            return;
+                        trail.push({ cls: this.classFor(name), name: el.name || (0, names_1.autoNameAt)(names, lkey, key.i, e) });
+                        walk(el.item, depth + 1);
+                        trail.pop();
+                    });
+            });
+        };
+        walk(item, 0);
+    }
+    /** The colour shown for an original colour at a place in the pose (the colour rules applied). */
+    shownColour(color, stroke, trail) {
+        const parsed = (0, colour_1.parseColour)(color);
+        const out = parsed && this.rules.length ? (0, colour_1.mapColour)(parsed, (0, colour_2.rulesAt)(this.rules, trail), stroke) : null;
+        return out ? (0, colour_1.hexOf)(out) : color;
+    }
+    setColourRules(list) { this.rules = (0, colour_2.prepareRules)(list); }
+    classFor(item) { return this.classes.get(item) ?? (0, colour_2.classOf)(item); }
+    rulesHere() { return this.rules.length ? (0, colour_2.rulesAt)(this.rules, this.trail) : this.rules; }
     /** Art-brush pictures must be decoded before the first draw that uses them. */
     async loadBrushes(brushes = this.doc.brushes) {
         await Promise.all(Object.entries(brushes).map(([id, brush]) => new Promise((done) => {
@@ -878,7 +1079,9 @@ class NativeRenderer {
             this.stats.missing.add(item);
             return;
         }
+        this.inside.push(item);
         this.drawTimeline(ctx, timeline, frame);
+        this.inside.pop();
     }
     drawBrush(ctx, style, x0, y0, x1, y1) {
         const img = style.brush ? this.brushImages.get(style.brush) : undefined;
@@ -901,12 +1104,20 @@ class NativeRenderer {
             cached = { fills: build(el.fills), strokes: build(el.strokes) };
             this.pathCache.set(el, cached);
         }
+        if (this.probe) {
+            ctx.save();
+            ctx.transform(...el.m);
+            el.fills.forEach((f, i) => this.probeTest(ctx, cached.fills[i], f.style, false, "evenodd"));
+            el.strokes.forEach((s, i) => { strokeSetup(ctx, s.style); this.probeTest(ctx, cached.strokes[i], s.style.fill, true); });
+            ctx.restore();
+            return;
+        }
         const rules = this.rulesHere();
         ctx.save();
         ctx.transform(...el.m);
-        el.fills.forEach((f, i) => paint(ctx, (0, colour_1.recolourFill)(f.style, rules, false), cached.fills[i], "evenodd"));
+        el.fills.forEach((f, i) => paint(ctx, (0, colour_2.recolourFill)(f.style, rules, false), cached.fills[i], "evenodd"));
         el.strokes.forEach((s0, i) => {
-            const s = { ...s0, style: (0, colour_1.recolourStroke)(s0.style, rules) };
+            const s = { ...s0, style: (0, colour_2.recolourStroke)(s0.style, rules) };
             if (s.style.brush && s.paths.every((c) => this.drawBrush(ctx, s.style, c[0][1], c[0][2], ...lastPoint(c))))
                 return;
             strokeSetup(ctx, s.style);
@@ -947,8 +1158,20 @@ class NativeRenderer {
         }
         for (const { seg, path, ends } of groups.values()) {
             const fa = A.fills[seg.f1], fb = B.fills[seg.f2] || fa;
+            if (this.probe) {
+                if (fa)
+                    this.probeTest(ctx, path, mixFill(fa, fb, t), false, "evenodd");
+                else {
+                    const sa = A.strokes[seg.s1];
+                    if (sa) {
+                        strokeSetup(ctx, sa);
+                        this.probeTest(ctx, path, sa.fill, true);
+                    }
+                }
+                continue;
+            }
             if (fa) {
-                paint(ctx, (0, colour_1.recolourFill)(mixFill(fa, fb, t), rules, false), path, "evenodd");
+                paint(ctx, (0, colour_2.recolourFill)(mixFill(fa, fb, t), rules, false), path, "evenodd");
                 continue;
             }
             const sa = A.strokes[seg.s1], sb = B.strokes[seg.s2] || sa;
@@ -957,16 +1180,18 @@ class NativeRenderer {
             if (sa.brush && ends.every((e) => this.drawBrush(ctx, sa, ...e)))
                 continue;
             strokeSetup(ctx, sa, (0, evaluate_1.lerp)(sa.w, sb.w, t));
-            paint(ctx, (0, colour_1.recolourFill)(mixFill(sa.fill, sb.fill, t), rules, true), path, null, true);
+            paint(ctx, (0, colour_2.recolourFill)(mixFill(sa.fill, sb.fill, t), rules, true), path, null, true);
         }
         this.stats.morphs += 1;
     }
-    drawElement(ctx, el, offset, override) {
+    drawElement(ctx, el, offset, override, autoName = "") {
         if (el.k === "shape") {
             this.drawShape(ctx, el);
             return;
         }
         if (el.k === "bitmap") {
+            if (this.probe)
+                return;
             const image = this.assets.images.get(el.item);
             if (!image) {
                 this.stats.missing.add(el.item);
@@ -989,14 +1214,18 @@ class NativeRenderer {
         const alpha = override?.alpha ?? el.alpha;
         if (alpha != null)
             ctx.globalAlpha *= alpha;
-        if (el.name)
-            this.trail.push(el.name);
+        if (this.probe && alpha === 0) {
+            ctx.restore();
+            return;
+        }
+        this.trail.push({ cls: this.classFor(this.inside[this.inside.length - 1] || ""), name: el.name || autoName || "" });
+        this.inside.push(el.item);
         this.drawTimeline(ctx, timeline, (0, evaluate_1.innerFrame)(el, offset, timeline.length));
-        if (el.name)
-            this.trail.pop();
+        this.inside.pop();
+        this.trail.pop();
         ctx.restore();
     }
-    drawLayer(ctx, layer, frame, length) {
+    drawLayer(ctx, layer, frame, length, lkey = "") {
         if (layer.off)
             return;
         // The playhead loops: past the end the layer shows frame % length. A keyframe that holds the
@@ -1007,6 +1236,9 @@ class NativeRenderer {
         const { key, next } = state;
         const offset = key.i === 0 && key.d >= length && !next ? frame - key.i : state.offset;
         const t = (0, evaluate_1.tweenProgress)(state);
+        // What the player calls each unnamed instance, for part-scoped colour rules (only worked out when there are rules).
+        const names = this.rules.length && lkey ? this.namesOf(this.inside[this.inside.length - 1]) : undefined;
+        const auto = (e) => (names ? (0, names_1.autoNameAt)(names, lkey, key.i, e) : "");
         if (t != null && next) {
             if (key.tween === "shape" && key.morph) {
                 this.drawMorph(ctx, key, next, t);
@@ -1017,15 +1249,15 @@ class NativeRenderer {
                 key.elements.forEach((el, i) => {
                     const end = next.elements[i];
                     if (el.k === "instance" && end?.k === "instance") {
-                        this.drawElement(ctx, el, offset, { m: (0, evaluate_1.tweenMatrix)(el.m, end.m, el.pivot, t, key.rotate), alpha: (0, evaluate_1.lerp)(el.alpha ?? 1, end.alpha ?? 1, t) });
+                        this.drawElement(ctx, el, offset, { m: (0, evaluate_1.tweenMatrix)(el.m, end.m, el.pivot, t, key.rotate), alpha: (0, evaluate_1.lerp)(el.alpha ?? 1, end.alpha ?? 1, t) }, auto(i));
                     }
                     else
-                        this.drawElement(ctx, el, offset);
+                        this.drawElement(ctx, el, offset, undefined, auto(i));
                 });
                 return;
             }
         }
-        key.elements.forEach((el) => this.drawElement(ctx, el, offset));
+        key.elements.forEach((el, e) => this.drawElement(ctx, el, offset, undefined, auto(e)));
     }
     drawTimeline(ctx, timeline, frame) {
         const layers = timeline.layers;
@@ -1036,7 +1268,7 @@ class NativeRenderer {
                 continue;
             const maskIndex = layer.type === "mask" ? i : layer.parent != null && layers[layer.parent]?.type === "mask" ? layer.parent : null;
             if (maskIndex == null) {
-                this.drawLayer(ctx, layer, frame, timeline.length);
+                this.drawLayer(ctx, layer, frame, timeline.length, (0, names_1.layerKey)(layers, i));
                 continue;
             }
             // Masked group: the content layers, then keep only what the mask layer covers.
@@ -1054,8 +1286,11 @@ class NativeRenderer {
             cc.setTransform(ctx.getTransform());
             mc.setTransform(ctx.getTransform());
             cc.globalAlpha = ctx.globalAlpha;
-            kids.forEach((j) => this.drawLayer(cc, layers[j], frame, timeline.length));
-            this.drawLayer(mc, layers[maskIndex], frame, timeline.length);
+            kids.forEach((j) => this.drawLayer(cc, layers[j], frame, timeline.length, (0, names_1.layerKey)(layers, j)));
+            const keep = this.probe;
+            this.probe = null;
+            this.drawLayer(mc, layers[maskIndex], frame, timeline.length, (0, names_1.layerKey)(layers, maskIndex));
+            this.probe = keep;
             cc.setTransform(1, 0, 0, 1, 0, 0);
             cc.globalAlpha = 1;
             cc.globalCompositeOperation = "destination-in";
@@ -1074,12 +1309,13 @@ exports.NativeRenderer = NativeRenderer;
 defs["lib/native/colour"] = function (exports, require) {
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.recolourStroke = void 0;
+exports.recolourStroke = exports.rulesAt = exports.classOf = exports.hexOf = void 0;
 exports.parseColour = parseColour;
 exports.toHsl = toHsl;
 exports.fromHsl = fromHsl;
+exports.sameFamily = sameFamily;
 exports.prepareRules = prepareRules;
-exports.rulesAt = rulesAt;
+exports.scopeMatches = scopeMatches;
 exports.mapColour = mapColour;
 exports.recolourFill = recolourFill;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -1097,6 +1333,7 @@ function parseColour(value) {
     return null;
 }
 const hexOf = (c) => "#" + [c.r, c.g, c.b].map((v) => ("0" + Math.round(clamp(v, 0, 255)).toString(16)).slice(-2)).join("");
+exports.hexOf = hexOf;
 function toHsl(c) {
     const r = c.r / 255, g = c.g / 255, b = c.b / 255, max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, d = max - min;
     let h = 0, s = 0;
@@ -1154,18 +1391,37 @@ function prepareRules(list) {
         const from = parseColour(r.from), to = parseColour(r.to);
         if (!from || !to)
             return [];
-        return [{ target: r.target || "both", match: r.match === "shades" ? "shades" : "exact", fromHex: hexOf(from), fromHsl: toHsl(from), toRgb: to, toHsl: toHsl(to), scope: String(r.scope || "*") }];
+        return [{ target: r.target || "both", match: r.match === "shades" ? "shades" : "exact", fromHex: (0, exports.hexOf)(from), fromHsl: toHsl(from), toRgb: to, toHsl: toHsl(to), scope: String(r.scope || "*") }];
     });
     return [...rules.filter((r) => r.scope === "*"), ...rules.filter((r) => r.scope !== "*")];
 }
-/** The rules that apply to a shape drawn inside the instances named `path` (outermost first): whole-character rules, and rules of any part the shape is inside. */
-function rulesAt(rules, path) {
-    return rules.filter((r) => r.scope === "*" || path === r.scope || path.startsWith(r.scope + "/"));
+/** The Animate class a library item is published under: its own name with spaces and punctuation as "_" ("Sardar 01" → "Sardar_01"). */
+const classOf = (item) => (item.split("/").pop() || item).replace(/[^A-Za-z0-9_$]/g, "_");
+exports.classOf = classOf;
+/**
+ * The rules that apply to a shape drawn at `trail`. "*" is the whole character; "a/b" is the part
+ * reached through instances named a, then b (rules for a part cover what is inside it); "@Class/n1+n2"
+ * is a pose part made in the editor's pose view: the instances named n1 or n2 inside the symbol of that class.
+ */
+function scopeMatches(scope, trail) {
+    if (!scope || scope === "*")
+        return true;
+    if (scope.charAt(0) === "@") {
+        const cut = scope.indexOf("/");
+        if (cut < 0)
+            return false;
+        const cls = scope.slice(1, cut), names = scope.slice(cut + 1).split("+");
+        return trail.some((t) => t.cls === cls && t.name && names.includes(t.name));
+    }
+    const path = trail.map((t) => t.name).filter(Boolean).join("/");
+    return path === scope || path.startsWith(scope + "/");
 }
+const rulesAt = (rules, trail) => rules.filter((r) => scopeMatches(r.scope, trail));
+exports.rulesAt = rulesAt;
 /** One colour through the rules: an exact match wins over a shades match; null when no rule touches it. */
 function mapColour(c, rules, isStroke) {
     let exact = null, shade = null, hsl = null;
-    const hex = hexOf(c);
+    const hex = (0, exports.hexOf)(c);
     for (const r of rules) {
         if (r.target !== "both" && (r.target === "stroke") !== isStroke)
             continue;
@@ -1182,7 +1438,7 @@ function mapColour(c, rules, isStroke) {
     }
     return exact || shade;
 }
-const hexString = (c) => hexOf(c);
+const hexString = (c) => (0, exports.hexOf)(c);
 function recolourStop(color, alpha, rules, isStroke) {
     const parsed = parseColour(color);
     const out = parsed && mapColour({ ...parsed, a: alpha }, rules, isStroke);
@@ -1210,6 +1466,63 @@ const recolourStroke = (style, rules) => {
     return fill === style.fill ? style : { ...style, fill };
 };
 exports.recolourStroke = recolourStroke;
+
+};
+defs["lib/native/names"] = function (exports, require) {
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.layerKey = void 0;
+exports.autoNames = autoNames;
+exports.autoNameAt = autoNameAt;
+const nameOf = (count) => (count === 0 ? "instance" : `instance_${count}`);
+/** Layers are found by name and, for repeated names, by which one of them it is. */
+const layerKey = (layers, index) => {
+    let nth = 0;
+    for (let i = 0; i < index; i += 1)
+        if (layers[i].name === layers[index].name)
+            nth += 1;
+    return `${layers[index].name}\u0000${nth}`;
+};
+exports.layerKey = layerKey;
+function autoNames(timeline) {
+    const out = new Map();
+    let count = 0;
+    timeline.layers.forEach((layer, index) => {
+        if (layer.type === "folder")
+            return;
+        const rows = [];
+        let prev, prevKey;
+        for (const k of layer.frames) {
+            // The same symbol carrying on from the keyframe before (no gap) is the same instance.
+            const continues = !!prevKey && prevKey.i + prevKey.d === k.i;
+            const names = k.elements.map((el, e) => {
+                if (el.k !== "instance")
+                    return "";
+                const before = continues ? prevKey.elements[e] : undefined;
+                return before?.k === "instance" && before.item === el.item && prev?.names[e] ? prev.names[e] : nameOf(count++);
+            });
+            const row = { i: k.i, names };
+            rows.push(row);
+            prev = row;
+            prevKey = k;
+        }
+        out.set((0, exports.layerKey)(timeline.layers, index), rows);
+    });
+    return out;
+}
+/** The player's name for element `e` of the keyframe showing at `i` on a layer: the last original keyframe at or before it (an F6 copy is the same instance). */
+function autoNameAt(names, key, i, e) {
+    const rows = names?.get(key);
+    if (!rows)
+        return "";
+    let row;
+    for (const r of rows)
+        if (r.i <= i)
+            row = r;
+        else
+            break;
+    return row?.names[e] ?? "";
+}
 
 };
 defs["lib/native/evaluate"] = function (exports, require) {
