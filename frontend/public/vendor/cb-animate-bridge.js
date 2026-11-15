@@ -31,8 +31,14 @@
   var H = Math.max(1, Number(ds.height) || 1920);
   // Margin of the player's page around its own box (?pad=0.5: half a box on every side), so a part dragged out of the box still draws.
   // Every coordinate the editor sends or reads stays relative to the box itself (they just go below 0 / above 1); only the page is bigger.
-  var PAD = (function () { try { var v = Number(new URLSearchParams(window.location.search).get('pad')); return v > 0 ? Math.min(2, v) : 0; } catch (e) { return 0; } })();
-  var PADF = 1 + 2 * PAD;
+  // The margin is the editor's to switch: it sets data-pad on this player's frame (the frame is that much bigger than the box), so the
+  // bridge reads it from there every time it draws and always agrees with the frame's size. ?pad= is the fallback when not in a frame.
+  var PAD = 0, PADF = 1;
+  function syncPad() {
+    var v = 0;
+    try { var fe = window.frameElement; v = fe ? Number(fe.getAttribute('data-pad')) : Number(new URLSearchParams(window.location.search).get('pad')); } catch (e) { v = 0; }
+    PAD = v > 0 ? Math.min(2, v) : 0; PADF = 1 + 2 * PAD;
+  }
   var FPS = Math.max(1, Number(ds.fps) || 30);
   // The frames of a clip's own timeline where something changes at once: a layer starts or ends, or
   // a still keyframe moves (not the tiny pivot adjustment Animate writes between tweened keyframes).
@@ -1024,7 +1030,10 @@
   };
 
   // ---- Sharp rendering: draw the vectors at the on-screen resolution, visible region only.
+  // A resized canvas is empty until it is drawn: that draw is never held back (see holdDraw).
+  function drawNow(st) { var u = st.__cbRealUpdate || st.update; if (u) u.call(st); }
   function applyView() {
+    syncPad();
     var st = cbStage(), cv = cbCanvas();
     if (!st || !cv || !cbView) return;
     var cssW = Math.max(1, (window.innerWidth || document.documentElement.clientWidth || W) / PADF);
@@ -1060,7 +1069,7 @@
       s.width = (bw / q / cssW / PADF * 100) + '%'; s.height = (bh / q / cssH / PADF * 100) + '%';
       st.scaleX = cssW * q / W; st.scaleY = cssH * q / H;
       st.x = -x0; st.y = -y0;
-      if (st.update) st.update();
+      drawNow(st);
       return;
     }
     q *= shrink;
@@ -1074,7 +1083,7 @@
     s.width = (bw / (cssW * q) / PADF * 100) + '%'; s.height = (bh / (cssH * q) / PADF * 100) + '%';
     st.scaleX = cssW * q / W; st.scaleY = cssH * q / H;
     st.x = -v.x * cssW * q; st.y = -v.y * cssH * q;
-    if (st.update) st.update();
+    drawNow(st);
   }
 
   // ---- Tight artwork bounds (stage units), measured from a small offscreen render.
@@ -1230,6 +1239,7 @@
   // Full HD), which fires no resize: redraw on a ratio change, and check once a second as a backstop.
   var cbViewSig = '';
   function viewSig() {
+    syncPad();
     return [window.devicePixelRatio, window.innerWidth, window.innerHeight, cbMinStroke, cbSeal,
       cbView && [cbView.scale, cbView.x, cbView.y, cbView.width, cbView.height, cbView.exact].join(',')].join('|');
   }
@@ -1934,6 +1944,8 @@
   // for one picture (a flash while an ease or a keyframe is dragged), so the drawing waits for the SEEK (or 40 ms) and happens once.
   var cbHold = null;
   function holdDraw() {
+    // ?cbhold=0 in the editor's address turns the wait off (to tell whether it is behind a problem).
+    try { if (new URLSearchParams(window.parent.location.search).get('cbhold') === '0') return; } catch (e) {}
     var st = cbStage();
     if (!st || !st.update) return;
     if (!st.__cbHoldWrapped) {
@@ -1957,6 +1969,7 @@
     if (d.type === 'CHARACTER_EDITS') holdDraw();
     else if (cbHold && (d.type === 'SEEK' || d.type === 'PAUSE')) Promise.resolve().then(function () { if (d.type === 'SEEK') releaseDraw(); });
     if (d.type === 'SET_VIEW') {
+      syncPad();
       cbView = {
         scale: Number(d.pixelScale) || 1,
         x: clamp(Number(d.x) || 0, -PAD, 1 + PAD), y: clamp(Number(d.y) || 0, -PAD, 1 + PAD),

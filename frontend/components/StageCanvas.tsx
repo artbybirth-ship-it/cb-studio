@@ -1377,6 +1377,11 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     } catch { /* another origin */ }
     target.postMessage(message, "*");
   };
+  // The player's margin is only needed while stepped inside that character (parts can leave its box there). On the scene it keeps the plain box,
+  // so moving the character does not drag a frame four times the size around.
+  // ?cbpad=0 in the address turns the margin off (to tell whether it is behind a problem).
+  const padOff = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("cbpad") === "0";
+  const playerPadOf = (objectId: string) => (!padOff && symbolView && symbolView.objectId === objectId ? PLAYER_PAD : 0);
   const lastViewKeyRef = useRef<Map<string, string>>(new Map());
   const lastViewSentRef = useRef<Map<string, Record<string, unknown>>>(new Map());
   const postCharacterViews = useCallback(() => {
@@ -1440,13 +1445,13 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       const minStroke = screenDpr < 1.5 ? 1.5 : 1;
       // Seamless joins between touching pieces, as in Animate, on 1× screens (4K unchanged).
       const seal = screenDpr < 1.5 ? 0.5 : 0;
-      const key = `${pixelScale}|${view.x}|${view.y}|${view.width}|${view.height}|${exact}|${minStroke}|${seal}|${dpr}`;
+      const key = `${pixelScale}|${view.x}|${view.y}|${view.width}|${view.height}|${exact}|${minStroke}|${seal}|${dpr}|${pad}`;
       if (lastViewKeyRef.current.get(object.id) === key) continue;
       lastViewKeyRef.current.set(object.id, key);
       lastViewSentRef.current.set(object.id, { pixelScale, ...view, exact, minStroke, seal });
       sendToPlayerNow(frame, { source: "characterbazaarstudio-editor", type: "SET_VIEW", pixelScale, ...view, exact, minStroke, seal });
     }
-  }, [characterObjects, playhead, renderMode, useCssZoom, screenDpr]);
+  }, [characterObjects, playhead, renderMode, useCssZoom, screenDpr, symbolView?.objectId]);
   const postCharacterViewsRef = useRef(postCharacterViews);
   postCharacterViewsRef.current = postCharacterViews;
 
@@ -3566,14 +3571,14 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     else frameRefs.current.delete(object.id);
                   }}
                   data-animate-player="1"
-                  data-pad={PLAYER_PAD}
+                  data-pad={playerPadOf(object.id)}
                   title={`${object.name} ${object.actionName || "action"}`}
                   // Resolution comes from SET_VIEW messages, not the URL, so zooming never reloads the player.
-                  src={`${object.assetUrl}?autoplay=0&muted=1&interactive=1&embeddedMode=1&viewportWidth=${sourceWidth}&viewportHeight=${sourceHeight}&bridge=v93&pad=${PLAYER_PAD}`}
+                  src={`${object.assetUrl}?autoplay=0&muted=1&interactive=1&embeddedMode=1&viewportWidth=${sourceWidth}&viewportHeight=${sourceHeight}&bridge=v94`}
                   className="cb-character-source-frame"
                   style={{
                     // A margin of half a box on every side, so a part dragged out of the character's box still draws (the bridge's ?pad=).
-                    position: "absolute", left: `${-PLAYER_PAD * 100}%`, top: `${-PLAYER_PAD * 100}%`, width: `${(1 + 2 * PLAYER_PAD) * 100}%`, height: `${(1 + 2 * PLAYER_PAD) * 100}%`,
+                    ...(playerPadOf(object.id) > 0 ? { position: "absolute", left: `${-playerPadOf(object.id) * 100}%`, top: `${-playerPadOf(object.id) * 100}%`, width: `${(1 + 2 * playerPadOf(object.id)) * 100}%`, height: `${(1 + 2 * playerPadOf(object.id)) * 100}%` } : {}),
                     filter: `hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)`,
                     pointerEvents: "none",
                     transition: snapshotUrls[object.id] && !renderMode ? "none" : "opacity 180ms ease-out",

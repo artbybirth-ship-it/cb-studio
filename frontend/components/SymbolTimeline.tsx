@@ -459,6 +459,24 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
+  // Animate's < and > (, and .): the playhead steps one frame back / forward and stops there. Frames that are selected stay selected.
+  const stepRef = useRef({ frame, last, playing, onSeek, onPlay });
+  stepRef.current = { frame, last, playing, onSeek, onPlay };
+  useEffect(() => {
+    const onStep = (event: KeyboardEvent) => {
+      if (event.key !== "," && event.key !== ".") return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null, tag = target?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) return;
+      const now = stepRef.current;
+      event.preventDefault();
+      event.stopPropagation();
+      if (now.playing) now.onPlay();
+      now.onSeek(Math.max(0, Math.min(now.last, now.frame + (event.key === "," ? -1 : 1))));
+    };
+    window.addEventListener("keydown", onStep, true);
+    return () => window.removeEventListener("keydown", onStep, true);
+  }, []);
   useEffect(() => {
     if (!menu) return;
     const close = () => setMenu(null);

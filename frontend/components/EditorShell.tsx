@@ -4843,15 +4843,22 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (k < 0) { anchors = addAnchor(anchors, at) || anchors; k = keyframeAt(anchors, at); }
     if (k < 0) { showNotice("There is no room for a keyframe there."); return; }
     const next = anchors, fileFrame = anchors[k][0];
+    // Animate: the copy replaces the keyframe it lands on, tween and all. A keyframe that begins a tween there begins one again (when a keyframe
+    // follows it); one that holds makes the target hold, so a tween that was there stops.
+    const fromAnchors = anchorsOf(fromLayer), fromAt = fromAnchors.findIndex((anchor) => anchor[0] === fromFile);
+    const fromShown = fromAt >= 0 ? shownFrames(layers[fromLayer], fromAnchors, object.symbolKeys?.[level.js]?.[String(fromLayer)]).find((item) => item.anchor === fromAt) : undefined;
+    const sourceTween = Boolean(fromShown && (fromShown.tween === "classic" || fromShown.tween === "motion"));
+    const targetHasNext = k + 1 < anchors.length - 1;
     const writes: Array<(data: EditorData) => void> = [];
     symbolBatch.current = writes;
     try {
+      setSymbolTweens(toLayer, (now) => (sourceTween && targetHasNext ? (now.some((tween) => tween[0] === fileFrame) ? now : [...now, [fileFrame, 0] as Tween]) : now.filter((tween) => tween[0] !== fileFrame)));
       setSymbolKeys(toLayer, isUnchanged(layers[toLayer], next) ? null : next);
       if (Object.keys(values).length) setSymbolValue(toLayer, fileFrame, values);
       setSymbolBlanks(toLayer, (now) => (sourceBlank ? (now.includes(fileFrame) ? now : [...now, fileFrame]) : now.filter((file) => file !== fileFrame)));
     } finally { symbolBatch.current = null; }
     mutate((data) => { writes.forEach((write) => write(data)); });
-  }, [keysEditable, mutate, readKeyValues, setSymbolBlanks, setSymbolKeys, setSymbolValue, showNotice, symbolLevelNow, symbolObjectNow]);
+  }, [keysEditable, mutate, readKeyValues, setSymbolBlanks, setSymbolKeys, setSymbolTweens, setSymbolValue, showNotice, symbolLevelNow, symbolObjectNow]);
   // The picked keyframe's values as the file has them: the player reads them off its tween.
   const [keyValues, setKeyValues] = useState<{ layer: number; frame: number; values: Record<string, number> | null } | null>(null);
   const keyValuesAsk = useRef<{ layer: number; frame: number } | null>(null);
