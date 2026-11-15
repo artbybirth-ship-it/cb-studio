@@ -221,6 +221,18 @@ const characterBoxCss = (width: number, height: number) => ({
 });
 const SKEW_CURSOR_H = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26"><g stroke="#fff" stroke-width="3.2" stroke-linejoin="round"><path d="M5 9h12V5.5l6 4.5-6 4.5V11H5z"/><path d="M21 15H9v-3.5L3 16l6 4.5V17h12z"/></g><path d="M5 9h12V5.5l6 4.5-6 4.5V11H5z"/><path d="M21 15H9v-3.5L3 16l6 4.5V17h12z"/></svg>')}") 13 13, ew-resize`;
 const SKEW_CURSOR_V = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26"><g stroke="#fff" stroke-width="3.2" stroke-linejoin="round"><path d="M9 21V9H5.5L10 3l4.5 6H11v12z"/><path d="M15 5v12h-3.5l4.5 6 4.5-6H17V5z"/></g><path d="M9 21V9H5.5L10 3l4.5 6H11v12z"/><path d="M15 5v12h-3.5l4.5 6 4.5-6H17V5z"/></svg>')}") 13 13, ns-resize`;
+/** Margin of a character player's page around its own box (the bridge's ?pad=): parts dragged out of the box still draw. */
+const PLAYER_PAD = 0.5;
+type FrameLike = { getBoundingClientRect(): DOMRect; dataset?: DOMStringMap };
+/** The player's own box on screen (its frame without the margin): everything the bridge says is relative to this box. */
+const frameBox = (frame: FrameLike): DOMRect => {
+  const rect = frame.getBoundingClientRect();
+  const pad = Number(frame.dataset?.pad || 0);
+  if (!(pad > 0)) return rect;
+  const factor = 1 + 2 * pad, width = rect.width / factor, height = rect.height / factor;
+  return new DOMRect(rect.left + rect.width / 2 - width / 2, rect.top + rect.height / 2 - height / 2, width, height);
+};
+const frameBoxOf = (frame: FrameLike | null | undefined): DOMRect | undefined => (frame ? frameBox(frame) : undefined);
 /** A client (screen) point in a character player's own CSS px, undoing the element's
  *  rotate · skew · flip around its centre. null when the point is outside the player. */
 const playerPointFromClient = (frame: HTMLIFrameElement, rotation: number, skew: Skew, flipX: boolean, clientX: number, clientY: number) => {
@@ -667,7 +679,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   const requestCharacterPartAtPoint = useCallback((object: EditorObject, clientX: number, clientY: number, viaDoubleClick = false) => {
     const frame = frameRefs.current.get(object.id);
     if (!frame) return;
-    const rect = frame.getBoundingClientRect();
+    const rect = frameBox(frame);
     if (rect.width <= 0 || rect.height <= 0) return;
     const normalizedX = clamp((clientX - rect.left) / rect.width, 0, 1);
     const normalizedY = clamp((clientY - rect.top) / rect.height, 0, 1);
@@ -693,7 +705,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   type SubPart = { key: string; label?: string; bounds?: { x: number; y: number; width: number; height: number } };
   const subPartAt = (object: EditorObject, parentKey: string, clientX: number, clientY: number, add = false): SubPart | null => {
     const frame = frameRefs.current.get(object.id);
-    const rect = frame?.getBoundingClientRect();
+    const rect = frameBoxOf(frame);
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return null;
     try {
       const fn = (frame.contentWindow as (Window & { cbSubPartAt?: (parentKey: string, x: number, y: number, current: string, add: boolean) => SubPart | null }) | null)?.cbSubPartAt;
@@ -734,7 +746,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
    *  part there (selections can mix levels), added to the selection or taken out. */
   const togglePartAt = (object: EditorObject, clientX: number, clientY: number) => {
     const frame = frameRefs.current.get(object.id);
-    const rect = frame?.getBoundingClientRect();
+    const rect = frameBoxOf(frame);
     if (!onTogglePartSelection || !frame || !rect || rect.width <= 0 || rect.height <= 0) return false;
     const x = (clientX - rect.left) / rect.width;
     const y = (clientY - rect.top) / rect.height;
@@ -785,7 +797,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     if (renderMode || !activeCharacterPart || object.id !== selectedObjectId || spacePanning) return;
     const frame = frameRefs.current.get(object.id);
     if (!frame) return;
-    const rect = frame.getBoundingClientRect();
+    const rect = frameBox(frame);
     if (rect.width <= 0 || rect.height <= 0) return;
 
     event.preventDefault();
@@ -1375,10 +1387,11 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     for (const object of characterObjects) {
       const frame = frameRefs.current.get(object.id);
       if (!frame?.contentWindow) continue;
-      const localWidth = frame.offsetWidth;
-      const localHeight = frame.offsetHeight;
+      const pad = Number(frame.dataset.pad || 0), padFactor = 1 + 2 * pad;
+      const localWidth = frame.offsetWidth / padFactor;
+      const localHeight = frame.offsetHeight / padFactor;
       if (localWidth <= 0 || localHeight <= 0) continue;
-      const rect = frame.getBoundingClientRect();
+      const rect = frameBox(frame);
       const radians = (resolveObjectTransformAtTime(object, playhead).rotation || 0) * Math.PI / 180;
       // The element's 2D matrix on screen: rotate · skew · flip (scale comes from its px size).
       const skew = skewOf(object);
@@ -1410,10 +1423,10 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
         }
         // Round outward to 1/32 with a margin so small pans don't force a re-render.
         const step = 1 / 32;
-        const x0 = clamp(Math.floor((minU - 0.03) / step) * step, 0, 1);
-        const y0 = clamp(Math.floor((minV - 0.03) / step) * step, 0, 1);
-        const x1 = clamp(Math.ceil((maxU + 0.03) / step) * step, 0, 1);
-        const y1 = clamp(Math.ceil((maxV + 0.03) / step) * step, 0, 1);
+        const x0 = clamp(Math.floor((minU - 0.03) / step) * step, -pad, 1 + pad);
+        const y0 = clamp(Math.floor((minV - 0.03) / step) * step, -pad, 1 + pad);
+        const x1 = clamp(Math.ceil((maxU + 0.03) / step) * step, -pad, 1 + pad);
+        const y1 = clamp(Math.ceil((maxV + 0.03) / step) * step, -pad, 1 + pad);
         view = { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
       }
       // Exactly the device pixels the screen shows (not rounded to 5% steps, which made the
@@ -1643,7 +1656,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     onMarquee?: (rect: { x0: number; y0: number; x1: number; y1: number }, additive: boolean) => void,
   ) => {
     if (!symbolView) return;
-    const frame = frameRefs.current.get(symbolView.objectId), rect = frame?.getBoundingClientRect();
+    const frame = frameRefs.current.get(symbolView.objectId), rect = frameBoxOf(frame);
     if (!rect || event.clientX < rect.left - 40 || event.clientX > rect.right + 40 || event.clientY < rect.top - 40 || event.clientY > rect.bottom + 40) return;
     const startX = event.clientX, startY = event.clientY;
     let handle: Awaited<ReturnType<typeof begin>> = null, ready = false, ended = false, moved = false, latest = { x: startX, y: startY, shift: false };
@@ -1684,7 +1697,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   useLayoutEffect(() => {
     const wrap = handlesRef.current, frame = symbolView && symbolBox ? frameRefs.current.get(symbolView.objectId) : null;
     if (!wrap || !frame) { if (handleFrame) setHandleFrame(null); return; }
-    const w = wrap.getBoundingClientRect(), f = frame.getBoundingClientRect(), k = w.width / (wrap.offsetWidth || 1) || 1;
+    const w = wrap.getBoundingClientRect(), f = frameBox(frame), k = w.width / (wrap.offsetWidth || 1) || 1;
     const next = { left: (f.left - w.left) / k, top: (f.top - w.top) / k, width: f.width / k, height: f.height / k };
     if (!handleFrame || Math.abs(next.left - handleFrame.left) > 0.5 || Math.abs(next.top - handleFrame.top) > 0.5 || Math.abs(next.width - handleFrame.width) > 0.5 || Math.abs(next.height - handleFrame.height) > 0.5) setHandleFrame(next);
   });
@@ -1693,7 +1706,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     event.stopPropagation();
     if (!symbolView) return;
     const frame = frameRefs.current.get(symbolView.objectId);
-    const rect = frame?.getBoundingClientRect();
+    const rect = frameBoxOf(frame);
     if (!frame || !rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) { onSymbolDoubleClick?.(null); return; }
     frame.contentWindow?.postMessage({ source: "characterbazaarstudio-editor", type: "SYMBOL_HIT", normalizedX: (event.clientX - rect.left) / rect.width, normalizedY: (event.clientY - rect.top) / rect.height }, "*");
   };
@@ -1710,7 +1723,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     event.preventDefault();
     event.stopPropagation();
     if (!symbolView || !onSymbolDragStart) return;
-    const rect = frameRefs.current.get(symbolView.objectId)?.getBoundingClientRect();
+    const rect = frameBoxOf(frameRefs.current.get(symbolView.objectId));
     if (!rect) return;
     const at = { x: event.clientX, y: event.clientY };
     void onSymbolDragStart((at.x - rect.left) / rect.width, (at.y - rect.top) / rect.height, false, true).then((handle) => {
@@ -1866,7 +1879,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       if (inside) {
         if (!dragging) { if (!additive) onIsolationEmptyClick?.(); return; }
         const frame = frameRefs.current.get(inside);
-        const box = frame?.getBoundingClientRect();
+        const box = frameBoxOf(frame);
         if (!frame || !box || box.width <= 0 || box.height <= 0) return;
         let keys: string[] = [];
         try {
@@ -2558,7 +2571,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   type PivotResult = { pivotX: number; pivotY: number; dx: number; dy: number; offsetX: number; offsetY: number };
   const partPivotAt = (object: EditorObject, partKey: string, clientX: number, clientY: number, reset: boolean): PivotResult | null => {
     const frame = frameRefs.current.get(object.id);
-    const rect = frame?.getBoundingClientRect();
+    const rect = frameBoxOf(frame);
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return null;
     try {
       const fn = (frame.contentWindow as (Window & { cbPartPivotAt?: (key: string, x: number, y: number, reset: boolean, saved: object) => PivotResult | null }) | null)?.cbPartPivotAt;
@@ -2603,7 +2616,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     event.stopPropagation();
     const partKey = activeCharacterPart;
     const frame = frameRefs.current.get(object.id);
-    const rect = frame?.getBoundingClientRect();
+    const rect = frameBoxOf(frame);
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
     const solve = (frame.contentWindow as (Window & { cbPartSkewAt?: (key: string, edge: string, x0: number, y0: number, x1: number, y1: number, saved: object) => { skewX: number; skewY: number } | null }) | null)?.cbPartSkewAt;
     if (typeof solve !== "function") return;
@@ -2680,7 +2693,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   // answer from the player's per-part pixel test; others fall back to the rendered-canvas check.
   const isCharacterArtworkAt = (object: EditorObject, clientX: number, clientY: number) => {
     const frame = frameRefs.current.get(object.id);
-    const rect = frame?.getBoundingClientRect();
+    const rect = frameBoxOf(frame);
     if (frame && rect && rect.width > 0 && rect.height > 0) {
       try {
         const anyPart = (frame.contentWindow as (Window & { cbAnyPartAt?: (x: number, y: number, tol: number) => string | null }) | null)?.cbAnyPartAt;
@@ -2694,7 +2707,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   // Is there artwork of this part under the pointer? Asks the (same-origin) player; unknown → yes.
   const isPartPixelAt = (object: EditorObject, partKey: string, clientX: number, clientY: number) => {
     const frame = frameRefs.current.get(object.id);
-    const rect = frame?.getBoundingClientRect();
+    const rect = frameBoxOf(frame);
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return true;
     try {
       const test = (frame.contentWindow as (Window & { cbPartHitTest?: (key: string, x: number, y: number) => boolean | null }) | null)?.cbPartHitTest;
@@ -3541,7 +3554,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     draggable={false}
                     className="cb-character-preview-fallback"
                     style={{
-                      objectFit: "fill", zIndex: 5,
+                      objectFit: "fill", zIndex: 5, maxWidth: "none", maxHeight: "none", // the picture can be larger than the box (it covers the player's margin too)
                       ...(snapshotViews[object.id] ? { inset: "auto", left: `${snapshotViews[object.id]!.x * 100}%`, top: `${snapshotViews[object.id]!.y * 100}%`, width: `${snapshotViews[object.id]!.width * 100}%`, height: `${snapshotViews[object.id]!.height * 100}%` } : {}),
                       filter: `hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)` }}
                   />
@@ -3553,11 +3566,14 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     else frameRefs.current.delete(object.id);
                   }}
                   data-animate-player="1"
+                  data-pad={PLAYER_PAD}
                   title={`${object.name} ${object.actionName || "action"}`}
                   // Resolution comes from SET_VIEW messages, not the URL, so zooming never reloads the player.
-                  src={`${object.assetUrl}?autoplay=0&muted=1&interactive=1&embeddedMode=1&viewportWidth=${sourceWidth}&viewportHeight=${sourceHeight}&bridge=v92`}
+                  src={`${object.assetUrl}?autoplay=0&muted=1&interactive=1&embeddedMode=1&viewportWidth=${sourceWidth}&viewportHeight=${sourceHeight}&bridge=v93&pad=${PLAYER_PAD}`}
                   className="cb-character-source-frame"
                   style={{
+                    // A margin of half a box on every side, so a part dragged out of the character's box still draws (the bridge's ?pad=).
+                    position: "absolute", left: `${-PLAYER_PAD * 100}%`, top: `${-PLAYER_PAD * 100}%`, width: `${(1 + 2 * PLAYER_PAD) * 100}%`, height: `${(1 + 2 * PLAYER_PAD) * 100}%`,
                     filter: `hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)`,
                     pointerEvents: "none",
                     transition: snapshotUrls[object.id] && !renderMode ? "none" : "opacity 180ms ease-out",

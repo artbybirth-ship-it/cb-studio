@@ -29,6 +29,10 @@
   var ds = (script && script.dataset) || {};
   var W = Math.max(1, Number(ds.width) || 1080);
   var H = Math.max(1, Number(ds.height) || 1920);
+  // Margin of the player's page around its own box (?pad=0.5: half a box on every side), so a part dragged out of the box still draws.
+  // Every coordinate the editor sends or reads stays relative to the box itself (they just go below 0 / above 1); only the page is bigger.
+  var PAD = (function () { try { var v = Number(new URLSearchParams(window.location.search).get('pad')); return v > 0 ? Math.min(2, v) : 0; } catch (e) { return 0; } })();
+  var PADF = 1 + 2 * PAD;
   var FPS = Math.max(1, Number(ds.fps) || 30);
   // The frames of a clip's own timeline where something changes at once: a layer starts or ends, or
   // a still keyframe moves (not the tiny pivot adjustment Animate writes between tweened keyframes).
@@ -1023,8 +1027,8 @@
   function applyView() {
     var st = cbStage(), cv = cbCanvas();
     if (!st || !cv || !cbView) return;
-    var cssW = Math.max(1, window.innerWidth || document.documentElement.clientWidth || W);
-    var cssH = Math.max(1, window.innerHeight || document.documentElement.clientHeight || H);
+    var cssW = Math.max(1, (window.innerWidth || document.documentElement.clientWidth || W) / PADF);
+    var cssH = Math.max(1, (window.innerHeight || document.documentElement.clientHeight || H) / PADF);
     var v = cbView, s = cv.style;
     cbViewSig = viewSig();
     if (v.width <= 0 || v.height <= 0) { s.visibility = 'hidden'; return; }
@@ -1052,8 +1056,8 @@
       // In % of this page (the same CSS px at this size), so when the editor resizes the player
       // (Transform W / H, scale handles) the drawing follows at once instead of showing at its old
       // size until the redraw: that one-frame mismatch flickered on every step of a drag.
-      s.left = (x0 / q / cssW * 100) + '%'; s.top = (y0 / q / cssH * 100) + '%';
-      s.width = (bw / q / cssW * 100) + '%'; s.height = (bh / q / cssH * 100) + '%';
+      s.left = ((x0 / q / cssW + PAD) / PADF * 100) + '%'; s.top = ((y0 / q / cssH + PAD) / PADF * 100) + '%';
+      s.width = (bw / q / cssW / PADF * 100) + '%'; s.height = (bh / q / cssH / PADF * 100) + '%';
       st.scaleX = cssW * q / W; st.scaleY = cssH * q / H;
       st.x = -x0; st.y = -y0;
       if (st.update) st.update();
@@ -1064,10 +1068,10 @@
     bh = Math.max(1, Math.ceil(v.height * cssH * q));
     if (cv.width !== bw) cv.width = bw;
     if (cv.height !== bh) cv.height = bh;
-    s.left = (v.x * 100) + '%'; s.top = (v.y * 100) + '%';
+    s.left = ((v.x + PAD) / PADF * 100) + '%'; s.top = ((v.y + PAD) / PADF * 100) + '%';
     // bw × bh pixels shown on exactly bw × bh device pixels (not the rounded-down view size), so the
     // browser never resizes the drawing.
-    s.width = (bw / (cssW * q) * 100) + '%'; s.height = (bh / (cssH * q) * 100) + '%';
+    s.width = (bw / (cssW * q) / PADF * 100) + '%'; s.height = (bh / (cssH * q) / PADF * 100) + '%';
     st.scaleX = cssW * q / W; st.scaleY = cssH * q / H;
     st.x = -v.x * cssW * q; st.y = -v.y * cssH * q;
     if (st.update) st.update();
@@ -1926,14 +1930,37 @@
     return null;
   }
 
+  // New edits arrive just before the SEEK that moves the clips to the right frame. Drawing in between paints the clips at their old frame
+  // for one picture (a flash while an ease or a keyframe is dragged), so the drawing waits for the SEEK (or 40 ms) and happens once.
+  var cbHold = null;
+  function holdDraw() {
+    var st = cbStage();
+    if (!st || !st.update) return;
+    if (!st.__cbHoldWrapped) {
+      var real = st.update;
+      st.__cbHoldWrapped = true;
+      st.update = function () { if (cbHold) { cbHold.dirty = true; return; } return real.apply(this, arguments); };
+      st.__cbRealUpdate = real;
+    }
+    if (cbHold) { clearTimeout(cbHold.timer); } else cbHold = { dirty: false, timer: 0 };
+    cbHold.timer = setTimeout(releaseDraw, 40);
+  }
+  function releaseDraw() {
+    if (!cbHold) return;
+    var held = cbHold, st = cbStage();
+    clearTimeout(held.timer); cbHold = null;
+    if (held.dirty && st && st.__cbRealUpdate) { try { st.__cbRealUpdate.call(st); } catch (e) {} }
+  }
   window.addEventListener('message', function (event) {
     var d = event.data || {};
     if (d.source !== 'characterbazaarstudio-editor') return;
+    if (d.type === 'CHARACTER_EDITS') holdDraw();
+    else if (cbHold && (d.type === 'SEEK' || d.type === 'PAUSE')) Promise.resolve().then(function () { if (d.type === 'SEEK') releaseDraw(); });
     if (d.type === 'SET_VIEW') {
       cbView = {
         scale: Number(d.pixelScale) || 1,
-        x: clamp(Number(d.x) || 0, 0, 1), y: clamp(Number(d.y) || 0, 0, 1),
-        width: clamp(Number(d.width), 0, 1), height: clamp(Number(d.height), 0, 1),
+        x: clamp(Number(d.x) || 0, -PAD, 1 + PAD), y: clamp(Number(d.y) || 0, -PAD, 1 + PAD),
+        width: clamp(Number(d.width), 0, PADF), height: clamp(Number(d.height), 0, PADF),
         exact: !!d.exact
       };
       cbMinStroke = clamp(Number(d.minStroke) || 1, 1, 8);

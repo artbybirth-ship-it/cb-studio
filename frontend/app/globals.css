@@ -3333,7 +3333,6 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 .cb-symbol-ease-reset{height:20px;padding:0 8px;border:0;border-radius:4px;background:#333;color:#ddd;font:inherit;cursor:pointer}
 .cb-symbol-ease-reset:hover{background:#444;color:#fff}
 .cb-symbol-span.is-picked{box-shadow:inset 0 0 0 1px #fff}
-.cb-symbol-span.is-edited::after{content:"";position:absolute;right:2px;top:2px;width:5px;height:5px;border-radius:50%;background:#ffd166}
 .cb-symbol-fps{color:#8b8b8b;font-size:11px}
 .cb-symbol-transport{display:flex;align-items:center;gap:4px}
 .cb-symbol-transport button{display:grid;place-items:center;width:28px;height:28px;border:0;border-radius:5px;background:transparent;color:#d3d3d3;cursor:pointer}
@@ -3365,14 +3364,13 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 .cb-symbol-row.is-hidden .cb-symbol-lane{opacity:.45}
 .cb-symbol-lane{position:relative;height:100%;background:#111 repeating-linear-gradient(90deg,#222 0 1px,transparent 1px var(--cb-sym-cell))}
 .cb-symbol-span{position:absolute;top:1px;bottom:1px;box-sizing:border-box;border-left:1px solid #000;background:#4a4a4a;overflow:hidden}
-.cb-symbol-span.blank{background:transparent}
+.cb-symbol-span.blank{background:#4a4a4a}
 .cb-symbol-span.classic{background:#7059a8}
 .cb-symbol-span.shape{background:#4f8f4c}
 .cb-symbol-key{position:absolute;left:calc(var(--cb-sym-cell) / 2);bottom:4px;width:6px;height:6px;margin-left:-3px;border-radius:50%;background:#000;box-shadow:0 0 0 1px rgba(255,255,255,.35)}
 .cb-symbol-key.movable{cursor:ew-resize}.cb-symbol-key.movable::before{content:"";position:absolute;left:-5px;right:-5px;top:-6px;bottom:-6px}
 .cb-symbol-key.pickable{cursor:pointer}.cb-symbol-key.pickable::before{content:"";position:absolute;left:-5px;right:-5px;top:-6px;bottom:-6px}
 .cb-symbol-key.movable.pickable{cursor:ew-resize}
-.cb-symbol-key.valued{box-shadow:0 0 0 2px #ffd166}
 .cb-symbol-key.chosen{box-shadow:0 0 0 2px #fff}
 .cb-symbol-values{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:34px;padding:4px 12px;background:#1d1d1d;border-bottom:1px solid #2c2c2c;color:#cfcfcf;font-size:11px}
 .cb-symbol-values-where{max-width:200px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#9a9a9a}
@@ -3382,9 +3380,7 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 .cb-symbol-copycell{position:absolute;top:0;bottom:0;background:rgba(255,64,160,.28);outline:2px solid #ff40a0;outline-offset:-2px;pointer-events:none;z-index:6;box-shadow:0 0 10px 2px rgba(255,64,160,.8)}
 .cb-symbol-copycell b{position:absolute;left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:#ff40a0;border:2px solid #fff;box-shadow:0 0 8px 2px #ff40a0}
 .cb-symbol-copysrc{position:absolute;top:0;bottom:0;outline:2px dashed #ffd166;outline-offset:-2px;pointer-events:none;z-index:6}
-.cb-symbol-key.added{background:#ffd166}
 .cb-symbol-span.is-moved.is-picked{box-shadow:inset 0 0 0 1px #fff}
-.cb-symbol-span.is-moved{box-shadow:inset 0 0 0 1px rgba(255,209,102,.7)}
 .cb-symbol-ease-reset:disabled{opacity:.4;cursor:default}
 .cb-symbol-key.blank{background:#fff;box-shadow:inset 0 0 0 1.4px #000}
 .cb-symbol-arrow{position:absolute;left:calc(var(--cb-sym-cell) + 2px);right:calc(var(--cb-sym-cell) / 2);top:50%;height:1px;background:#111}
@@ -3564,3 +3560,9 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 .cb-direct-select .cb-group-box{border-color:#6fc3ff!important}
 .cb-direct-select .cb-symbol-box-lines polygon{stroke:#6fc3ff!important;stroke-width:1!important;filter:none!important}
 .cb-direct-select .cb-transform-center-point,.cb-direct-select .cb-symbol-pivot,.cb-direct-select .cb-group-pivot{width:9px!important;height:9px!important;border:1px solid #6fc3ff!important;background:transparent!important;box-shadow:none!important}
+
+/* The stage column must not grow with the timeline's key-value bar: selecting a keyframe shifted the canvas */
+.cb-workspace{grid-template-columns:minmax(0,1fr)}
+.cb-workspace>*{min-width:0}
+.cb-symbol-framemenu{max-height:calc(100vh - 16px);overflow-y:auto}
+.cb-symbol-key.replacing{outline:2px solid #ff40a0;outline-offset:1px;background:#ff40a0!important}

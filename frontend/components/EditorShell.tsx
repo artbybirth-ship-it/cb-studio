@@ -16,7 +16,7 @@ import { partEditMatrix, resolvePartTransformAtTime, resolveSourceSeekMs, upsert
 import { useCharacterLibrary } from "@/lib/characterLibrary";
 import { useEditorStore } from "@/store/editor";
 import { addAnchor, clearKeyframe, fileAnchors, fileOf, insertFrames, isUnchanged, grownBlanks, grownTweens, keyframeAt, moveAnchor, removeAnchor, removeFrames, shownFrames, spanAt, type Anchor, type Tween } from "@/lib/symbolKeys";
-import { addSymbolLayer, arrangeSymbolLayers, duplicateLayers, groupLayers, parentOf, ungroupLayer, isLayerEditEmpty, playerSpec, toggled, withClones, qualifySymbol, splitClass } from "@/lib/symbolLayers";
+import { EXTRA_BASE, addSymbolLayer, arrangeSymbolLayers, duplicateLayers, groupLayers, parentOf, ungroupLayer, isLayerEditEmpty, playerSpec, toggled, withClones, qualifySymbol, splitClass } from "@/lib/symbolLayers";
 import { affinePart, canTransform, flipPart, stageRectOf, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, PoseForeign, Project, RenderJob, Scene, SymbolEaseEdit, SymbolKeyEdit, SymbolLayerEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
@@ -377,6 +377,8 @@ const readSavedCanvasView = (projectId: string): { zoom: number; panX: number; p
   } catch { /* storage unavailable */ }
   return { zoom: 1, panX: 0, panY: 0 };
 };
+// Adobe Animate's default number of undo levels.
+const UNDO_LEVELS = 100;
 const MIN_CANVAS_ZOOM = 0.1;
 const MAX_CANVAS_ZOOM = 200;
 const clampCanvasZoom = (value: number) => Math.max(MIN_CANVAS_ZOOM, Math.min(MAX_CANVAS_ZOOM, value));
@@ -810,7 +812,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         recorded = true;
         if (scrubHistoryRef.current !== "recorded") {
           historyPastRef.current.push(clone(current));
-          if (historyPastRef.current.length > 60) historyPastRef.current.shift();
+          if (historyPastRef.current.length > UNDO_LEVELS) historyPastRef.current.shift();
           if (scrubHistoryRef.current === "armed") scrubHistoryRef.current = "recorded";
         }
         historyFutureRef.current = [];
@@ -3492,6 +3494,48 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (symbolView && !draft?.objects.some((item) => item.id === symbolView.objectId)) setSymbolView(null);
   }, [draft?.objects, symbolView]);
   useEffect(() => { setSymbolView(null); }, [scene?.id]);
+  // A refresh keeps the screen: the stepped-into pose (the character, the symbols stepped through and the frame at each level) is saved
+  // per project and scene, and opened again once the scene and the character library are loaded.
+  const symbolViewKey = scene?.id ? `cb-symbol-view:${projectId}:${scene.id}` : "";
+  const symbolRestoredRef = useRef("");
+  useEffect(() => {
+    if (!symbolViewKey || symbolRestoredRef.current !== symbolViewKey) return; // not before the saved one has had its turn
+    try {
+      if (!symbolView) { window.localStorage.removeItem(symbolViewKey); return; }
+      window.localStorage.setItem(symbolViewKey, JSON.stringify({ objectId: symbolView.objectId, levels: symbolView.levels.map((level) => ({ js: level.js, frame: level.frame, props: level.props })) }));
+    } catch { /* storage blocked: the view just is not kept */ }
+  }, [symbolView, symbolViewKey]);
+  useEffect(() => {
+    if (!symbolViewKey || !draft || symbolRestoredRef.current === symbolViewKey) return;
+    let saved: { objectId?: string; levels?: Array<{ js: string; frame: number; props?: string[] }> } | null = null;
+    try { saved = JSON.parse(window.localStorage.getItem(symbolViewKey) || "null"); } catch { saved = null; }
+    const object = saved?.objectId ? draft.objects.find((item) => item.id === saved!.objectId) : undefined;
+    if (!saved?.levels?.length || !object || object.type !== "character") { symbolRestoredRef.current = symbolViewKey; return; }
+    const action = characterLibraryActions.find((item) => item.assetUrl === object.assetUrl);
+    if (!action) { if (!characterLibraryActions.length) return; symbolRestoredRef.current = symbolViewKey; return; } // the library is still loading
+    symbolRestoredRef.current = symbolViewKey;
+    if (!action.flaTimeline || !action.flaSymbol) return;
+    const base = action.flaTimeline.replace(/index\.json$/, "");
+    const wanted = saved.levels;
+    void (async () => {
+      try {
+        const levels: SymbolLevel[] = [];
+        for (let at = 0; at < wanted.length; at += 1) {
+          const step = wanted[at];
+          const [tag, plain] = splitClass(step.js);
+          let from = base;
+          if (tag) {
+            const owner = characterLibraryActions.find((item) => item.flaTimeline?.includes(`/character_libraries/${tag}`));
+            if (!owner?.flaTimeline) break;
+            from = owner.flaTimeline.replace(/index\.json$/, "");
+          }
+          const loaded = await loadSymbol(from, plain);
+          levels.push({ js: step.js, data: tag ? qualifySymbol(loaded, tag) : loaded, frame: Math.max(0, Math.min(step.frame, loaded.frames - 1)), ...(step.props ? { props: step.props } : {}) });
+        }
+        if (levels.length) setSymbolView({ objectId: object.id, base, levels, hidden: new Set(), playing: false });
+      } catch { /* the character's files are not there any more: the scene opens as it is */ }
+    })();
+  }, [characterLibraryActions, draft, loadSymbol, symbolViewKey]);
   // Play runs just the open symbol, looping, at its own frame rate.
   const symbolViewRef = useRef(symbolView);
   symbolViewRef.current = symbolView;
@@ -3863,7 +3907,17 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return { corners: [[rect.left / W, rect.top / H], [rect.right / W, rect.top / H], [rect.right / W, rect.bottom / H], [rect.left / W, rect.bottom / H]] as Array<[number, number]>, pivot: null, editable: Boolean(groupPlans(groupInfos.map((info) => info.prop))), multi: true };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupInfos, multiProps]);
-  const symbolBox = useMemo(() => (partInfo ? { ...partBox(partInfo), editable: partEditable } : groupBox), [partInfo, partEditable, groupBox]);
+  // A part under a blank keyframe (Delete on its keyframe) shows nothing on the stage, so it has no box either: no handles, no "View only" label.
+  const pickedHidden = useMemo(() => {
+    if (!pickedProp || !symbolLevelNow) return false;
+    const index = symbolLevelNow.data.layers.findIndex((layer) => (layer.props || []).includes(pickedProp));
+    const layer = symbolLevelNow.data.layers[index];
+    if (!layer) return false;
+    const marks = symbolObjectNow?.symbolKeys?.[symbolLevelNow.js]?.[String(index)];
+    const shown = shownFrames(layer, marks?.anchors || fileAnchors(layer), marks).find((item) => symbolLevelNow.frame >= item.i && symbolLevelNow.frame < item.i + item.d);
+    return Boolean(shown?.blank);
+  }, [pickedProp, symbolLevelNow, symbolObjectNow]);
+  const symbolBox = useMemo(() => (pickedHidden ? null : partInfo ? { ...partBox(partInfo), editable: partEditable } : groupBox), [partInfo, partEditable, groupBox, pickedHidden]);
   const beginSymbolDrag = useCallback((normalizedX: number, normalizedY: number, shift = false, context = false) => new Promise<PartHandle | null>((resolve) => {
     const view = symbolView, frame = view && frameAccessRef.current?.(view.objectId);
     if (!view || !frame?.contentWindow) { resolve(null); return; }
@@ -4367,9 +4421,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // ---- Frame operations, as in Animate: insert / remove frames, insert / clear keyframes, copy / cut / paste frames.
   // The pose's timeline keeps its length, so frames slide inside it. One operation is one undo step.
-  type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move";
+  type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "delete-drawing" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move" | "reverse";
   type FrameSel = { layers: number[]; from: number; to: number };
-  const frameClipboard = useRef<{ layerBase: number; items: Array<{ layer: number; offset: number; values: Record<string, number>; tween?: boolean }> } | null>(null);
+  const frameClipboard = useRef<{ layerBase: number; items: Array<{ layer: number; offset: number; values: Record<string, number>; tween?: boolean; blank?: boolean }> } | null>(null);
   const [clipboardFilled, setClipboardFilled] = useState(false);
   /** A keyframe's values as the file has them (the player reads them off its tween). */
   const readKeyValues = useCallback((layerIndex: number, fileFrame: number) => new Promise<Record<string, number> | null>((resolve) => {
@@ -4388,6 +4442,21 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const runFrameOp = useCallback(async (op: FrameOp, sel: FrameSel, by = 0) => {
     const level = symbolLevelNow, object = symbolObjectNow;
     if (!level || !object) return;
+    // A new empty layer (an extra of the pose): its blank keyframes are kept with the layer. F7 / F6 put one on the selected frame, ⇧F6 clears
+    // the ones in the selected frames (the first stays); the other layers in the selection go on below.
+    const extraIds = sel.layers.filter((index) => index >= EXTRA_BASE);
+    if (extraIds.length && (op === "blank-keyframe" || op === "insert-keyframe" || op === "clear-keyframe" || op === "delete-drawing")) {
+      const total = Math.max(1, level.data.frames);
+      setLayerEdit((current) => ({ ...current, extras: (current.extras || []).map((extra) => {
+        if (!extraIds.includes(extra.id) || extra.type === "folder") return extra;
+        const keys = extra.keys || [];
+        if (op === "blank-keyframe" || op === "insert-keyframe") return sel.from > 0 && sel.from < total && !keys.includes(sel.from) ? { ...extra, keys: [...keys, sel.from].sort((a, b) => a - b) } : extra;
+        return op === "clear-keyframe" ? { ...extra, keys: keys.filter((key) => key < sel.from || key > sel.to) } : extra;
+      }) }));
+      const rest = sel.layers.filter((index) => index < EXTRA_BASE);
+      if (!rest.length) return;
+      sel = { ...sel, layers: rest };
+    }
     const layers = level.data.layers, ready = keysEditable?.js === level.js ? keysEditable : null;
     const anchorsOf = (index: number): Anchor[] => object.symbolKeys?.[level.js]?.[String(index)]?.anchors || fileAnchors(layers[index]);
     const lockedIds = object.symbolLayers?.[level.js]?.locked || [];
@@ -4477,6 +4546,27 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (op !== "paste" && !doable.length) { showNotice("The keyframes of these layers can't be edited here."); return; }
     const noRoom = () => showNotice("There is no room: a pose's timeline can't be made longer, so frames can only slide into free frames after them.");
 
+    if (op === "delete-drawing") {
+      // Animate's Delete on selected keyframes: the drawing in each keyframe goes and it stays a keyframe, a blank one. Frames that are no
+      // keyframe are left alone, and the layer itself is never removed.
+      const blankable = doable.filter((index) => ready?.moves[index] && !ready.drawn[index]);
+      if (!blankable.length) { showNotice("Nothing to delete here: layers drawn frame by frame have no drawing to clear in this timeline."); return; }
+      let cleared = 0;
+      batch(() => blankable.forEach((index) => {
+        const anchors = anchorsOf(index);
+        const marks = object.symbolKeys?.[level.js]?.[String(index)]?.blanks || [];
+        const targets: number[] = [];
+        for (let frame = sel.from; frame <= sel.to; frame += 1) {
+          const k = keyframeAt(anchors, frame);
+          if (k >= 0 && !marks.includes(anchors[k][0]) && !targets.includes(anchors[k][0])) targets.push(anchors[k][0]);
+        }
+        if (!targets.length) return;
+        cleared += targets.length;
+        setSymbolBlanks(index, (now) => [...now, ...targets.filter((file) => !now.includes(file))]);
+      }));
+      if (!cleared) showNotice("Select a keyframe to delete its drawing (it becomes a blank keyframe).");
+      return;
+    }
     if (op === "blank-keyframe") {
       // As Animate's F7: a blank keyframe at the first frame of the selection (a keyframe made there if none is): the layer shows nothing
       // from it until its next keyframe, or to the end of the layer. Only layers that move a part can be blanked here.
@@ -4570,12 +4660,65 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       batch(() => plans.forEach((plan) => { commit(plan.layer, plan.anchors); plan.fills.forEach((fill) => setSymbolValue(plan.layer, fill.fileFrame, fill.values as Partial<Record<SymbolValueKey, number>>)); }));
       return;
     }
+    if (op === "reverse") {
+      // Animate's Reverse Frames: the keyframes in the selection play in the opposite order. Each keyframe's values go to its mirror frame
+      // (about the middle of the first and last keyframe in the selection) and a tween made here runs the other way.
+      const reversible = doable.filter((index) => movers.includes(index));
+      if (!reversible.length) { showNotice("Reverse Frames works on layers with a moving part (drawn artwork has no keyframes to reverse)."); return; }
+      let reversed = 0;
+      for (const index of reversible) {
+        const anchors0 = anchorsOf(index), made = object.symbolKeys?.[level.js]?.[String(index)];
+        const ks: number[] = [];
+        for (let k = 0; k < anchors0.length - 1; k += 1) if (anchors0[k + 1][1] > anchors0[k][1] && anchors0[k][1] >= sel.from && anchors0[k][1] <= sel.to) ks.push(k);
+        if (ks.length < 2) continue;
+        const shown = shownFrames(layers[index], anchors0, made);
+        const first = anchors0[ks[0]][1], lastAt = anchors0[ks[ks.length - 1]][1];
+        const grabbed: Array<{ at: number; values: Record<string, number>; tween: boolean }> = [];
+        for (const k of ks) {
+          const values = edited(index, anchors0[k][0], await readKeyValues(index, anchors0[k][0]));
+          if (!values) { grabbed.length = 0; break; }
+          const item = shown.find((entry) => entry.anchor === k);
+          grabbed.push({ at: anchors0[k][1], values, tween: Boolean(item && (item.tween === "classic" || item.tween === "motion")) });
+        }
+        if (grabbed.length < 2) continue;
+        // The new keyframes: mirror frame, the values it had, and a tween where the span before it (in the old order) tweened.
+        const mirrored = grabbed.map((item, i) => ({ at: first + lastAt - item.at, values: item.values, tween: i > 0 ? grabbed[i - 1].tween : false })).sort((a, b) => a.at - b.at);
+        let anchors = anchors0;
+        for (const item of mirrored) {
+          if (keyframeAt(anchors, item.at) < 0) { const grown = addAnchor(anchors, item.at); if (grown) anchors = grown; }
+        }
+        // Old keyframes in the range that no mirror landed on stop being keyframes.
+        const keep = new Set(mirrored.map((item) => item.at)), cleared: number[] = [];
+        for (const item of grabbed) {
+          if (keep.has(item.at)) continue;
+          const k = keyframeAt(anchors, item.at);
+          if (k > 0) { cleared.push(anchors[k][0]); anchors = clearKeyframe(anchors, k) || anchors; }
+        }
+        const landed = mirrored.map((item) => { const k = keyframeAt(anchors, item.at); return k >= 0 ? { ...item, file: anchors[k][0] } : null; }).filter((item): item is NonNullable<typeof item> => Boolean(item));
+        batch(() => {
+          commit(index, anchors);
+          landed.forEach((item) => setSymbolValue(index, item.file, item.values as Partial<Record<SymbolValueKey, number>>));
+          const touched = new Set([...landed.map((item) => item.file), ...cleared]);
+          setSymbolTweens(index, (now) => [...now.filter((tween) => !touched.has(tween[0])), ...landed.filter((item) => item.tween).map((item) => [item.file, 0] as Tween)]);
+        });
+        reversed += 1;
+      }
+      if (!reversed) showNotice("Select frames that hold at least two keyframes, then choose Reverse Frames.");
+      return;
+    }
     if (op === "move") {
       // Animate: dragging selected frames moves their keyframes (a tween goes with its keyframes: it is kept against each keyframe's file frame).
       // Each keyframe slides by the same number of frames; one that meets a keyframe outside the selection stops against it.
       let movedAny = false;
       batch(() => doable.forEach((index) => {
         let anchors = anchorsOf(index);
+        // Animate: keyframes the moved frames land on are replaced. Those outside the selection, inside where it lands, are cleared first.
+        const lastFrame = anchors[anchors.length - 1][1];
+        for (let frame = Math.min(sel.to + by, lastFrame - 1); frame >= Math.max(1, sel.from + by); frame -= 1) {
+          if (frame >= sel.from && frame <= sel.to) continue;
+          const o = keyframeAt(anchors, frame);
+          if (o > 0 && o < anchors.length - 1) anchors = clearKeyframe(anchors, o) || anchors;
+        }
         const picks: number[] = [];
         for (let k = 1; k < anchors.length - 1; k += 1) if (anchors[k][1] >= sel.from && anchors[k][1] <= sel.to) picks.push(k);
         if (by < 0) picks.sort((a, b) => a - b); else picks.sort((a, b) => b - a);
@@ -4587,7 +4730,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     }
     if (op === "clear-keyframe" || op === "cut" || op === "copy") {
       // What the keyframes in the selection hold (position, rotation, scale, opacity), for copy and for clearing a tween's end.
-      const grabbed: Array<{ layer: number; offset: number; values: Record<string, number>; tween?: boolean }> = [];
+      const grabbed: Array<{ layer: number; offset: number; values: Record<string, number>; tween?: boolean; blank?: boolean }> = [];
       if (op !== "clear-keyframe") {
         for (const index of movers) {
           const anchors = anchorsOf(index);
@@ -4597,7 +4740,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
           for (const k of found) {
             const values = edited(index, anchors[k][0], await readKeyValues(index, anchors[k][0]));
             const shownHere = shownFrames(layers[index], anchors, object.symbolKeys?.[level.js]?.[String(index)]).find((item) => item.anchor === k);
-            if (values) grabbed.push({ layer: index, offset: Math.max(0, anchors[k][1] - sel.from), values, tween: Boolean(shownHere && (shownHere.tween === "classic" || shownHere.tween === "motion")) });
+            const blank = Boolean(shownHere?.blank);
+            if (values || blank) grabbed.push({ layer: index, offset: Math.max(0, anchors[k][1] - sel.from), values: values || {}, blank, tween: Boolean(shownHere && (shownHere.tween === "classic" || shownHere.tween === "motion")) });
           }
         }
         if (!grabbed.length) { showNotice("Only moving parts can be copied: drawn artwork has no position keyframes to copy."); return; }
@@ -4640,6 +4784,22 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       const working = new Map<number, Anchor[]>(), sets: Array<{ layer: number; fileFrame: number; values: Record<string, number> }> = [];
       let skipped = 0;
       const tweenSets: Array<{ layer: number; fileFrame: number }> = [];
+      const tweenUnsets: Array<{ layer: number; fileFrame: number }> = [];
+      const blankSets: Array<{ layer: number; fileFrame: number; blank: boolean }> = [];
+      // Animate: pasted frames replace what they land on. Keyframes inside the dropped span that the paste does not rewrite
+      // itself stop being keyframes (the first keyframe of a layer stays, and so does anything past the pose's end).
+      const span = Math.max(...clip.items.map((item) => item.offset));
+      for (const layerIndex of new Set(clip.items.map((item) => base + (item.layer - clip.layerBase)))) {
+        if (!layers[layerIndex] || layers[layerIndex].type === "folder" || !ready?.editable[layerIndex] || !ready.moves[layerIndex] || ready.drawn[layerIndex]) continue;
+        const pastedAt = new Set(clip.items.filter((item) => base + (item.layer - clip.layerBase) === layerIndex).map((item) => sel.from + item.offset));
+        let anchors = anchorsOf(layerIndex);
+        for (let frame = Math.min(sel.from + span, endOf(layerIndex) - 1); frame >= sel.from; frame -= 1) {
+          if (pastedAt.has(frame)) continue;
+          const k = keyframeAt(anchors, frame);
+          if (k > 0) anchors = clearKeyframe(anchors, k) || anchors;
+        }
+        working.set(layerIndex, anchors);
+      }
       for (const item of clip.items) {
         const index = base + (item.layer - clip.layerBase), at = sel.from + item.offset;
         if (!layers[index] || layers[index].type === "folder" || !ready?.editable[index] || !ready.moves[index] || ready.drawn[index] || at >= endOf(index)) { skipped += 1; continue; }
@@ -4648,12 +4808,17 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         if (k < 0) { anchors = addAnchor(anchors, at) || anchors; k = keyframeAt(anchors, at); }
         if (k < 0) { skipped += 1; continue; }
         working.set(index, anchors);
-        sets.push({ layer: index, fileFrame: anchors[k][0], values: item.values });
+        if (Object.keys(item.values).length) sets.push({ layer: index, fileFrame: anchors[k][0], values: item.values });
+        blankSets.push({ layer: index, fileFrame: anchors[k][0], blank: Boolean(item.blank) });
         // A pasted keyframe that began a tween begins one again, when its end came with it.
         if (item.tween && clip.items.some((other) => other.layer === item.layer && other.offset > item.offset)) tweenSets.push({ layer: index, fileFrame: anchors[k][0] });
+        else tweenUnsets.push({ layer: index, fileFrame: anchors[k][0] }); // a hold that lands on a tween replaces it
       }
-      if (!sets.length) { showNotice("These frames can't take the pasted keyframes (drawn artwork, or past the end of the pose)."); return; }
-      batch(() => { working.forEach((anchors, index) => commit(index, anchors)); sets.forEach((set) => setSymbolValue(set.layer, set.fileFrame, set.values as Partial<Record<SymbolValueKey, number>>)); tweenSets.forEach((t) => setSymbolTweens(t.layer, (now) => (now.some((tween) => tween[0] === t.fileFrame) ? now : [...now, [t.fileFrame, 0] as Tween]))); });
+      if (!sets.length && !blankSets.length) { showNotice("These frames can't take the pasted keyframes (drawn artwork, or past the end of the pose)."); return; }
+      batch(() => { working.forEach((anchors, index) => commit(index, anchors)); sets.forEach((set) => setSymbolValue(set.layer, set.fileFrame, set.values as Partial<Record<SymbolValueKey, number>>)); tweenSets.forEach((t) => setSymbolTweens(t.layer, (now) => (now.some((tween) => tween[0] === t.fileFrame) ? now : [...now, [t.fileFrame, 0] as Tween])));
+        // A pasted keyframe replaces what was there: a blank keyframe takes the drawing, a drawing becomes blank when the copy was blank.
+        blankSets.forEach((b) => setSymbolBlanks(b.layer, (now) => (b.blank ? (now.includes(b.fileFrame) ? now : [...now, b.fileFrame]) : now.filter((file) => file !== b.fileFrame))));
+        tweenUnsets.forEach((t) => setSymbolTweens(t.layer, (now) => (now.some((tween) => tween[0] === t.fileFrame) ? now.filter((tween) => tween[0] !== t.fileFrame) : now))); });
       if (skipped) showNotice(`${skipped} keyframe${skipped > 1 ? "s" : ""} could not be pasted (drawn artwork, or past the end).`);
     }
   }, [keysEditable, readKeyValues, setSymbolBlanks, setSymbolCut, setSymbolKeys, setSymbolTweens, setSymbolValue, showNotice, symbolLevelNow, symbolObjectNow]);
@@ -4669,7 +4834,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const anchorsOf = (index: number): Anchor[] => object.symbolKeys?.[level.js]?.[String(index)]?.anchors || fileAnchors(layers[index]);
     let anchors = anchorsOf(toLayer);
     if (at >= anchors[anchors.length - 1][1]) { showNotice("A keyframe can't go past the end of the layer."); return; }
-    const base = await readKeyValues(fromLayer, fromFile);
+    // A blank keyframe copies as a blank one; a keyframe with a drawing makes the keyframe it lands on one with a drawing (a blank one stops being blank).
+    const sourceBlank = Boolean(object.symbolKeys?.[level.js]?.[String(fromLayer)]?.blanks?.includes(fromFile));
+    const base = sourceBlank ? {} : await readKeyValues(fromLayer, fromFile);
     if (!base) { showNotice("Couldn't read that keyframe's values."); return; }
     const values = { ...base, ...(object.symbolValues?.[level.js]?.[`${fromLayer}:${fromFile}`]?.v || {}) } as Partial<Record<SymbolValueKey, number>>;
     let k = keyframeAt(anchors, at);
@@ -4678,9 +4845,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const next = anchors, fileFrame = anchors[k][0];
     const writes: Array<(data: EditorData) => void> = [];
     symbolBatch.current = writes;
-    try { setSymbolKeys(toLayer, isUnchanged(layers[toLayer], next) ? null : next); setSymbolValue(toLayer, fileFrame, values); } finally { symbolBatch.current = null; }
+    try {
+      setSymbolKeys(toLayer, isUnchanged(layers[toLayer], next) ? null : next);
+      if (Object.keys(values).length) setSymbolValue(toLayer, fileFrame, values);
+      setSymbolBlanks(toLayer, (now) => (sourceBlank ? (now.includes(fileFrame) ? now : [...now, fileFrame]) : now.filter((file) => file !== fileFrame)));
+    } finally { symbolBatch.current = null; }
     mutate((data) => { writes.forEach((write) => write(data)); });
-  }, [keysEditable, mutate, readKeyValues, setSymbolKeys, setSymbolValue, showNotice, symbolLevelNow, symbolObjectNow]);
+  }, [keysEditable, mutate, readKeyValues, setSymbolBlanks, setSymbolKeys, setSymbolValue, showNotice, symbolLevelNow, symbolObjectNow]);
   // The picked keyframe's values as the file has them: the player reads them off its tween.
   const [keyValues, setKeyValues] = useState<{ layer: number; frame: number; values: Record<string, number> | null } | null>(null);
   const keyValuesAsk = useRef<{ layer: number; frame: number } | null>(null);
@@ -4764,6 +4935,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
 
     const deleteSelectedObject = (event: KeyboardEvent) => {
       if (scaleRotateOpenRef.current || (event.key !== "Delete" && event.key !== "Backspace") || isEditableTarget(event.target)) return;
+      // Frames are selected in the pose timeline: Delete is theirs (it clears the drawing of the selected keyframes), never the layer's part.
+      if (document.querySelector(".cb-symbol-sel")) return;
       const frames = frameSelectionFromCanvasRef.current ? null : frameSelectionRef.current;
       if (frames) {
         // Frames are selected on the timeline: Delete clears the keyframe there (Animate).
@@ -5084,7 +5257,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const next = clone(draft);
     const compiled = compileAnimationPlan(next, plan, project.width, project.height);
     historyPastRef.current.push(clone(draft));
-    if (historyPastRef.current.length > 60) historyPastRef.current.shift();
+    if (historyPastRef.current.length > UNDO_LEVELS) historyPastRef.current.shift();
     historyFutureRef.current = [];
     setDraft(compiled.data);
     setDirty(true);

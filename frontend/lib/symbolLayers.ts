@@ -9,7 +9,13 @@ import type { PoseForeign, SymbolLayerEdit } from "@/types";
 export const EXTRA_BASE = 1000;
 export type LayerRow = { id: number; name: string; type: string; parent: number | null; layer: FlaLayer; extra: boolean };
 
-const emptyLayer = (name: string, type: string): FlaLayer => ({ name, type, frames: [], props: [] });
+/** A new layer starts as Animate's does: a blank keyframe on its first frame, lasting the whole pose, split again at every blank keyframe
+ *  put on it since (folders hold no frames). */
+const emptyLayer = (name: string, type: string, total = 0, keys: number[] = []): FlaLayer => {
+  if (type === "folder" || total <= 0) return { name, type, frames: [], props: [] };
+  const starts = [...new Set([0, ...keys.filter((key) => key > 0 && key < total)])].sort((a, b) => a - b);
+  return { name, type, frames: starts.map((start, at) => ({ i: start, d: (starts[at + 1] ?? total) - start, blank: true })), props: [] };
+};
 
 /** The ids in order (top to bottom): the saved order, then anything it does not mention. */
 export function orderOf(layers: FlaLayer[], edit?: SymbolLayerEdit): number[] {
@@ -29,10 +35,11 @@ export const parentOf = (layers: FlaLayer[], edit: SymbolLayerEdit | undefined, 
 /** The layers to list, top to bottom (deleted ones are left out). */
 export function layerRows(layers: FlaLayer[], edit?: SymbolLayerEdit): LayerRow[] {
   const deleted = new Set(edit?.deleted || []);
+  const total = Math.max(0, ...layers.flatMap((layer) => layer.frames.map((frame) => frame.i + frame.d)));
   return orderOf(layers, edit).filter((id) => !deleted.has(id)).map((id) => {
     const extra = id >= EXTRA_BASE ? edit?.extras?.find((item) => item.id === id) : undefined;
     const file = id < EXTRA_BASE ? layers[id] : undefined;
-    const layer = file || emptyLayer(extra?.name || "Layer", extra?.type || "normal");
+    const layer = file || emptyLayer(extra?.name || "Layer", extra?.type || "normal", total, extra?.keys);
     return { id, name: edit?.names?.[String(id)] ?? extra?.name ?? layer.name, type: extra?.type || layer.type, parent: parentOf(layers, edit, id), layer, extra: Boolean(extra) };
   });
 }

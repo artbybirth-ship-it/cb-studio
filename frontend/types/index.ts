@@ -36,7 +36,8 @@ export type SymbolLayerEdit = {
   /** Single objects (drawn shapes, instances) taken out of a layer that still has others: the layer stays, these are hidden. */
   deletedProps?: string[];
   parents?: Record<string, number | null>;
-  extras?: Array<{ id: number; name: string; type: "normal" | "folder" }>;
+  /** keys: the frames (0-based) where an empty layer has a blank keyframe, besides frame 0 (Animate: F7 on an empty layer's timeline). */
+  extras?: Array<{ id: number; name: string; type: "normal" | "folder"; keys?: number[] }>;
   /** Layers made by Duplicate Layer: a new copy (named `prop` in the player) of the layer `of` (its index, a duplicate's index follows the file's layers). */
   clones?: Array<{ of: number; prop: string; symbol?: string; image?: { url: string; w: number; h: number; name: string; keep?: boolean }; foreign?: PoseForeign; end?: number; name?: string }>;
   /** What the player gets (made from the above): the objects of each layer top to bottom, and the objects to hide. */
