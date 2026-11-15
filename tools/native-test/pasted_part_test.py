@@ -68,7 +68,7 @@ try:
 
     import collections
     SOURCE = sys.argv[3]
-    src = [p for p in json.load(urllib.request.urlopen("http://localhost:3000/api/projects")) if p["id"] == SOURCE][0]["scenes"][0]["editor_data"]
+    src = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pasted_head_fixture.json"))) if SOURCE == "fixture" else [p for p in json.load(urllib.request.urlopen("http://localhost:3000/api/projects")) if p["id"] == SOURCE][0]["scenes"][0]["editor_data"]
     sc = scene(); ed = json.loads(json.dumps(sc["editor_data"])); ed["objects"] = [json.loads(json.dumps(src["objects"][0]))]; ed["background"] = "#ffffff"
     for k in ("nativePose", "nativePoseFit", "colorReplacements"): ed["objects"][0].pop(k, None)
     patch(sc, ed)
