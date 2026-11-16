@@ -66,7 +66,7 @@ try:
             cmd("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button="left", clickCount=n)
             cmd("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button="left", clickCount=n)
         time.sleep(1.2)
-    readout = lambda: js("(()=>{const t=[...document.querySelectorAll('div')].map(d=>d.textContent).find(t=>/^x -?[\\d.]+ · y/.test(t));return t||null})()")
+    readout = lambda: js("(()=>{const x=document.querySelector('[data-testid=native-prop-x]'),y=document.querySelector('[data-testid=native-prop-y]');return x&&y?`x ${x.value} · y ${y.value}`:null})()")
     d0 = depth()
     cx, cy = centre("[data-testid=stage]", 0.5, 0.4)
     dbl(cx, cy)

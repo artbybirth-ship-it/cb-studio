@@ -10,15 +10,18 @@
  * editor yet; opened from /native-lab.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { FlaDocument, FlaElement, Layer, Matrix, Timeline } from "../lib/fla/xfl";
+import type { Ease, FlaDocument, FlaElement, Keyframe, Layer, Matrix, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
-import { clearKeyframe, commit, deleteLayers, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
+import { clearKeyframe, commit, deleteLayers, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setEase, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
 import { movePoint, shapePoints, type PointRef, type Pt } from "../lib/native/points";
 import { innerFrame, layerStateAt } from "../lib/native/evaluate";
 import { applyEdits, editsOf, parseEdits, serializeEdits, type NativeEdits } from "../lib/native/store";
 import { IDENTITY, importElements, invert, mul, poseScale, registerLibrary } from "../lib/native/library";
 import { copyClip, readClip } from "../lib/native/clipboard";
 import { loadNativeDoc } from "../lib/native/loadDoc";
+import { EaseControl } from "./Timeline";
+import { pivotOf, propsOf, withProps, type PartProps } from "../lib/native/props";
+import { scrubProps, SCRUB_END, SCRUB_START } from "../lib/scrub";
 
 const CELL = 12;
 const ROW = 24;
@@ -29,6 +32,45 @@ type Drag = { kind: "part"; start: [number, number]; held: Array<Sel & { m: Matr
 
 const lengthOf = (layers: Layer[]) => Math.max(1, ...layers.flatMap((l) => l.frames.map((k) => k.i + k.d)));
 const short = (name: string) => name.split("/").pop() || name;
+/**
+ * A tween's ease as the Ease box shows it (the same box as the scene timeline and the old pose timeline): −100 ease in … 100 ease out.
+ * The .fla stores the opposite sign (intensity −100 = ends slowly = ease out 100). A custom curve or a named ease has no number: null.
+ */
+const easeNumber = (ease: Ease | undefined): number | null => (!ease ? 0 : ease.custom?.length || (ease.method && ease.method !== "none") ? null : -(ease.intensity || 0));
+const easeOfNumber = (value: number): Ease => ({ intensity: -value });
+const easeWords = (ease: Ease | undefined) => {
+  const value = easeNumber(ease);
+  return value == null ? "custom ease" : value < 0 ? `ease in ${-value}` : value > 0 ? `ease out ${value}` : "no easing";
+};
+const sameEase = (a: Ease | undefined, b: Ease | undefined) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+/** The tween the frame `at` of `layer` is in (its starting keyframe), when that keyframe tweens into the next one. */
+const tweenAt = (layer: Layer | undefined, at: number): Keyframe | null => {
+  const state = layer && layerStateAt(layer, at);
+  if (!state || !state.key.tween || state.key.tween === "motion object" || !state.next || state.next.i !== state.key.i + state.key.d) return null;
+  return state.key;
+};
+/** A number box of the Properties: drag left / right to change it (lib/scrub.ts, like every number box), or click and type. */
+function PropField({ id, label, unit, value, decimals, min, max, onChange }: { id: string; label: string; unit?: string; value: number; decimals: number; min?: number; max?: number; onChange: (value: number) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const round = (v: number) => Math.round(v * 10 ** decimals) / 10 ** decimals;
+  const commitTyped = () => {
+    const next = parseFloat(String(text ?? "").replace(",", ".").replace(/[^\d.+-]/g, ""));
+    setText(null);
+    if (Number.isFinite(next) && Math.abs(next - round(value)) > 1e-9) onChange(Math.max(min ?? -Infinity, Math.min(max ?? Infinity, next)));
+  };
+  return (
+    <label style={{ display: "inline-flex", alignItems: "center", gap: 3, marginRight: 8 }} title={`${label}: drag left or right to change, or click and type`}>
+      <span style={{ color: "#555" }}>{label}</span>
+      <input data-testid={`native-prop-${id}`} type="text" inputMode="decimal" aria-label={label} value={text ?? `${round(value)}`}
+        style={{ width: 54, font: "12px system-ui", padding: "1px 3px", cursor: "ew-resize" }}
+        {...scrubProps({ value: round(value), onChange, min, max, decimals, step: 1 })}
+        onFocus={(e) => { setText(String(round(value))); e.target.select(); }}
+        onChange={(e) => setText(e.target.value)} onBlur={commitTyped}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } else if (e.key === "Escape") { setText(null); e.currentTarget.blur(); } }} />
+      {unit && <span style={{ color: "#777" }}>{unit}</span>}
+    </label>
+  );
+}
 const isTyping = (target: EventTarget | null) => target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
 
 export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl }: {
@@ -61,6 +103,10 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const [pointMode, setPointMode] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [drag, setDrag] = useState<Drag | null>(null);
+  /** The ease while the Ease box is being dragged: the tween plays with it on the stage, nothing is kept until the drag ends. */
+  const [easePreview, setEasePreview] = useState<{ layer: number; at: number; value: number } | null>(null);
+  /** A Properties number while it is being dragged: shown on the stage, kept as one undo step when the drag ends. */
+  const [valuePreview, setValuePreview] = useState<{ layer: number; next: Layer } | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, w: 500, h: 900 });
   const [note, setNote] = useState("");
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -73,8 +119,10 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const shown: Timeline | undefined = useMemo(() => {
     if (!base) return undefined;
     if ((drag?.kind === "part" || drag?.kind === "point") && drag.preview) return { ...base, layers: base.layers.map((l, i) => drag.preview!.get(i) ?? l) };
+    if (easePreview) return { ...base, layers: base.layers.map((l, i) => (i === easePreview.layer ? setEase(l, easePreview.at, easeOfNumber(easePreview.value)) : l)) };
+    if (valuePreview) return { ...base, layers: base.layers.map((l, i) => (i === valuePreview.layer ? valuePreview.next : l)) };
     return base;
-  }, [base, drag]);
+  }, [base, drag, easePreview, valuePreview]);
   const length = shown?.length || 1;
   const fps = doc.fps;
 
@@ -520,6 +568,63 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const part = shown && elIndex != null && shown.layers[layerIndex] ? resolveElements(shown.layers[layerIndex], frame)[elIndex] : undefined;
   const parts = shown?.layers[layerIndex] ? resolveElements(shown.layers[layerIndex], frame) : [];
   const btn: React.CSSProperties = { padding: "3px 8px", font: "12px system-ui" };
+  // ---- Properties: the selected part's place, size, rotation, skew and opacity at this frame. A change on a held span changes that keyframe; on
+  // a tween a keyframe is made here first (ops.setElement). Typed numbers are one undo step each; a drag on a number is one undo step in all.
+  const scrubbing = useRef(false);
+  const previewRef = useRef(valuePreview);
+  previewRef.current = valuePreview;
+  const commitLayer = useCallback((index: number, next: Layer) => {
+    if (!base) return;
+    const layers = base.layers.map((l, i) => (i === index ? next : l));
+    const map = new Map(working);
+    map.set(symbol, { ...base, layers, length: lengthOf(layers) });
+    setHist((h) => commit(h, map));
+  }, [base, working, symbol]);
+  useEffect(() => {
+    const start = () => { scrubbing.current = true; };
+    const end = () => {
+      scrubbing.current = false;
+      const done = previewRef.current;
+      setValuePreview(null);
+      // Esc during a drag puts the number back: nothing to keep then.
+      if (done && base && JSON.stringify(done.next.frames) !== JSON.stringify(base.layers[done.layer]?.frames)) commitLayer(done.layer, done.next);
+    };
+    window.addEventListener(SCRUB_START, start);
+    window.addEventListener(SCRUB_END, end);
+    return () => { window.removeEventListener(SCRUB_START, start); window.removeEventListener(SCRUB_END, end); };
+  }, [base, commitLayer]);
+  const setPartValue = (change: Partial<PartProps> & { alpha?: number }) => {
+    if (!base || elIndex == null || !base.layers[layerIndex]) return;
+    const now = resolveElements(base.layers[layerIndex], frame)[elIndex];
+    if (!now) return;
+    const apply = (el: FlaElement): FlaElement => {
+      // Opacity is shown in whole %: within that rounding it is the same.
+      if (change.alpha != null) return el.k === "instance" && Math.abs(change.alpha - (el.alpha ?? 1)) > 0.005 + 1e-9 ? { ...el, alpha: change.alpha } : el;
+      return { ...el, m: withProps(el.m, pivotOf(el), change) } as FlaElement;
+    };
+    // Back to what it is (Esc during a drag, or the same number typed): nothing to keep, and no keyframe made for it.
+    const unchanged = JSON.stringify(apply(now)) === JSON.stringify(now);
+    const next = unchanged ? null : setElement(base.layers[layerIndex], frame, elIndex, apply);
+    if (scrubbing.current) {
+      const preview = next ? { layer: layerIndex, next } : null;
+      // Kept at once (not on the next render): the drag's end can come before React draws again.
+      previewRef.current = preview;
+      setValuePreview(preview);
+    } else if (next) commitLayer(layerIndex, next);
+  };
+  const partProps = part ? propsOf(part.m, pivotOf(part)) : null;
+  // The tween at the playhead on the picked layer: its ease can be changed (classic and shape tweens, as in Animate's Properties panel).
+  const tween = base ? tweenAt(base.layers[layerIndex], frame) : null;
+  // The same tween as the Animate file has it (same layer name, same start): what Reset goes back to.
+  const fileLayer = base && doc.symbols.get(symbol)?.timeline.layers.find((l) => l.name === base.layers[layerIndex]?.name);
+  const fileTween = tween && fileLayer ? fileLayer.frames.find((k) => k.i === tween.i && k.d === tween.d && k.tween === tween.tween) : undefined;
+  const setTweenEase = (ease: Ease | undefined) => {
+    if (!tween) return;
+    const at = tween.i;
+    setEasePreview(null);
+    edit((l) => (ease ? setEase(l, at, ease) : { ...l, frames: l.frames.map((k) => (k.i === at ? { ...k, ease: undefined } : k)) }), layerIndex);
+    setNote(`Ease on ${base?.layers[layerIndex]?.name} ${at + 1}–${at + tween.d}: ${easeWords(ease)}`);
+  };
 
   return (
     <div data-testid="native-editor" style={{ display: "grid", gap: 8 }}>
@@ -557,8 +662,31 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
               {p.k === "instance" && i === elIndex && doc.symbols.has(p.item) && <button style={btn} onClick={() => setStack((s) => [...s, { item: p.item, m: [...p.m] as Matrix }])}>Step into</button>}
             </div>
           ))}
-          {part && <div style={{ marginTop: 6 }}>x {part.m[4].toFixed(1)} · y {part.m[5].toFixed(1)}</div>}
-          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move; A (or Edit points) shows the anchor points of a drawn shape (double-click a symbol to step into it first) and drag one, or a curve handle, to reshape it; Delete removes its layer, the dot beside a layer hides it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it. ⇧-click extends the frame selection. , and . step frames.</div>
+          {tween && (
+            <div data-testid="native-ease" style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <span title={`${tween.tween === "shape" ? "Shape" : "Classic"} tween, frames ${tween.i + 1}–${tween.i + tween.d}`}>{tween.tween === "shape" ? "Shape" : "Classic"} tween {tween.i + 1}–{tween.i + tween.d} · Ease</span>
+              <EaseControl key={`${symbol}:${layerIndex}:${tween.i}`} value={easeNumber(tween.ease) ?? 0}
+                onCommit={(value) => setTweenEase(easeOfNumber(value))}
+                onPreview={(value) => setEasePreview(value == null ? null : { layer: layerIndex, at: tween.i, value })} />
+              {easeNumber(tween.ease) == null && !easePreview && <em data-testid="native-ease-custom">custom ease</em>}
+              {fileTween && !sameEase(fileTween.ease, tween.ease) && <button data-testid="native-ease-reset" style={btn} onClick={() => setTweenEase(fileTween.ease)} title={`Back to the file's ${easeWords(fileTween.ease)}`}>Reset</button>}
+            </div>
+          )}
+          {part && partProps && (
+            <div data-testid="native-props" style={{ marginTop: 8, lineHeight: "26px" }}>
+              <div><b>Properties</b> <span style={{ color: "#777" }}>({part.k === "instance" ? short(part.item) : part.k === "shape" ? "drawn shape" : "picture"}; X / Y is its transformation point)</span></div>
+              <PropField id="x" label="X" value={partProps.x} decimals={1} onChange={(x) => setPartValue({ x })} />
+              <PropField id="y" label="Y" value={partProps.y} decimals={1} onChange={(y) => setPartValue({ y })} />
+              <br />
+              <PropField id="w" label="W" unit="%" value={partProps.w} decimals={1} onChange={(w) => setPartValue({ w })} />
+              <PropField id="h" label="H" unit="%" value={partProps.h} decimals={1} onChange={(h) => setPartValue({ h })} />
+              <br />
+              <PropField id="rotation" label="Rotate" unit="°" value={partProps.rotation} decimals={1} onChange={(rotation) => setPartValue({ rotation })} />
+              <PropField id="skew" label="Skew" unit="°" value={partProps.skew} decimals={1} onChange={(skew) => setPartValue({ skew })} />
+              {part.k === "instance" && <><br /><PropField id="alpha" label="Opacity" unit="%" value={(part.alpha ?? 1) * 100} decimals={0} min={0} max={100} onChange={(v) => setPartValue({ alpha: Math.round(v * 10) / 1000 })} /></>}
+            </div>
+          )}
+          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move (or drag a number in its Properties left / right, or click it and type); A (or Edit points) shows the anchor points of a drawn shape (double-click a symbol to step into it first) and drag one, or a curve handle, to reshape it; Delete removes its layer, the dot beside a layer hides it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it; click inside a tween to change its Ease (drag the number, or double-click to type). ⇧-click extends the frame selection. , and . step frames.</div>
         </div>
       </div>
       {shown && (
@@ -580,7 +708,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
                   const moving = drag?.kind === "key" && drag.layer === index && drag.from === k.i;
                   const left = (moving ? drag.to : k.i) * CELL;
                   return (
-                    <div key={k.i} data-key={`${index}:${k.i}`} style={{ position: "absolute", left, top: 2, height: ROW - 5, width: k.d * CELL - 1, boxSizing: "border-box", border: "1px solid #777", opacity: moving ? 0.6 : 1,
+                    <div key={k.i} data-key={`${index}:${k.i}`} title={`Frame ${k.i + 1}${k.d > 1 ? `–${k.i + k.d}` : ""}${k.tween ? ` · ${k.tween === "shape" ? "shape" : "classic"} tween, ${easeWords(k.ease)}` : ""}`} style={{ position: "absolute", left, top: 2, height: ROW - 5, width: k.d * CELL - 1, boxSizing: "border-box", border: "1px solid #777", opacity: moving ? 0.6 : 1,
                       background: k.tween === "shape" ? "#bfe8bf" : k.tween ? "#d9c8f0" : k.elements.length ? "#e8e8e8" : "#fff" }}>
                       <div style={{ width: 6, height: 6, borderRadius: 3, margin: "2px 0 0 2px", background: k.elements.length ? "#222" : "#fff", border: "1px solid #222" }} />
                     </div>

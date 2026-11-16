@@ -93,7 +93,7 @@ try:
     # drag a part on the stage
     cx, cy = centre("[data-testid=stage]", 0.5, 0.4)
     def x_readout():
-        return js("(()=>{const t=[...document.querySelectorAll('div')].map(d=>d.textContent).find(t=>/^x -?[\\d.]+ · y/.test(t));return t||null})()")
+        return js("(()=>{const x=document.querySelector('[data-testid=native-prop-x]'),y=document.querySelector('[data-testid=native-prop-y]');return x&&y?`x ${x.value} · y ${y.value}`:null})()")
     mouse("mousePressed", cx, cy); time.sleep(0.6)
     r0 = x_readout()
     check("clicking the stage picks a part", r0 is not None, str(r0))
