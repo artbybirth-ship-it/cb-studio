@@ -204,6 +204,20 @@ export function deleteLayers(layers: Layer[], indices: number[]): Layer[] {
   });
 }
 
+/**
+ * A new layer put above the layer at `at` (layers are listed top first, so it takes index `at`), in the same folder as that layer.
+ * Layers that point at a parent (folder or mask) at or below `at` point at it one further down.
+ */
+export function insertLayer(layers: Layer[], at: number, layer: Layer): Layer[] {
+  const where = Math.max(0, Math.min(layers.length, at));
+  const neighbour = layers[where];
+  const folder = neighbour && neighbour.parent != null && layers[neighbour.parent]?.type === "folder" ? neighbour.parent : null;
+  const shift = (p: number | null) => (p != null && p >= where ? p + 1 : p);
+  const placed: Layer = { ...layer, parent: shift(folder) };
+  return [...layers.slice(0, where).map((l) => (l.parent != null && l.parent >= where ? { ...l, parent: l.parent + 1 } : l)), placed,
+    ...layers.slice(where).map((l) => (l.parent != null && l.parent >= where ? { ...l, parent: l.parent + 1 } : l))];
+}
+
 // ---------- history
 /** Undo/redo over any immutable value (the document, or just one timeline). */
 export type History<T> = { past: T[]; present: T; future: T[] };

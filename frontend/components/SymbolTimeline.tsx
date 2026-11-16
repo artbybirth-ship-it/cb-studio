@@ -783,7 +783,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
 }
 
 /** Pictures of the Backgrounds and FX libraries, for a new layer in a pose. */
-function PoseLibraryPictures({ filter, onPick }: { filter: string; onPick: (item: MediaLibraryItem) => void }) {
+export function PoseLibraryPictures({ filter, onPick }: { filter: string; onPick: (item: MediaLibraryItem) => void }) {
   const backgrounds = useMediaLibrary("backgrounds"), fx = useMediaLibrary("fx");
   const query = filter.toLowerCase();
   const items = [...fx.items, ...backgrounds.items].filter((item) => !query || item.name.toLowerCase().includes(query) || item.category.toLowerCase().includes(query)).slice(0, 60);

@@ -6463,6 +6463,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 <NativePoseDialog
                   flaUrl={nativeEdit.flaUrl} item={nativeEdit.item} title={nativeEdit.title} js={nativeEdit.js}
                   initial={object?.nativePose?.[nativeEdit.js]} colours={object?.colorReplacements}
+                  uploadPicture={project ? async (file) => (await api.uploadAsset(project.id, "background", file)).url : undefined}
                   legacy={object && (object.symbolKeys || object.symbolEases || object.symbolValues || object.symbolLayers) ? { keys: object.symbolKeys, eases: object.symbolEases, values: object.symbolValues, layers: object.symbolLayers } : undefined}
                   onCancel={() => setNativeEdit(null)}
                   onDone={(edits) => {

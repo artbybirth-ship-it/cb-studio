@@ -12,14 +12,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Ease, FlaDocument, FlaElement, Keyframe, Layer, Matrix, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
-import { clearKeyframe, commit, deleteLayers, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setEase, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
+import { clearKeyframe, commit, deleteLayers, history, insertBlankKeyframe, insertLayer, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setEase, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
 import { movePoint, shapePoints, type PointRef, type Pt } from "../lib/native/points";
 import { innerFrame, layerStateAt } from "../lib/native/evaluate";
 import { applyEdits, editsOf, parseEdits, serializeEdits, type NativeEdits } from "../lib/native/store";
-import { IDENTITY, importElements, invert, mul, poseScale, registerLibrary } from "../lib/native/library";
+import { IDENTITY, addPicture, importElements, invert, mul, poseScale, registerLibrary } from "../lib/native/library";
 import { copyClip, readClip } from "../lib/native/clipboard";
 import { loadNativeDoc } from "../lib/native/loadDoc";
 import { EaseControl } from "./Timeline";
+import { PoseLibraryPictures } from "./SymbolTimeline";
+import type { MediaLibraryItem } from "../lib/mediaLibrary";
 import { pivotOf, propsOf, withProps, type PartProps } from "../lib/native/props";
 import { scrubProps, SCRUB_END, SCRUB_START } from "../lib/scrub";
 
@@ -32,6 +34,8 @@ type Drag = { kind: "part"; start: [number, number]; held: Array<Sel & { m: Matr
 
 const lengthOf = (layers: Layer[]) => Math.max(1, ...layers.flatMap((l) => l.frames.map((k) => k.i + k.d)));
 const short = (name: string) => name.split("/").pop() || name;
+/** A library name as people read it: Animate files can keep characters such as "<" as codes ("&#060Path&#062 copy 2" is "<Path> copy 2"). */
+const readable = (name: string) => short(name).replace(/&#0*(\d+);?/g, (_, code: string) => String.fromCharCode(Number(code))).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 /**
  * A tween's ease as the Ease box shows it (the same box as the scene timeline and the old pose timeline): −100 ease in … 100 ease out.
  * The .fla stores the opposite sign (intensity −100 = ends slowly = ease out 100). A custom curve or a named ease has no number: null.
@@ -73,7 +77,19 @@ function PropField({ id, label, unit, value, decimals, min, max, onChange }: { i
 }
 const isTyping = (target: EventTarget | null) => target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
 
-export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl }: {
+/** Where a drawing's ink lies, in the units `draw` draws in (found on a big scratch canvas at half size); null when nothing is drawn. */
+function inkBox(draw: (ctx: OffscreenCanvasRenderingContext2D) => void): { x: number; y: number; w: number; h: number } | null {
+  const SIZE = 1400, S = 0.5;
+  const scratch = new OffscreenCanvas(SIZE, SIZE), ctx = scratch.getContext("2d", { willReadFrequently: true })!;
+  ctx.setTransform(S, 0, 0, S, SIZE / 2, SIZE / 2);
+  draw(ctx);
+  const data = ctx.getImageData(0, 0, SIZE, SIZE).data;
+  let x0 = SIZE, y0 = SIZE, x1 = -1, y1 = -1;
+  for (let y = 0; y < SIZE; y += 1) for (let x = 0; x < SIZE; x += 1) if (data[(y * SIZE + x) * 4 + 3] > 8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  return x1 < 0 ? null : { x: (x0 - SIZE / 2) / S, y: (y0 - SIZE / 2) / S, w: (x1 - x0) / S, h: (y1 - y0) / S };
+}
+
+export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl, uploadPicture }: {
   doc: FlaDocument; renderer: NativeRenderer; poses: Pose[];
   /** Where this character's .fla came from: lets a copied part be found again after a reload. */
   flaUrl?: string;
@@ -81,6 +97,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   initialEdits?: NativeEdits | null;
   /** Called with the edits as they now are after every change (not on open). */
   onChange?: (edits: NativeEdits) => void;
+  /** Stores a picture file from the computer with the project and answers its address (the scene editor); without it the picture's bytes are kept in the edits. */
+  uploadPicture?: (file: File) => Promise<string>;
 }) {
   const [hist, setHist] = useState<History<Working>>(() => {
     const map = new Map<string, Timeline>();
@@ -268,6 +286,56 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   }, [base, working, symbol, doc, stack, elIndex, layerIndex, frame, loadedHere]);
   copyRef.current = copyPart;
   pasteRef.current = () => void pastePart();
+
+  // ---- new layer from the library: a symbol of this file, a picture of the Backgrounds / FX libraries, or a picture file (Animate: drag from the Library)
+  const [libMenu, setLibMenu] = useState<{ x: number; y: number } | null>(null);
+  const [libFilter, setLibFilter] = useState("");
+  /** The new layer goes above the picked layer, holds the element for the whole timeline, and is selected. One undo step. */
+  const addLayerWith = useCallback((el: FlaElement, name: string) => {
+    if (!base) return;
+    const at = Math.max(0, Math.min(base.layers.length, layerIndex));
+    const layer: Layer = { name, type: "normal", parent: null, hidden: false, frames: [{ i: 0, d: Math.max(1, base.length), elements: [el] }] };
+    const layers = insertLayer(base.layers, at, layer);
+    const map = new Map(working);
+    map.set(symbol, { ...base, layers, length: lengthOf(layers) });
+    setHist((h) => commit(h, map));
+    setLayerIndex(at); setElIndex(0); setOthers([]);
+    setNote(`New layer ${name}`);
+  }, [base, working, symbol, layerIndex]);
+  /** The middle of what the stage shows, in this level's own space: where a new layer's artwork is centred. */
+  const viewCentre = (): [number, number] => [view.x + view.w / 2, view.y + view.h / 2];
+  const addSymbolLayer = useCallback((item: string) => {
+    const symbolInfo = doc.symbols.get(item);
+    if (!symbolInfo) return;
+    renderer.overrides.clear();
+    for (const [name, t] of working) renderer.overrides.set(name, t);
+    const box = inkBox((ctx) => renderer.drawSymbol(ctx, item, 0));
+    const middle: [number, number] = box ? [box.x + box.w / 2, box.y + box.h / 2] : [0, 0];
+    const [cx, cy] = viewCentre();
+    // Centred on the stage, turning about its own middle.
+    const el: FlaElement = { k: "instance", item, symbolType: symbolInfo.type, m: [1, 0, 0, 1, cx - middle[0], cy - middle[1]], pivot: middle, loop: "loop", first: 0 };
+    addLayerWith(el, readable(item));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, renderer, working, addLayerWith, view]);
+  const addPictureLayer = useCallback(async (picture: { url?: string; file?: File; name: string }) => {
+    try {
+      setNote("Adding the picture…");
+      let url = picture.url, bytes: Uint8Array | undefined;
+      if (picture.file) {
+        if (!picture.file.type.startsWith("image/")) { setNote("Pick a picture file"); return; }
+        if (uploadPicture) url = await uploadPicture(picture.file); else bytes = new Uint8Array(await picture.file.arrayBuffer());
+      }
+      const added = await addPicture({ doc, renderer }, { url, bytes, name: picture.name.replace(/\.[a-z0-9]+$/i, "") });
+      // Fitted into 40% of what the stage shows (never enlarged), centred.
+      const [cx, cy] = viewCentre();
+      const k = Math.min(1, (view.w * 0.4) / Math.max(1, added.width), (view.h * 0.4) / Math.max(1, added.height));
+      addLayerWith({ k: "bitmap", item: added.item, m: [k, 0, 0, k, cx - (added.width * k) / 2, cy - (added.height * k) / 2] }, picture.name.replace(/\.[a-z0-9]+$/i, "") || "Picture");
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Could not add the picture");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, renderer, uploadPicture, addLayerWith, view]);
+  const libraryNames = useMemo(() => [...doc.symbols.keys()].sort((a, b) => readable(a).localeCompare(readable(b))), [doc, hist]);
 
   // ---- stage
   const layoutKey = `${symbol}`;
@@ -640,6 +708,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         <button data-testid="copy-part" style={btn} onClick={copyPart}>⌘C Copy part</button>
         <button data-testid="paste-part" style={btn} onClick={() => void pastePart()}>⌘V Paste as layer</button>
         <button data-testid="swap-part" style={btn} onClick={() => void swapPart()}>⇄ Swap with copied part</button>
+        <button data-testid="add-from-library" style={btn} title="New layer above the picked one: a symbol of this file's library, a picture, or a picture file from your computer"
+          onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setLibFilter(""); setLibMenu((open) => (open ? null : { x: r.left, y: r.bottom + 4 })); }}>＋ Layer from library</button>
         <button data-testid="point-mode" style={{ ...btn, background: pointMode ? "#cfe3ff" : undefined }} aria-pressed={pointMode} title="Point editing: select a drawn shape, then drag its anchor points and curve handles" onClick={() => setPointMode((on) => !on)}>A Edit points</button>
         <button data-testid="delete-layer" style={btn} onClick={deleteSelected}>⌫ Delete layer</button>
         <button data-testid="undo" style={btn} onClick={doUndo} disabled={!hist.past.length}>Undo</button>
@@ -689,6 +759,26 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
           <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move (or drag a number in its Properties left / right, or click it and type); A (or Edit points) shows the anchor points of a drawn shape (double-click a symbol to step into it first) and drag one, or a curve handle, to reshape it; Delete removes its layer, the dot beside a layer hides it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it; click inside a tween to change its Ease (drag the number, or double-click to type). ⇧-click extends the frame selection. , and . step frames.</div>
         </div>
       </div>
+      {libMenu && (
+        <>
+          <div className="cb-symbol-lib-shade" onPointerDown={() => setLibMenu(null)} />
+          <div className="cb-frame-menu cb-symbol-lib" role="menu" data-testid="native-library" style={{ left: libMenu.x, top: libMenu.y }}>
+            <input autoFocus value={libFilter} onChange={(e) => setLibFilter(e.target.value)} placeholder="Find a symbol or picture" aria-label="Find a symbol or picture"
+              onKeyDown={(e) => { if (e.key === "Escape") setLibMenu(null); e.stopPropagation(); }} />
+            <div className="cb-symbol-lib-list">
+              {libraryNames.filter((name) => readable(name).toLowerCase().includes(libFilter.toLowerCase()) || name.toLowerCase().includes(libFilter.toLowerCase())).slice(0, 300).map((name) => (
+                <button key={name} type="button" role="menuitem" data-symbol={name} title={name} onClick={() => { setLibMenu(null); addSymbolLayer(name); }}>{readable(name)}</button>
+              ))}
+              {!libraryNames.length && <span className="cb-symbol-lib-empty">No symbols in this file&apos;s library.</span>}
+            </div>
+            <label className="cb-symbol-lib-upload">
+              Upload a picture…
+              <input data-testid="native-upload-picture" type="file" accept="image/*" hidden onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) { setLibMenu(null); void addPictureLayer({ file, name: file.name }); } }} />
+            </label>
+            <PoseLibraryPictures filter={libFilter} onPick={(item: MediaLibraryItem) => { setLibMenu(null); void addPictureLayer({ url: item.url, name: item.name }); }} />
+          </div>
+        </>
+      )}
       {shown && (
         <div style={{ overflowX: "auto", border: "1px solid #ccc", maxWidth: 1100 }} data-testid="timeline">
           <div style={{ display: "flex" }}>

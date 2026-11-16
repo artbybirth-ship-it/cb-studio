@@ -112,3 +112,23 @@ console.log("ops: all assertions passed");
   assert.equal(o.swapSymbol(layer, "Nothing", to), layer, "no match returns the same layer");
   console.log("swap symbol ok");
 }
+
+// insert layer: above the picked layer, in its folder; parents below shift
+{
+  const named = (name, type = "normal", parent = null) => ({ name, type, parent, hidden: false, frames: [] });
+  // 0 top, 1 folder, 2 in folder, 3 mask, 4 masked by 3
+  const layers = [named("top"), named("F", "folder"), named("inF", "normal", 1), named("M", "mask"), named("under", "normal", 3)];
+  const fresh = named("new");
+  const a = o.insertLayer(layers, 2, fresh);
+  assert.deepEqual(a.map((l) => l.name), ["top", "F", "new", "inF", "M", "under"], "above the picked layer");
+  assert.equal(a[2].parent, 1, "in the picked layer's folder");
+  assert.equal(a[3].parent, 1, "folder above keeps its index");
+  assert.equal(a[5].parent, 4, "masked layer follows its mask down");
+  const b = o.insertLayer(layers, 3, fresh);
+  assert.equal(b[3].parent, null, "a mask is not a folder: the new layer is not masked");
+  assert.equal(b[5].parent, 4, "masked layer still points at its mask");
+  assert.equal(o.insertLayer(layers, 0, fresh)[0].name, "new", "on top");
+  assert.equal(o.insertLayer(layers, 99, fresh)[5].name, "new", "past the end: at the bottom");
+  assert.equal(layers[4].parent, 3, "input not changed");
+  console.log("insert layer ok");
+}

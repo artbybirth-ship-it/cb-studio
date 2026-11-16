@@ -15,12 +15,14 @@ import { convertLegacy, type LegacyFields } from "../lib/native/legacy";
 import { buildClones } from "../lib/native/legacyClones";
 import type { ColourRule } from "../lib/native/colour";
 
-export default function NativePoseDialog({ flaUrl, item, title, js, initial, legacy, colours, onDone, onCancel }: {
+export default function NativePoseDialog({ flaUrl, item, title, js, initial, legacy, colours, uploadPicture, onDone, onCancel }: {
   flaUrl: string; item: string; title: string; /** The pose's class in the player (what old edits call it). */ js?: string; initial?: NativeEdits | null;
   /** What older versions saved inside this character: turned into native edits the first time the pose opens here (when it has none of its own). */
   legacy?: LegacyFields;
   /** The character's colour rules (Recolour panel): the pose is drawn in the character's colours here, swapped and pasted parts included. */
   colours?: ColourRule[];
+  /** Stores a picture file from the computer with the project (a new picture layer), answering its address. */
+  uploadPicture?: (file: File) => Promise<string>;
   onDone: (edits: NativeEdits | null) => void; onCancel: () => void;
 }) {
   const [loaded, setLoaded] = useState<NativeLoaded | null>(null);
@@ -89,7 +91,7 @@ export default function NativePoseDialog({ flaUrl, item, title, js, initial, leg
         </div>
         {error ? <div style={{ font: "13px system-ui", color: "#b00020" }}>{error}</div>
           : !loaded ? <div style={{ font: "13px system-ui" }}>Loading the character&apos;s Animate file… {Math.round(progress * 100)}%</div>
-          : <NativePoseEditor flaUrl={flaUrl} doc={loaded.doc} renderer={loaded.renderer} poses={[{ item, name: item.split("/").pop() || item }]} initialEdits={initial ?? seed} onChange={onChange} />}
+          : <NativePoseEditor flaUrl={flaUrl} doc={loaded.doc} renderer={loaded.renderer} poses={[{ item, name: item.split("/").pop() || item }]} initialEdits={initial ?? seed} onChange={onChange} uploadPicture={uploadPicture} />}
         {converted && <div data-testid="native-converted" style={{ font: "12px system-ui", color: "#555", marginTop: 6 }}>{converted}</div>}
       </div>
     </div>

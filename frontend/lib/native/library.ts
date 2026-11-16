@@ -13,7 +13,8 @@ import type { Brush, BitmapItem, FlaDocument, FlaElement, LibrarySymbol, Matrix,
 import { decodeBitmap } from "../fla/bitmaps";
 import type { NativeLoaded } from "./loadDoc";
 
-export type SavedBitmap = { name: string; width: number; height: number; data?: string };
+/** A picture: its bytes as base64, or (a picture added from the media library or uploaded with the project) the address it is loaded from. */
+export type SavedBitmap = { name: string; width: number; height: number; data?: string; url?: string };
 /** Imported library items, JSON-safe (pictures as base64). */
 export type ImportedLibrary = { symbols: Record<string, LibrarySymbol>; bitmaps: Record<string, SavedBitmap>; brushes: Record<string, Brush> };
 
@@ -126,7 +127,9 @@ export async function registerLibrary(target: NativeLoaded, lib: ImportedLibrary
     const item: BitmapItem = { name, data, width: saved.width, height: saved.height };
     doc.bitmaps.set(name, item);
     const done = (async () => {
-      const decoded = await decodeBitmap(data);
+      // A picture kept by its address is fetched (not copied into the saved edits).
+      const bytes = data ?? (saved.url ? await fetch(saved.url).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => (b ? new Uint8Array(b) : undefined)).catch(() => undefined) : undefined);
+      const decoded = await decodeBitmap(bytes);
       if (decoded) renderer.assets.images.set(name, await createImageBitmap(new Blob([decoded.bytes as BlobPart])) as never);
     })();
     waiting.set(name, done);
@@ -179,4 +182,25 @@ export function libraryUsedBy(doc: FlaDocument, timelines: Timeline[]): Imported
   timelines.forEach(visit);
   // Pictures and brushes used by the symbols that came along.
   return Object.keys(out.symbols).length || Object.keys(out.bitmaps).length ? out : undefined;
+}
+
+/**
+ * A picture added to the document's library (a new layer from a picture): registered under a fresh name and saved with the edits that use it,
+ * by its address when it has one (media library, uploaded with the project), else as its bytes. Answers its library name and natural size.
+ */
+export async function addPicture(target: NativeLoaded, picture: { url?: string; bytes?: Uint8Array; name: string }): Promise<{ item: string; width: number; height: number }> {
+  let bytes = picture.bytes;
+  if (!bytes) {
+    const response = await fetch(picture.url!);
+    if (!response.ok) throw new Error(`Could not load the picture (${response.status})`);
+    bytes = new Uint8Array(await response.arrayBuffer());
+  }
+  const image = await createImageBitmap(new Blob([bytes as BlobPart]));
+  const base = `Picture/${picture.name.replace(/[/\\]/g, "_") || "Picture"}`;
+  let item = base, n = 2;
+  while (target.doc.bitmaps.has(item)) item = `${base} ${n++}`;
+  const saved: SavedBitmap = picture.url ? { name: item, width: image.width, height: image.height, url: picture.url } : { name: item, width: image.width, height: image.height, data: toBase64(bytes) };
+  await registerLibrary(target, { symbols: {}, brushes: {}, bitmaps: { [item]: saved } });
+  image.close?.();
+  return { item, width: saved.width, height: saved.height };
 }

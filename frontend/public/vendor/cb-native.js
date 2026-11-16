@@ -2029,6 +2029,7 @@ exports.renameElements = renameElements;
 exports.registerLibrary = registerLibrary;
 exports.importElements = importElements;
 exports.libraryUsedBy = libraryUsedBy;
+exports.addPicture = addPicture;
 const bitmaps_1 = require("lib/fla/bitmaps");
 const empty = () => ({ symbols: {}, bitmaps: {}, brushes: {} });
 const imported = new WeakMap();
@@ -2173,7 +2174,9 @@ async function registerLibrary(target, lib) {
         const item = { name, data, width: saved.width, height: saved.height };
         doc.bitmaps.set(name, item);
         const done = (async () => {
-            const decoded = await (0, bitmaps_1.decodeBitmap)(data);
+            // A picture kept by its address is fetched (not copied into the saved edits).
+            const bytes = data ?? (saved.url ? await fetch(saved.url).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => (b ? new Uint8Array(b) : undefined)).catch(() => undefined) : undefined);
+            const decoded = await (0, bitmaps_1.decodeBitmap)(bytes);
             if (decoded)
                 renderer.assets.images.set(name, await createImageBitmap(new Blob([decoded.bytes])));
         })();
@@ -2243,6 +2246,28 @@ function libraryUsedBy(doc, timelines) {
     timelines.forEach(visit);
     // Pictures and brushes used by the symbols that came along.
     return Object.keys(out.symbols).length || Object.keys(out.bitmaps).length ? out : undefined;
+}
+/**
+ * A picture added to the document's library (a new layer from a picture): registered under a fresh name and saved with the edits that use it,
+ * by its address when it has one (media library, uploaded with the project), else as its bytes. Answers its library name and natural size.
+ */
+async function addPicture(target, picture) {
+    let bytes = picture.bytes;
+    if (!bytes) {
+        const response = await fetch(picture.url);
+        if (!response.ok)
+            throw new Error(`Could not load the picture (${response.status})`);
+        bytes = new Uint8Array(await response.arrayBuffer());
+    }
+    const image = await createImageBitmap(new Blob([bytes]));
+    const base = `Picture/${picture.name.replace(/[/\\]/g, "_") || "Picture"}`;
+    let item = base, n = 2;
+    while (target.doc.bitmaps.has(item))
+        item = `${base} ${n++}`;
+    const saved = picture.url ? { name: item, width: image.width, height: image.height, url: picture.url } : { name: item, width: image.width, height: image.height, data: toBase64(bytes) };
+    await registerLibrary(target, { symbols: {}, brushes: {}, bitmaps: { [item]: saved } });
+    image.close?.();
+    return { item, width: saved.width, height: saved.height };
 }
 
 };
