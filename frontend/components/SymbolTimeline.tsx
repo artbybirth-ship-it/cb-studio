@@ -29,7 +29,7 @@ export type FlaLayer = {
 };
 export type FlaSymbol = { version: number; js: string; fps: number; name: string; frames: number; layers: FlaLayer[] };
 
-export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "delete-drawing" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move" | "reverse";
+export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "delete-drawing" | "paste-place" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move" | "reverse";
 const DEFAULT_ZOOM = 27; // about 11 px per frame, as in the scene's timeline
 let lastZoom = DEFAULT_ZOOM; // kept while stepping in and out of symbols
 const cellFor = (zoom: number) => 4 + (Math.max(1, Math.min(100, zoom)) / 100) * 26;
@@ -448,12 +448,15 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
       else if (event.key === "F6") op = event.shiftKey ? "clear-keyframe" : "insert-keyframe";
       else if (event.key === "F7") op = "blank-keyframe";
       else if ((event.key === "Delete" || event.key === "Backspace") && !command) op = "delete-drawing"; // Animate: the selected keyframes lose their drawing (blank keyframes)
+      else if (command && !event.altKey && !event.shiftKey && event.code === "KeyC") op = "copy"; // Animate-style: ⌘C copies the selected keyframes
+      else if (command && !event.altKey && event.code === "KeyV") op = event.shiftKey ? "paste-place" : "paste"; // ⌘V at the selected frame, ⌘⇧V back where they were copied from
       else if (command && event.altKey && event.code === "KeyC") op = "copy";
       else if (command && event.altKey && event.code === "KeyX") op = "cut";
       else if (command && event.altKey && event.code === "KeyV") op = "paste";
       if (!op) return;
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
       opRef.current(op, sel);
     };
     window.addEventListener("keydown", onKey, true);

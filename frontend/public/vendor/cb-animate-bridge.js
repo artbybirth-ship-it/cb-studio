@@ -1729,7 +1729,7 @@
   // The layer's object is hidden from a blank keyframe up to the next keyframe: the values of every step say whether it shows (_off),
   // so it holds whichever way the timeline is seeked. A step that tweens takes the state of the keyframe it ends on.
   function applyBlanks(clip, edit, touched) {
-    var blanks = edit.blanks || [], anchors = edit.anchors || [], keys = [], q;
+    var blanks = edit.blanks || [], anchors = edit.anchors || [], keys = [], q, owner = clip[(edit.props || [])[0]];
     if (!blanks.length) return;
     for (q = 0; q + 1 < anchors.length; q++) if (anchors[q + 1][1] > anchors[q][1]) keys.push(q);
     var spans = [];
@@ -1744,7 +1744,7 @@
       seen.add(props);
       // An object the file (or a layer's end) already hides stays hidden.
       if (!hidden && Object.prototype.hasOwnProperty.call(props, '_off')) return;
-      cbBlankProps.push({ props: props, had: Object.prototype.hasOwnProperty.call(props, '_off'), old: props._off });
+      cbBlankProps.push({ props: props, had: Object.prototype.hasOwnProperty.call(props, '_off'), old: props._off, target: owner, clip: clip });
       props._off = hidden;
     }
     tweensFor(clip, edit.props).forEach(function (tween) {
@@ -1753,7 +1753,7 @@
       [['_initQueueProps', hiddenAt(0)], ['_curQueueProps', spans.some(function (sp) { return sp[1] === Infinity; })]].forEach(function (pair) {
         var rec = tween[pair[0]];
         if (!rec || typeof rec !== 'object') return;
-        cbBlankProps.push({ props: rec, had: Object.prototype.hasOwnProperty.call(rec, '_off'), old: rec._off });
+        cbBlankProps.push({ props: rec, had: Object.prototype.hasOwnProperty.call(rec, '_off'), old: rec._off, target: owner, clip: clip });
         rec._off = pair[1];
       });
       for (var step = tween._stepHead && tween._stepHead.next; step; step = step.next) {
@@ -1813,6 +1813,26 @@
       }
     });
   }
+  // A registration point (regX / regY) typed or kept on a layer's first keyframe belongs to every later step too: the steps made by splitting
+  // the layer's tween before it was set have none, and a tween that reaches a step without it turns the object's registration into NaN, so the
+  // part is drawn far from where its keyframes put it (the pasted Head sat off the neck). Each step takes the one before it.
+  function fillRegistration(clip, edit, touched) {
+    var owner = clip[(edit.props || [])[0]];
+    tweensFor(clip, edit.props).forEach(function (tween) {
+      var seen = {};
+      for (var step = tween._stepHead; step; step = step.next) {
+        var p = step.props;
+        if (!p || p.state) continue;
+        ['regX', 'regY'].forEach(function (k) {
+          if (typeof p[k] === 'number') { seen[k] = p[k]; return; }
+          if (typeof seen[k] !== 'number') return;
+          cbValueSteps.push({ step: step, clip: clip, k: k, old: undefined, had: false, target: owner, targetOld: owner ? owner[k] : undefined });
+          p[k] = seen[k];
+          touched.add(clip);
+        });
+      }
+    });
+  }
   function applySymbolEdits(eases, keys, values, layerSpecs) {
     var key = JSON.stringify([eases || {}, keys || {}, values || {}, layerSpecs || {}]), root = cbRoot();
     if (key === cbEasesKey || !root) return;
@@ -1821,7 +1841,7 @@
     cbRetimedSteps.reverse().forEach(function (r) { r.step.t = r.t; r.step.d = r.d; r.step.ease = r.ease; delete r.step.__ot; delete r.step.__od; clips.add(r.clip); });
     cbTweenSteps.reverse().forEach(function (r) { r.step.props = r.props; r.step.ease = r.ease; });
     cbTweenSteps = [];
-    cbBlankProps.reverse().forEach(function (r) { if (r.had) r.props._off = r.old; else delete r.props._off; });
+    cbBlankProps.reverse().forEach(function (r) { if (r.had) r.props._off = r.old; else delete r.props._off; if (r.target && r.target._off && !r.had) { r.target._off = false; clips.add(r.clip); } });
     cbBlankProps = [];
     cbValueSteps.reverse().forEach(function (v) {
       if (v.item) {
@@ -1893,7 +1913,7 @@
     });
     Object.keys(keys || {}).forEach(function (name) {
       var layers = keys[name] || {};
-      clipsOfClass(name).forEach(function (clip) { Object.keys(layers).forEach(function (index) { applyBlanks(clip, layers[index], clips); applyMadeTweens(clip, layers[index], (values || {})[name], clips); }); });
+      clipsOfClass(name).forEach(function (clip) { Object.keys(layers).forEach(function (index) { fillRegistration(clip, layers[index], clips); applyBlanks(clip, layers[index], clips); applyMadeTweens(clip, layers[index], (values || {})[name], clips); }); });
     });
     Object.keys(keys || {}).forEach(function (name) {
       var layers = keys[name] || {};

@@ -3566,3 +3566,13 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 .cb-workspace>*{min-width:0}
 .cb-symbol-framemenu{max-height:calc(100vh - 16px);overflow-y:auto}
 .cb-symbol-key.replacing{outline:2px solid #ff40a0;outline-offset:1px;background:#ff40a0!important}
+
+/* One look for every selection box, the thin one the character box has outside a pose: a 1px dark line with a faint white halo,
+   9px square handles, a 12px registration circle. (Direct select keeps its own light-blue look, below.) */
+.cb-symbol-box-lines polygon{stroke:#1d1d1d;stroke-width:1;filter:drop-shadow(0 0 .6px rgba(255,255,255,.48))}
+.cb-symbol-handle{width:9px;height:9px;margin:-4.5px 0 0 -4.5px;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
+.cb-symbol-pivot{width:12px;height:12px;margin:-6px 0 0 -6px;border-width:2px;box-shadow:0 0 0 1px #fff}
+.cb-group-box{border-color:#1d1d1d;box-shadow:0 0 0 1px rgba(255,255,255,.48)}
+.cb-group-scale{background:#161616;border-color:#f5f5f5;box-shadow:0 0 0 calc(1px / var(--cb-gz,1)) rgba(0,0,0,.45)}
+.cb-group-pivot{width:calc(12px / var(--cb-gz,1));height:calc(12px / var(--cb-gz,1));border-width:calc(2px / var(--cb-gz,1))}
+.cb-transform-box.part-mode{border-color:#1d1d1d!important;box-shadow:0 0 0 1px rgba(255,255,255,.48)!important}

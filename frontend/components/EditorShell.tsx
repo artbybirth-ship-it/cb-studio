@@ -2114,6 +2114,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
       if (!commandOrControl || isEditableTarget(event.target)) return;
 
+      // Frames are selected in the pose timeline: ⌘C / ⌘V / ⌘⇧V are theirs (keyframes), not the parts' or the scene's.
+      if (!event.altKey && (event.code === "KeyC" || event.code === "KeyV") && document.querySelector(".cb-symbol-sel")) return;
       if (symbolPoseKeyRef.current?.(event)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
       const key = event.key.toLowerCase();
       // Copy / Cut / Paste layers (in text boxes these stay normal text copy and paste, above).
@@ -4421,9 +4423,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // ---- Frame operations, as in Animate: insert / remove frames, insert / clear keyframes, copy / cut / paste frames.
   // The pose's timeline keeps its length, so frames slide inside it. One operation is one undo step.
-  type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "delete-drawing" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move" | "reverse";
+  type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "delete-drawing" | "paste-place" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move" | "reverse";
   type FrameSel = { layers: number[]; from: number; to: number };
-  const frameClipboard = useRef<{ layerBase: number; items: Array<{ layer: number; offset: number; values: Record<string, number>; tween?: boolean; blank?: boolean }> } | null>(null);
+  const frameClipboard = useRef<{ layerBase: number; from?: number; items: Array<{ layer: number; offset: number; values: Record<string, number>; tween?: boolean; blank?: boolean }> } | null>(null);
   const [clipboardFilled, setClipboardFilled] = useState(false);
   /** A keyframe's values as the file has them (the player reads them off its tween). */
   const readKeyValues = useCallback((layerIndex: number, fileFrame: number) => new Promise<Record<string, number> | null>((resolve) => {
@@ -4442,6 +4444,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const runFrameOp = useCallback(async (op: FrameOp, sel: FrameSel, by = 0) => {
     const level = symbolLevelNow, object = symbolObjectNow;
     if (!level || !object) return;
+    // ⌘⇧V: the copied keyframes go back where they were copied from (same layers, same frames), as a paste there.
+    if (op === "paste-place") {
+      const clip = frameClipboard.current;
+      if (!clip || clip.from == null) { showNotice("Nothing to paste in place: copy keyframes first (⌘C)."); return; }
+      sel = { layers: [clip.layerBase], from: clip.from, to: clip.from + Math.max(0, ...clip.items.map((item) => item.offset)) };
+      op = "paste";
+    }
     // A new empty layer (an extra of the pose): its blank keyframes are kept with the layer. F7 / F6 put one on the selected frame, ⇧F6 clears
     // the ones in the selected frames (the first stays); the other layers in the selection go on below.
     const extraIds = sel.layers.filter((index) => index >= EXTRA_BASE);
@@ -4745,7 +4754,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
           }
         }
         if (!grabbed.length) { showNotice("Only moving parts can be copied: drawn artwork has no position keyframes to copy."); return; }
-        frameClipboard.current = { layerBase: Math.min(...grabbed.map((item) => item.layer)), items: grabbed };
+        frameClipboard.current = { layerBase: Math.min(...grabbed.map((item) => item.layer)), from: sel.from, items: grabbed };
         setClipboardFilled(true);
         if (op === "copy") return;
       }
