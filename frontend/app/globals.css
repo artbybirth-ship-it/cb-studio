@@ -2828,10 +2828,10 @@ header .cb-header-user-icon:focus-visible{outline:2px solid #8ca3f8;outline-offs
 .cb-fr-menu button.selected{color:#fff}
 .cb-fr-menu button svg{width:17.6px;height:12.8px}
 .cb-fr-menu button:disabled{color:#8a8a8a;cursor:not-allowed;background:transparent}
-.cb-fr-colours{display:flex;justify-content:space-between;gap:12.8px;padding-left:32px}
-.cb-fr-colour{position:relative;display:flex;align-items:center;gap:8px;font-size:13.6px;font-weight:300}
-.cb-fr-pipette{width:20.8px;height:20.8px;padding:0;border:0;background:transparent;color:#fff;cursor:pointer;display:grid;place-items:center;border-radius:4.8px}
-.cb-fr-pipette svg{width:14.4px;height:14.4px}
+.cb-fr-colours{display:flex;justify-content:space-between;gap:8px;padding-left:12px}
+.cb-fr-colour{position:relative;display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:13.6px;font-weight:300}
+.cb-fr-pipette{width:25px;height:25px;padding:0;border:0;background:transparent;color:#fff;cursor:pointer;display:grid;place-items:center;border-radius:4.8px}
+.cb-fr-pipette svg{width:25px;height:25px}
 .cb-fr-pipette.active{background:#3f87f5}
 .cb-fr-swatch{width:56px;height:36.8px;border:1.6px solid transparent;border-radius:7.2px;cursor:pointer}
 .cb-fr-swatch.open,.cb-fr-swatch:hover{border-color:#fff}
@@ -3570,9 +3570,20 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 /* One look for every selection box, the thin one the character box has outside a pose: a 1px dark line with a faint white halo,
    9px square handles, a 12px registration circle. (Direct select keeps its own light-blue look, below.) */
 .cb-symbol-box-lines polygon{stroke:#1d1d1d;stroke-width:1;filter:drop-shadow(0 0 .6px rgba(255,255,255,.48))}
-.cb-symbol-handle{width:9px;height:9px;margin:-4.5px 0 0 -4.5px;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
+.cb-symbol-handle{width:8px;height:8px;margin:-4px 0 0 -4px;background:#141414;border:1px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.45)}
 .cb-symbol-pivot{width:12px;height:12px;margin:-6px 0 0 -6px;border-width:2px;box-shadow:0 0 0 1px #fff}
 .cb-group-box{border-color:#1d1d1d;box-shadow:0 0 0 1px rgba(255,255,255,.48)}
-.cb-group-scale{background:#161616;border-color:#f5f5f5;box-shadow:0 0 0 calc(1px / var(--cb-gz,1)) rgba(0,0,0,.45)}
+.cb-group-scale{width:calc(8px / var(--cb-gz,1));height:calc(8px / var(--cb-gz,1));background:#141414;border-color:#fff;box-shadow:0 0 0 calc(1px / var(--cb-gz,1)) rgba(0,0,0,.45)}
 .cb-group-pivot{width:calc(12px / var(--cb-gz,1));height:calc(12px / var(--cb-gz,1));border-width:calc(2px / var(--cb-gz,1))}
 .cb-transform-box.part-mode{border-color:#1d1d1d!important;box-shadow:0 0 0 1px rgba(255,255,255,.48)!important}
+
+/* Find/Replace colour picker cursors (the user's dropper vectors): outline dropper while hovering, filled tube while the button is down. Hotspot = tip. */
+.studio-stage-host.color-pick-active.pick-pick,.studio-stage-host.color-pick-active.pick-pick *{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='6 32.5 12.5 12.5'%3E%3Cg%3E%3Crect x=%2211.88%22 y=%2235.55%22 width=%223.69%22 height=%223.08%22 transform=%22translate(30.25 1.16) rotate(45)%22/%3E%3Cpath d=%22M15.67,36.86l1.47-1.5c.47-.47.47-1.24,0-1.71h0c-.47-.47-1.24-.47-1.71,0l-1.47,1.5%22/%3E%3Cpath d=%22M11.97,37.52l-4.93,4.93c-.37.37-.37.96,0,1.33h0c.37.37.96.37,1.33,0l4.93-4.93%22 fill=%22%23fff%22 stroke=%22%23000%22 stroke-width=%22.35%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E%3C/g%3E%3C/svg%3E") 2 22,crosshair!important}
+.studio-stage-host.color-pick-active.pick-pick:active,.studio-stage-host.color-pick-active.pick-pick:active *{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='6.5 53.3 12.5 12.5'%3E%3Cg%3E%3Crect x=%2212.4%22 y=%2256.35%22 width=%223.69%22 height=%223.08%22 transform=%22translate(45.11 6.88) rotate(45)%22/%3E%3Cpath d=%22M16.19,57.65l1.47-1.5c.47-.47.47-1.24,0-1.71h0c-.47-.47-1.24-.47-1.71,0l-1.47,1.5%22/%3E%3Cpath d=%22M12.49,58.32l-4.93,4.93c-.37.37-.37.96,0,1.33h0c.37.37.96.37,1.33,0l4.93-4.93-1.33-1.33Z%22 fill=%22%23fff%22/%3E%3Cpath d=%22M11.17,62.3l-2.27,2.27c-.18.18-.42.28-.66.28s-.48-.1-.67-.28c-.37-.36-.37-.96,0-1.33l1.2-1.2s.06,0,.09,0c.77.08,1.53.16,2.31.25Z%22/%3E%3Cpath d=%22M12.49,58.32l-4.93,4.93c-.37.37-.37.96,0,1.33h0c.37.37.96.37,1.33,0l4.93-4.93%22 fill=%22none%22 stroke=%22%23000%22 stroke-width=%22.35%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E%3C/g%3E%3C/svg%3E") 2 22,crosshair!important}
+
+/* Find/Replace picking: the colour under the pointer, beside the cursor (swatch + code, as in Fill / Stroke). */
+.cb-fr-hover{position:fixed;z-index:100000;display:flex;align-items:center;gap:6px;pointer-events:none}
+.cb-fr-hover span{width:24px;height:24px;border-radius:5px;border:1px solid rgba(255,255,255,.35)}
+.cb-fr-hover b{height:24px;padding:0 10px;border-radius:5px;background:#3a3a3a;color:#f0f0f0;font:300 12px/24px Arial,sans-serif}
+
+.cb-fr-colour>*{flex:none}

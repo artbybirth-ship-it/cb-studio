@@ -167,6 +167,21 @@ export async function charactersUsingColour(library: Html5CharacterLibraryCharac
   return found;
 }
 
+/**
+ * Whether a character's OWN edits (parts drawn or recoloured inside a pose, pasted clones) hold the colour.
+ * Those colours are in the saved edits, not in the exported script, so the script search alone misses them.
+ */
+export const editsUseColour = (object: EditorObject, hex: string) => {
+  const forms = colourForms(hex);
+  const holds = (value: unknown) => {
+    if (!value) return false;
+    let text = "";
+    try { text = JSON.stringify(value).toLowerCase(); } catch { return false; }
+    return forms.some((form) => text.includes(form));
+  };
+  return holds(object.nativePose) || holds(object.symbolLayers);
+};
+
 export const libraryIdOf = (object: EditorObject) => String(object.characterId || "").replace(/^html5:/, "");
 
 export function describeCounts(counts: ReplaceCounts, places: number, placeLabel: string) {

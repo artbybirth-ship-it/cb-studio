@@ -37,7 +37,8 @@ const CONTEXTS: { value: FindContext; label: string }[] = [
 ];
 
 const Chevron = () => <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>;
-const Pipette = () => <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.6 2.2l3.2 3.2-1.4 1.4-.7-.7-5.6 5.6-2.4.7.7-2.4 5.6-5.6-.7-.7z" fill="currentColor"/></svg>;
+// The user's picker vector ("find replace picker icon.svg"), the white dropper, exact.
+const Pipette = () => <svg viewBox="3.29 3.5 18.95 18.95" aria-hidden="true"><rect x="12.53" y="10.06" width="3.45" height="2.88" transform="translate(12.31 -6.71) rotate(45)" fill="currentColor"/><path d="M16.07,11.28l1.38-1.4c.44-.44.44-1.16,0-1.6h0c-.44-.44-1.16-.44-1.6,0l-1.38,1.4" fill="currentColor"/><path d="M12.61,11.9l-4.6,4.6c-.34.34-.34.9,0,1.24h0c.34.34.9.34,1.24,0l4.6-4.6" fill="none" stroke="currentColor" strokeWidth=".5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 
 /** Small dropdown pill (Search / Context) with a check on the chosen item. */
 function Dropdown<T extends string>({ value, options, onChange, wide, disabledValues }: { value: T; options: { value: T; label: string }[]; onChange: (value: T) => void; wide?: boolean; disabledValues?: T[] }) {

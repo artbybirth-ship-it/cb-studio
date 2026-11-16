@@ -30,7 +30,7 @@ import NativePoseDialog from "./NativePoseDialog";
 import { findFlaUrl } from "@/lib/native/loadDoc";
 import { playerFitOf } from "@/lib/native/character";
 import FindReplaceDialog from "./FindReplaceDialog";
-import { addColorRule, addCounts, applyToEditorData, charactersUsingColour, objectsUsingColourInSwaps, swappedScriptsOf, describeCounts, emptyCounts, libraryIdOf, normalizeHex, totalCount, visibleAt, type FindRequest } from "@/lib/findReplace";
+import { editsUseColour, addColorRule, addCounts, applyToEditorData, charactersUsingColour, objectsUsingColourInSwaps, swappedScriptsOf, describeCounts, emptyCounts, libraryIdOf, normalizeHex, totalCount, visibleAt, type FindRequest } from "@/lib/findReplace";
 import { followColour, shiftLightness, shiftLike } from "@/lib/color";
 import ColourPicker from "./ColourPicker";
 import PanelClose from "./PanelClose";
@@ -911,6 +911,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // swapPlayerAt: the swapped part's player under the pointer (opaque pixel) with the original colour
   // there, else null — every colour tool tries this before the character's own player.
   type SwapColourPlayer = Window & { cbColorAt?: (x: number, y: number) => { original: string } | null; cbColorPalette?: () => { color: string; current: string; fills: number; strokes: number }[] };
+  /** A screen point as 0..1 of a character player's box. Inside a pose the player's frame is bigger than the box by a margin (data-pad) on every side. */
+  const playerPointOf = (frame: HTMLElement, rect: DOMRect, clientX: number, clientY: number) => {
+    const pad = Number(frame.dataset.pad || 0) || 0, factor = 1 + 2 * pad;
+    return { x: ((clientX - rect.left) / rect.width) * factor - pad, y: ((clientY - rect.top) / rect.height) * factor - pad };
+  };
   const swapPlayerAt = (objectId: string, clientX: number, clientY: number) => {
     for (const candidate of Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe.cb-part-replacement-source-frame"))) {
       try {
@@ -959,7 +964,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     let relatives = { strokes: [] as string[], shadows: [] as string[] };
     try {
       const player = frame.contentWindow as PlayerColours | null;
-      original = normalizeHex(player?.cbColorAt?.((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, scopeArg)?.original) || "";
+      const point = playerPointOf(frame, rect, clientX, clientY);
+      original = normalizeHex(player?.cbColorAt?.(point.x, point.y, scopeArg)?.original) || "";
       if (original) {
         palette = player?.cbColorPalette?.(scopeArg) || [];
         if (toneStroke || toneShadow) relatives = player?.cbColorRelatives?.(original, scopeArg) || relatives;
@@ -992,16 +998,15 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // Find and Replace eyedropper: the colour of whatever is under the pointer. A character gives the
   // original colour of the shape there; text and props their colour; empty stage the background.
-  const pickDialogColour = (clientX: number, clientY: number) => {
-    const target = frPicking;
-    setFrPicking(null);
-    if (!target || !draft) return;
+  /** The original colour under a screen point (character artwork, text, prop or the background), or null. */
+  const dialogColourAt = (clientX: number, clientY: number): string | null => {
+    if (!draft) return null;
     const holder = (document.elementsFromPoint(clientX, clientY) as HTMLElement[])
       .map((element) => element.closest<HTMLElement>("[data-editor-object-id]"))
       .find((element): element is HTMLElement => Boolean(element));
     let object = holder ? draft.objects.find((item) => item.id === holder.getAttribute("data-editor-object-id")) : undefined;
-    // Stepped into a character's pose, an overlay covers the stage and nothing under the pointer belongs to a layer: the pose's character is what is being picked from.
-    if (!object && symbolView) object = draft.objects.find((item) => item.id === symbolView.objectId && item.type === "character");
+    // Stepped into a character's pose, the pose's character is what is being picked from, whatever else lies under the pointer.
+    if (symbolView) object = draft.objects.find((item) => item.id === symbolView.objectId && item.type === "character") || object;
     let colour: string | null = null;
     if (object?.type === "character") {
       const swap = swapPlayerAt(object.id, clientX, clientY);
@@ -1010,15 +1015,39 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (swap) colour = swap.original;
       else try {
         const colorAt = (frame?.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null | undefined)?.cbColorAt;
-        if (rect && typeof colorAt === "function") colour = colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, "")?.original || null;
+        if (frame && rect && typeof colorAt === "function") { const at = playerPointOf(frame, rect, clientX, clientY); colour = colorAt(at.x, at.y, "")?.original || null; }
       } catch { colour = null; }
     } else if (object?.type === "text") colour = object.fillColor || "#ffffff";
     else if (object?.type === "prop") colour = object.fillColor || null;
     else colour = draft.background || null;
-    const hex = normalizeHex(colour);
+    return normalizeHex(colour);
+  };
+  const pickDialogColour = async (clientX: number, clientY: number) => {
+    const target = frPicking;
+    setFrPicking(null);
+    setFrHover(null);
+    if (!target || !draft) return;
+    // Inside a pose the player may not answer: the colour is then read from the scene as drawn (as the Colour Dropper does).
+    let hex = dialogColourAt(clientX, clientY);
+    if (!hex && symbolView) hex = normalizeHex((await sampleStageColour(clientX, clientY)) || "");
     if (hex) setFrPicked((previous) => ({ target, color: hex, nonce: (previous?.nonce || 0) + 1 }));
     else showNotice("No colour there. Click on a character, text or the background.");
   };
+  // While Find and Replace picks, the colour under the pointer shows beside it (swatch and code), as in Fill / Stroke.
+  const [frHover, setFrHover] = useState<{ x: number; y: number; hex: string | null } | null>(null);
+  const dialogColourAtRef = useRef(dialogColourAt);
+  dialogColourAtRef.current = dialogColourAt;
+  useEffect(() => {
+    if (!frPicking) { setFrHover(null); return; }
+    let frame = 0;
+    const onMove = (event: PointerEvent) => {
+      const { clientX, clientY } = event;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => setFrHover({ x: clientX, y: clientY, hex: dialogColourAtRef.current(clientX, clientY) }));
+    };
+    window.addEventListener("pointermove", onMove);
+    return () => { cancelAnimationFrame(frame); window.removeEventListener("pointermove", onMove); };
+  }, [frPicking]);
 
   // "All character library": which My characters (one per package) use the colour, so the dialog
   // can offer to duplicate them first; takenNames keeps the copies' names unique.
@@ -1107,7 +1136,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     }
 
     const onlyIds = request.context === "frame" ? new Set(draft.objects.filter((object) => visibleAt(object, playhead)).map((object) => object.id)) : undefined;
-    const options = { onlyIds, usesColour: (object: EditorObject) => using.has(libraryIdOf(object)) || usingSwaps.has(object.id), charactersOnly: request.context === "library" };
+    const options = { onlyIds, usesColour: (object: EditorObject) => using.has(libraryIdOf(object)) || usingSwaps.has(object.id) || (request.kind === "colour" && editsUseColour(object, findHex)), charactersOnly: request.context === "library" };
     let counts = emptyCounts();
     const scenesChanged = new Set<string>();
     const projectsChanged = new Set<string>();
@@ -1147,7 +1176,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // Stage presses while picking: the dialogs' eyedroppers first, otherwise the Light/Dark tool or the
   // Colour Dropper.
   const handleStageColorPress = (clientX: number, clientY: number, modifiers: { altKey: boolean; shiftKey: boolean }) => {
-    if (frPicking) { pickDialogColour(clientX, clientY); return; }
+    if (frPicking) { void pickDialogColour(clientX, clientY); return; }
     if (boxPicking) { pickBoxColour(clientX, clientY); return; }
     if (activeTool === "tone") adjustTone(clientX, clientY, modifiers.altKey, modifiers.shiftKey);
     else if (activeTool === "eyedropper") void dropColour(clientX, clientY);
@@ -1254,7 +1283,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     if (!frame || !rect || rect.width <= 0 || rect.height <= 0) return;
     try {
       const colorAt = (frame.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null)?.cbColorAt;
-      const at = (scope: string) => (typeof colorAt === "function" ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, scope) : null);
+      const point = playerPointOf(frame, rect, clientX, clientY);
+      const at = (scope: string) => (typeof colorAt === "function" ? colorAt(point.x, point.y, scope) : null);
       // Inside a pose the pipette reads whatever is under the pointer (a piece picked there only says where the colour is kept).
       const result = symbolView ? at("") : at(boxScope === "*" ? "" : boxScope);
       const original = normalizeHex(result?.original);
@@ -1305,7 +1335,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (frame && rect && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
         try {
           const colorAt = (frame.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null)?.cbColorAt;
-          const at = (scope: string) => (typeof colorAt === "function" ? colorAt((clientX - rect.left) / rect.width, (clientY - rect.top) / rect.height, scope)?.original : "");
+          const point = playerPointOf(frame, rect, clientX, clientY);
+          const at = (scope: string) => (typeof colorAt === "function" ? colorAt(point.x, point.y, scope)?.original : "");
           // The colour comes from the part being edited when the click is on it, else from anything of the character (the box keeps it for the part).
           // Inside a pose the dropper reads whatever is under the pointer (a piece picked there only says where the colour is kept).
           const original = symbolView ? normalizeHex(at("")) : normalizeHex(at(boxScope === "*" ? "" : boxScope)) || (boxScope === "*" ? "" : normalizeHex(at("")));
@@ -6114,6 +6145,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onOk={(hex, chosen) => { if (chosen) setBoxEffects(chosen); applyBoxColour(boxPicker, hex, chosen); setBoxPicker(null); }}
             onCancel={() => setBoxPicker(null)}
           />
+        )}
+        {frPicking && frHover?.hex && (
+          <div className="cb-fr-hover" style={{ left: frHover.x + 14, top: frHover.y + 18 }} aria-hidden="true">
+            <span style={{ background: frHover.hex }} />
+            <b>{frHover.hex.replace("#", "")}</b>
+          </div>
         )}
         {findReplaceOpen && (
           <FindReplaceDialog
