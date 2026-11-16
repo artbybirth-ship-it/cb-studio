@@ -12,7 +12,7 @@
 import type { NativeEdits } from "./store";
 import { loadNativeDoc, type NativeLoaded } from "./loadDoc";
 import { registerLibrary } from "./library";
-import { NativeRenderer } from "./render";
+import { NativeRenderer, isIdentity, type PartEdit } from "./render";
 import { hexOf, parseColour, sameFamily, toHsl, type ColourRule } from "./colour";
 import { resolvePoseSource, type PoseSource } from "./resolve";
 
@@ -49,7 +49,42 @@ function fitOf(key: string, loaded: NativeLoaded, item: string) {
   return fit;
 }
 
-export type NativeCharacterSource = { assetUrl?: string; loopMode?: string; nativePose?: Record<string, NativeEdits>; colorReplacements?: ColourRule[] };
+export type NativeCharacterSource = { assetUrl?: string; loopMode?: string; nativePose?: Record<string, NativeEdits>; colorReplacements?: ColourRule[]; onlyParts?: string[] };
+
+/** The placed character's fields that decide whether the native drawing can stand in for its Animate player. */
+export type CoverageSource = NativeCharacterSource & {
+  symbolKeys?: unknown; symbolValues?: unknown; symbolEases?: unknown; symbolLayers?: unknown;
+  partReplacements?: unknown; colorOverrides?: unknown; strokeScale?: number;
+  partOverrides?: Record<string, PartEdit | undefined>; partKeyframes?: Record<string, unknown>;
+};
+const holdsSomething = (value: unknown): boolean => {
+  if (!value || typeof value !== "object") return Boolean(value);
+  return Object.values(value as Record<string, unknown>).some((v) => (v && typeof v === "object" ? Object.keys(v).length > 0 : v != null && v !== ""));
+};
+export const hasNativePose = (object: CoverageSource) => Boolean(object.nativePose && Object.keys(object.nativePose).length);
+/**
+ * Whether a character is drawn natively by default (Phase 6): always when it has native edits; otherwise only when nothing on it is
+ * drawn by the Animate player alone — edits from the old pose timeline, image part replacements, region colours, stroke weight.
+ * Whether its part edits name parts the drawing knows is checked once the file is loaded (NativeCharacter.covers); a character
+ * whose Animate file (.fla) is not available keeps its player too (load() answers false).
+ */
+export function drawsNatively(object: CoverageSource): boolean {
+  if (hasNativePose(object)) return true;
+  // For side-by-side checks (tools/native-test): every character without native edits stays on its player.
+  if ((globalThis as { __CBS_PLAYER_ONLY__?: boolean }).__CBS_PLAYER_ONLY__) return false;
+  if (holdsSomething(object.symbolKeys) || holdsSomething(object.symbolValues) || holdsSomething(object.symbolEases) || holdsSomething(object.symbolLayers)) return false;
+  if (holdsSomething(object.partReplacements) || holdsSomething(object.colorOverrides)) return false;
+  if (object.strokeScale != null && Number(object.strokeScale) !== 1) return false;
+  return true;
+}
+/** The part keys a character's part edits and part layers name (edits that change nothing are left out). */
+export function partKeysUsed(object: CoverageSource): string[] {
+  const keys = new Set<string>();
+  for (const [key, edit] of Object.entries(object.partOverrides || {})) if (edit && (edit.visible === false || edit.swapSymbol || !isIdentity(edit))) keys.add(key);
+  for (const [key, frames] of Object.entries(object.partKeyframes || {})) if (Array.isArray(frames) && frames.length) keys.add(key);
+  for (const key of object.onlyParts || []) keys.add(String(key));
+  return [...keys];
+}
 
 export type NativeCharacter = {
   /** Loads the Animate file and the edits; resolves true when the character can be drawn. */
@@ -57,12 +92,21 @@ export type NativeCharacter = {
   readonly ready: boolean;
   /** Colour rules to draw with (the character's Recolour rules); call draw again after changing them. */
   setColourRules(rules: ColourRule[] | undefined): void;
+  /** The part tools' edits (move / rotate / scale / flip / skew / stretch / hide of a rig part), by part key, for the next draws. */
+  setPartEdits(edits: Record<string, PartEdit> | undefined | null): void;
+  /** Part layers (Distribute to Layers): only these rig parts are drawn; empty draws the whole character. */
+  setOnlyParts(keys: string[] | undefined | null): void;
+  /**
+   * Whether this drawing shows the character as its player would: true with native edits (the drawing is then the only one that is
+   * right); otherwise when drawsNatively(object) and every part its edits name is a part this pose has. False until loaded.
+   */
+  covers(object: CoverageSource): boolean;
   /** Draws source time `seekMs` onto `canvas`, at `resolution` times the 720 × 960 box. */
   draw(canvas: HTMLCanvasElement, seekMs: number, resolution?: number, fit?: Fit | null): void;
   /** What the Animate player's colour finder answers, for this drawing (the colour tools use these when the native drawing is what is on screen). (x, y) are 0..1 over the 720 × 960 box. */
-  colourAt(x: number, y: number, scope: string): { picked: string; original: string } | null;
+  colourAt(x: number, y: number, scope: string): { picked: string; original: string; current: string } | null;
   palette(scope: string): ColourEntry[];
-  relatives(hex: string, scope: string): { strokes: string[]; shadows: string[] };
+  relatives(hex: string, scope: string): { strokes: string[]; shadows: string[]; lights: string[] };
 };
 export type ColourEntry = { color: string; current: string; fills: number; strokes: number };
 
@@ -70,12 +114,23 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
   let state: { source: PoseSource; renderer: NativeRenderer; loaded: NativeLoaded } | null = null;
   const edits = Object.values(object.nativePose || {});
   let rulesNow = object.colorReplacements;
+  let partEditsNow: Record<string, PartEdit> | undefined | null;
+  let onlyNow: string[] | undefined | null = object.onlyParts;
   /** Where the last draw put the pose: the frame and placement the colour finder looks at. */
   let last: { frame: number; fit: Fit } | null = null;
   const huesOf = (style: import("../fla/xfl").Fill): string[] => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [hexOf(parseColour(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
   return {
     get ready() { return Boolean(state); },
     setColourRules(rules) { rulesNow = rules; state?.renderer.setColourRules(rules); },
+    setPartEdits(edits) { partEditsNow = edits; state?.renderer.setPartEdits(edits); },
+    setOnlyParts(keys) { if (JSON.stringify(keys || []) === JSON.stringify(onlyNow || [])) return; onlyNow = keys; state?.renderer.setOnlyParts(keys); },
+    covers(target) {
+      if (!state) return false;
+      if (hasNativePose(target)) return true;
+      if (!drawsNatively(target)) return false;
+      const known = state.renderer.partKeys(state.source.item);
+      return partKeysUsed(target).every((key) => known.has(key));
+    },
     async load() {
       const source = object.assetUrl ? await resolvePoseSource(object.assetUrl) : null;
       if (!source) return false;
@@ -90,6 +145,9 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
         if (item) renderer.classes.set(item, cls);
       }
       renderer.setColourRules(rulesNow);
+      renderer.setPartEdits(partEditsNow);
+      renderer.setOnlyParts(onlyNow);
+      if (source.width && source.height) renderer.stage = { width: source.width, height: source.height };
       for (const edit of edits) for (const [name, timeline] of Object.entries(edit.symbols)) if (loaded.doc.symbols.has(name)) renderer.overrides.set(name, timeline);
       fitOf(`${source.flaUrl}|${source.item}`, loaded, source.item);
       state = { source, renderer, loaded };
@@ -110,6 +168,7 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const fit = fitOverride || fitOf(`${source.flaUrl}|${source.item}`, loaded, source.item);
       ctx.setTransform(fit.s * scale, 0, 0, fit.s * scale, fit.tx * scale, fit.ty * scale);
+      renderer.setPartBase(new DOMMatrix().scale(scale));
       renderer.drawSymbol(ctx, source.item, frame);
       last = { frame, fit };
     },
@@ -119,9 +178,11 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       const ctx = new OffscreenCanvas(1, 1).getContext("2d")!;
       // The pose's own placement, shifted so the asked-for point of the box lands on the middle of the one pixel.
       ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - x * BOX_W + 0.5, fit.ty - y * BOX_H + 0.5);
+      renderer.setPartBase(new DOMMatrix().translate(-x * BOX_W + 0.5, -y * BOX_H + 0.5));
       const hit = renderer.hitAt(ctx, source.item, frame, 0.5, 0.5, scope);
       if (!hit) return null;
-      return { picked: renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part), original: hexOf(parseColour(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }) };
+      const shown = renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part);
+      return { picked: shown, original: hexOf(parseColour(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }), current: shown };
     },
     palette(scope) {
       if (!state) return [];
@@ -141,11 +202,11 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       return [...found.values()].sort((a, b) => b.fills + b.strokes - (a.fills + a.strokes)).slice(0, 80);
     },
     relatives(hexIn, scope) {
-      const none = { strokes: [], shadows: [] };
+      const none = { strokes: [], shadows: [], lights: [] };
       const base = parseColour(hexIn);
       if (!state || !base) return none;
       const baseHex = hexOf(base), baseHsl = toHsl(base);
-      const strokes = new Set<string>(), shadows = new Set<string>(), ownersWithBase = new Set<string>(), linesByOwner = new Map<string, Set<string>>();
+      const strokes = new Set<string>(), shadows = new Set<string>(), lights = new Set<string>(), ownersWithBase = new Set<string>(), linesByOwner = new Map<string, Set<string>>();
       // An outline of this colour: darker, and its hue (or grey / black), not a neighbour's outline drawn in the same shape.
       const outlineOf = (h: string) => {
         if (h === baseHex) return false;
@@ -161,14 +222,15 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
         const own = linesByOwner.get(owner) ?? linesByOwner.set(owner, new Set()).get(owner)!;
         lines.forEach((h) => own.add(h));
         for (const h of fills) {
-          if (h === baseHex || shadows.has(h)) continue;
+          if (h === baseHex || shadows.has(h) || lights.has(h)) continue;
           const hsl = toHsl(parseColour(h)!);
           if (hsl.l < baseHsl.l - 0.01 && sameFamily(hsl, baseHsl)) shadows.add(h);
+          else if (hsl.l > baseHsl.l + 0.01 && sameFamily(hsl, baseHsl)) lights.add(h);
         }
       });
       // Outlines drawn as shapes of their own: those of the symbols that hold the colour.
       if (!strokes.size) for (const owner of ownersWithBase) for (const h of linesByOwner.get(owner) ?? []) if (outlineOf(h)) strokes.add(h);
-      return { strokes: [...strokes], shadows: [...shadows] };
+      return { strokes: [...strokes], shadows: [...shadows], lights: [...lights] };
     },
   };
 }

@@ -15,6 +15,17 @@ export type NativeAssets = {
   images: Map<string, CanvasImageSource & { width: number; height: number }>;
 };
 
+/**
+ * What the editor's part tools (Move / Rotate / Scale / Flip / Skew / Stretch / Hide on a rig part such as Head or Left arm, outside a pose) hold
+ * for one part at a time: the same numbers the Animate player is sent (cb-animate-bridge.js applyNode). 
+ * the pivot is a fraction of the part's own unedited box (default: bottom centre). Offsets are in the Animate document's pixels.
+ */
+export type PartEdit = { offsetX?: number; offsetY?: number; rotation?: number; scale?: number; flipX?: boolean; skewX?: number; skewY?: number; stretchX?: number; stretchY?: number; pivotX?: number; pivotY?: number; visible?: boolean; swapSymbol?: string };
+/** The box the player is shown in (lib/native/character.ts BOX_W / BOX_H). */
+const BOX_W = 720, BOX_H = 960;
+const stretchOf = (v: unknown) => Math.max(0.02, Number(v ?? 1) || 1);
+export const isIdentity = (o: PartEdit) => !o.offsetX && !o.offsetY && !o.rotation && (o.scale == null || Number(o.scale) === 1) && !o.flipX && !o.skewX && !o.skewY && stretchOf(o.stretchX) === 1 && stretchOf(o.stretchY) === 1;
+
 export type RenderStats = { shapes: number; instances: number; masks: number; morphs: number; tweens: number; missing: Set<string> };
 
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -169,6 +180,107 @@ export class NativeRenderer {
   private classFor(item: string) { return this.classes.get(item) ?? classOf(item); }
   private rulesHere() { return this.rules.length ? rulesAt(this.rules, this.trail, this.partOf(this.inside[0], this.trail)) : this.rules; }
 
+  private partEdits = new Map<string, PartEdit>();
+  private partBase: DOMMatrix | null = null;
+  /** The player's stage size (the units part offsets are in); the box it is shown in is 720 × 960. */
+  stage = { width: BOX_W, height: BOX_H };
+  /** The part edits to draw with (by rig part key); only parts that change something are kept. */
+  setPartEdits(edits: Record<string, PartEdit> | undefined | null) {
+    this.partEdits = new Map(Object.entries(edits || {}).filter(([, o]) => o && (o.visible === false || o.swapSymbol || !isIdentity(o))));
+  }
+  /**
+   * Part layers (Distribute to Layers, CHARACTER_EDITS.onlyParts): only these rig parts are drawn, as the player does it: along the way
+   * from the pose to each kept part every other piece is left out; inside a kept part everything draws. Parts that are not found draw
+   * the whole character (as the player).
+   */
+  private onlyKeys: string[] = [];
+  private only: { keep: Set<string>; path: Set<string> } | null = null;
+  private onlyRoot = "";
+  private insideKept = 0;
+  setOnlyParts(keys: string[] | undefined | null) { this.onlyKeys = (keys || []).map(String).filter(Boolean); this.onlyRoot = ""; this.only = null; }
+  /** The kept parts' instance paths for the pose `root` (worked out once per pose). */
+  private onlyFor(root: string) {
+    if (!this.onlyKeys.length) return null;
+    if (this.onlyRoot === root) return this.only;
+    this.onlyRoot = root;
+    const keep = new Set<string>(), path = new Set<string>();
+    for (const [at, key] of this.piecesOf(root)) {
+      if (!this.onlyKeys.includes(key)) continue;
+      keep.add(at);
+      const names = at.split("/");
+      for (let k = 1; k < names.length; k += 1) path.add(names.slice(0, k).join("/"));
+    }
+    this.only = keep.size ? { keep, path } : null;
+    return this.only;
+  }
+  /** Part layers: "draw" (a kept part, or nothing is filtered), "path" (a piece on the way to one: draw it, its other pieces are left out) or "skip". */
+  private onlyState(el: FlaElement, autoName: string): "draw" | "path" | "skip" {
+    if (this.insideKept || !this.onlyKeys.length) return "draw";
+    const root = this.inside[0];
+    const only = root ? this.onlyFor(root) : null;
+    if (!only) return "draw";
+    if (el.k !== "instance") return "skip";
+    const at = [...this.trail.map((t) => t.name), el.name || autoName].join("/");
+    return only.keep.has(at) ? "draw" : only.path.has(at) ? "path" : "skip";
+  }
+  /** The library symbol drawn for a swapped variant (partOverrides[key].swapSymbol, the export's class name, e.g. "Headcopy5"). */
+  private swapItemOf(symbol: string): string | undefined {
+    if (this.doc.symbols.has(symbol)) return symbol;
+    for (const item of this.doc.symbols.keys()) if (this.classFor(item) === symbol) return item;
+    return undefined;
+  }
+  /** The transform that takes the 720 × 960 box to the canvas, for the next draw (part edits are made in the box's units). */
+  setPartBase(boxToCanvas: DOMMatrix) { this.partBase = boxToCanvas; }
+
+  /**
+   * Where a part's unedited drawing lies in the box: the pixels it covers at this frame (as the player's own tight measure does), looked for on a
+   * half-size drawing of just that part.
+   */
+  private boxOf(ctx: Ctx, el: FlaElement, offset: number, override: { m?: Matrix; alpha?: number } | undefined, autoName: string): { x0: number; y0: number; x1: number; y1: number } | null {
+    if (!this.partBase) return null;
+    const Q = 0.5, W = Math.round(BOX_W * Q), H = Math.round(BOX_H * Q);
+    const off = new OffscreenCanvas(W, H), octx = off.getContext("2d", { willReadFrequently: true })!;
+    // The parent's place in the box, then at half size.
+    octx.setTransform(new DOMMatrix().scale(Q).multiply(this.partBase.inverse()).multiply(ctx.getTransform()));
+    const savedEdits = this.partEdits, savedProbe = this.probe;
+    // The part is measured as it is drawn, so a swapped variant is measured with its own artwork (as the player does).
+    this.partEdits = new Map([...savedEdits].flatMap(([k, o]): Array<[string, PartEdit]> => (o.swapSymbol ? [[k, { swapSymbol: o.swapSymbol }]] : []))); this.probe = null;
+    const savedOnly = this.insideKept; this.insideKept = 1;
+    try { this.drawElement(octx, el, offset, override, autoName); } finally { this.partEdits = savedEdits; this.probe = savedProbe; this.insideKept = savedOnly; }
+    const data = octx.getImageData(0, 0, W, H).data;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) if (data[(y * W + x) * 4 + 3] > 24) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    if (x1 < x0) return null;
+    return { x0: x0 / Q, y0: y0 / Q, x1: (x1 + 1) / Q, y1: (y1 + 1) / Q };
+  }
+  /** The part edit that applies to this instance (a top-level rig piece of the pose), as a canvas transform to lay over it. */
+  private partEditFor(ctx: Ctx, el: InstanceElement, offset: number, override: { m?: Matrix; alpha?: number } | undefined, autoName: string): { hide: boolean; m?: DOMMatrix; swap?: string } | undefined {
+    const root = this.inside[0];
+    if (!root || !this.partBase) return undefined;
+    const names = [...this.trail.map((t) => t.name), el.name || autoName];
+    if (names.some((n) => !n)) return undefined;
+    const key = this.piecesOf(root).get(names.join("/"));
+    const edit = key ? this.partEdits.get(key) : undefined;
+    if (!edit) return undefined;
+    if (edit.visible === false) return { hide: true };
+    // A same-character variant: the part keeps its place, motion and edit, and draws another library symbol's artwork in its own space.
+    const swap = edit.swapSymbol ? this.swapItemOf(String(edit.swapSymbol)) : undefined;
+    if (isIdentity(edit)) return swap ? { hide: false, swap } : undefined;
+    const box = this.boxOf(ctx, el, offset, override, autoName);
+    if (!box) return swap ? { hide: false, swap } : undefined;
+    const th = (Number(edit.rotation || 0) * Math.PI) / 180, c = Math.cos(th), sn = Math.sin(th);
+    const sc = Math.max(0.02, Number(edit.scale == null ? 1 : edit.scale || 1)), sx = sc * stretchOf(edit.stretchX) * (edit.flipX ? -1 : 1), sy = sc * stretchOf(edit.stretchY);
+    const tx = Math.tan((Number(edit.skewX || 0) * Math.PI) / 180), ty = Math.tan((Number(edit.skewY || 0) * Math.PI) / 180);
+    const a11 = sx * (c - sn * ty), a12 = sy * (c * tx - sn), a21 = sx * (sn + c * ty), a22 = sy * (sn * tx + c);
+    const fx = edit.pivotX == null || !isFinite(Number(edit.pivotX)) ? 0.5 : Number(edit.pivotX), fy = edit.pivotY == null || !isFinite(Number(edit.pivotY)) ? 1 : Number(edit.pivotY);
+    const pivotX = box.x0 + fx * (box.x1 - box.x0), pivotY = box.y0 + fy * (box.y1 - box.y0);
+    // Offsets are in the player's stage units (the Animate document's pixels), the box is 720 × 960.
+    const kx = BOX_W / Math.max(1, this.stage.width), ky = BOX_H / Math.max(1, this.stage.height);
+    const ex = Number(edit.offsetX || 0) * kx + pivotX - (a11 * pivotX + a12 * pivotY), ey = Number(edit.offsetY || 0) * ky + pivotY - (a21 * pivotX + a22 * pivotY);
+    const inBox = new DOMMatrix([a11, a21, a12, a22, ex, ey]);
+    return { hide: false, m: this.partBase.multiply(inBox).multiply(this.partBase.inverse()), swap };
+  }
+
   private pieceCache = new Map<string, Map<string, string>>();
   /**
    * The rig's parts as the Animate player finds them (cb-animate-bridge.js discoverNamed): the pose's instances whose symbol has a
@@ -221,6 +333,8 @@ export class NativeRenderer {
     this.pieceCache.set(root, found);
     return found;
   }
+  /** The rig part keys the pose `root` has (what part edits and part layers can name). */
+  partKeys(root: string): Set<string> { return new Set(this.piecesOf(root).values()); }
   /** The key of the rig part a shape drawn at `trail` is inside (the outermost one), or undefined. */
   partOf(root: string | undefined, trail: Trail): string | undefined {
     if (!root || !trail.length) return undefined;
@@ -341,6 +455,8 @@ export class NativeRenderer {
   }
 
   private drawElement(ctx: Ctx, el: FlaElement, offset: number, override?: { m?: Matrix; alpha?: number }, autoName = "") {
+    const only = this.onlyState(el, autoName);
+    if (only === "skip") return;
     if (el.k === "shape") { this.drawShape(ctx, el); return; }
     if (el.k === "bitmap") {
       if (this.probe) return;
@@ -352,17 +468,22 @@ export class NativeRenderer {
       ctx.restore();
       return;
     }
-    const timeline = this.timelineOf(el.item);
-    if (!timeline) { this.stats.missing.add(el.item); return; }
+    const part = this.partEdits.size ? this.partEditFor(ctx, el, offset, override, autoName) : undefined;
+    if (part?.hide) return;
+    const item = part?.swap || el.item;
+    const timeline = this.timelineOf(item);
+    if (!timeline) { this.stats.missing.add(item); return; }
     this.stats.instances += 1;
     ctx.save();
+    if (part?.m) ctx.setTransform(part.m.multiply(ctx.getTransform()));
     ctx.transform(...(override?.m || el.m));
     const alpha = override?.alpha ?? el.alpha;
     if (alpha != null) ctx.globalAlpha *= alpha;
     if (this.probe && alpha === 0) { ctx.restore(); return; }
     this.trail.push({ cls: this.classFor(this.inside[this.inside.length - 1] || ""), name: el.name || autoName || "" });
-    this.inside.push(el.item);
-    this.drawTimeline(ctx, timeline, innerFrame(el, offset, timeline.length));
+    this.inside.push(item);
+    if (only === "draw" && this.onlyKeys.length) this.insideKept += 1;
+    try { this.drawTimeline(ctx, timeline, innerFrame(el, offset, timeline.length)); } finally { if (only === "draw" && this.onlyKeys.length) this.insideKept -= 1; }
     this.inside.pop();
     this.trail.pop();
     ctx.restore();
@@ -378,10 +499,10 @@ export class NativeRenderer {
     const offset = key.i === 0 && key.d >= length && !next ? frame - key.i : state.offset;
     const t = tweenProgress(state);
     // What the player calls each unnamed instance, for part-scoped colour rules (only worked out when there are rules).
-    const names = this.rules.length && lkey ? this.namesOf(this.inside[this.inside.length - 1]) : undefined;
+    const names = (this.rules.length || this.partEdits.size || this.onlyKeys.length) && lkey ? this.namesOf(this.inside[this.inside.length - 1]) : undefined;
     const auto = (e: number) => (names ? autoNameAt(names, lkey, key.i, e) : "");
     if (t != null && next) {
-      if (key.tween === "shape" && key.morph) { this.drawMorph(ctx, key, next, t); return; }
+      if (key.tween === "shape" && key.morph) { if (!this.insideKept && this.onlyKeys.length && this.onlyFor(this.inside[0] || "")) return; this.drawMorph(ctx, key, next, t); return; }
       if (key.tween === "motion") {
         this.stats.tweens += 1;
         key.elements.forEach((el, i) => {

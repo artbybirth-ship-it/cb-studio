@@ -937,12 +937,12 @@
   // Light/Dark (Include Stroke / Include Shadow): what goes with a colour, as original colours.
   // strokes = the outline colours (darker, same hue or grey) of the shapes filled with it, else of the
   // part that holds it;
-  // shadows = darker colours of its shading family used as fills (sameFamily: same hue, darker).
+  // shadows / lights = darker / lighter colours of its shading family used as fills (sameFamily: same hue).
   window.cbColorRelatives = function (hexIn, scopeKey) {
-    var none = { strokes: [], shadows: [] }, root = cbRoot(), base = parseColor(hexIn);
+    var none = { strokes: [], shadows: [], lights: [] }, root = cbRoot(), base = parseColor(hexIn);
     if (!root || !window.createjs || !base) return none;
     var baseHex = hexOf(base), baseHsl = toHsl(base), scoped = scopeKey ? scopeNodes(scopeKey) : [];
-    var strokes = {}, shadows = {}, partsWithBase = {}, strokesByPart = {};
+    var strokes = {}, shadows = {}, lights = {}, partsWithBase = {}, strokesByPart = {};
     // An outline of this colour: darker, and its hue (or grey/black) — not a neighbour's outline drawn
     // in the same shape (a green lungi's outline next to skin).
     var outlineOf = function (h) {
@@ -964,16 +964,17 @@
       var own = strokesByPart[partKey] || (strokesByPart[partKey] = {});
       lines.forEach(function (h) { own[h] = 1; });
       fills.forEach(function (h) {
-        if (h === baseHex || shadows[h]) return;
+        if (h === baseHex || shadows[h] || lights[h]) return;
         var hsl = toHsl(parseColor(h));
         if (hsl.l < baseHsl.l - .01 && sameFamily(hsl, baseHsl)) shadows[h] = 1;
+        else if (hsl.l > baseHsl.l + .01 && sameFamily(hsl, baseHsl)) lights[h] = 1;
       });
     }); });
     // Outlines drawn as their own shapes: those of the named parts that hold the colour.
     if (!Object.keys(strokes).length) Object.keys(partsWithBase).forEach(function (k) {
       if (k) Object.keys(strokesByPart[k] || {}).forEach(function (h) { if (outlineOf(h)) strokes[h] = 1; });
     });
-    return { strokes: Object.keys(strokes), shadows: Object.keys(shadows) };
+    return { strokes: Object.keys(strokes), shadows: Object.keys(shadows), lights: Object.keys(lights) };
   };
   // Eyedropper / Lighten-Darken: the original colour of the top-most visible shape under (x, y)
   // (0..1 of the player), like clicking a fill in Animate. Among that shape's fills, the one whose
@@ -1001,7 +1002,7 @@
       })(start); });
       if (top) {
         // The deepest part (nested parts included) that contains the shape.
-        var partKey = '', best = null, bestDist = Infinity;
+        var partKey = '', best = null, bestNow = null, bestDist = Infinity;
         for (var n = top; n && !partKey; n = n.parent) Object.keys(cbParts).forEach(function (k) { if (!partKey && nodesOf(cbParts[k]).indexOf(n) >= 0) partKey = k; });
         var topTags = tagsOf(top);
         var active = rules.filter(function (r) { return inScopeT(partKey, topTags, r.scope); });
@@ -1014,10 +1015,11 @@
           for (var j = 0; j < colors.length; j++) {
             var c = parseColor(colors[j]); if (!c || c.a < .05) continue;
             var now = mapColor(c, active, isStroke) || c, dd = dist(now) + (isStroke ? 2000 : 0);
-            if (dd < bestDist) { bestDist = dd; best = hexOf(c); }
+            if (dd < bestDist) { bestDist = dd; best = hexOf(c); bestNow = hexOf(now); }
           }
         }
-        if (best) return { picked: pickedHex, original: best };
+        // current: the colour as drawn now (colour rules applied), exact, not the pixel (blended at a thin stroke's edge).
+        if (best) return { picked: pickedHex, original: best, current: bestNow };
       }
       var nearest = null, nearestDist = Infinity, palette = window.cbColorPalette(scopeKey) || [];
       for (var p = 0; p < palette.length; p++) {
@@ -1025,7 +1027,8 @@
         var pd = dist(pc);
         if (pd < nearestDist) { nearestDist = pd; nearest = palette[p]; }
       }
-      return { picked: pickedHex, original: nearest && nearestDist < 3600 ? nearest.color : pickedHex };
+      var near = nearest && nearestDist < 3600;
+      return { picked: pickedHex, original: near ? nearest.color : pickedHex, current: near ? nearest.current : pickedHex };
     } catch (e) { return null; }
   };
 

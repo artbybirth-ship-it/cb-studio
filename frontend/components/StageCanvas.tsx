@@ -10,11 +10,12 @@ import type { LayerGeometry } from "@/lib/layerTransform";
 import { type CharacterTransform } from "@/lib/keyframes";
 import { groupPivotAtTime, resolveObjectTransformAtTime } from "@/lib/groupMotion";
 import NativeCharacterCanvas from "./NativeCharacterCanvas";
-import type { NativeCharacter } from "@/lib/native/character";
+import { drawsNatively, hasNativePose, type CoverageSource, type NativeCharacter } from "@/lib/native/character";
 import { resolvePartOverridesAtTime, resolvePartTransformAtTime, resolveSourceSeekMs, type PartTransform } from "@/lib/partKeyframes";
 import { isMultiPartKey, memberPatches, parentPartKey, partMembers } from "@/lib/partSelection";
 import { inLayerSpan } from "@/lib/layerRows";
 import { peekSnapshot, readSnapshot, snapshotKey, writeSnapshot } from "@/lib/characterSnapshot";
+import { isTypingTarget } from "@/lib/typingTarget";
 
 type Props = {
   data: EditorData;
@@ -422,6 +423,9 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       }
     }
   }, [characterObjects]);
+  // Part editing on a character with no native edits shows its player for now: the player draws the part drag, the focus wash and the
+  // picked part; the native drawing (the same picture otherwise) does not yet.
+  const nativeStandsDown = (object: EditorObject) => !renderMode && !hasNativePose(object as CoverageSource) && object.id === selectedObjectId && Boolean(activeCharacterPart);
   const heldForSwaps = (object: EditorObject) => {
     if (renderMode || swapGateTimedOut) return false;
     // A pose edited in the native editor is drawn by its own canvas once ready; until then the player would show the original parts.
@@ -502,7 +506,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     const timer = window.setTimeout(() => {
       for (const object of characterObjects) {
         const key = snapshotKeyOf(object);
-        const native = Boolean(object.nativePose && Object.keys(object.nativePose).length);
+        const native = hasNativePose(object as CoverageSource) || nativeReady.has(object.id);
         if (!key || !readyCharacterIds.has(object.id) || heldForSwaps(object) || (native && !nativeReady.has(object.id))) continue;
         try {
           // A pose edited natively is drawn by its own canvas; the player's would be the original.
@@ -917,12 +921,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
 
   useEffect(() => {
     if (renderMode) return;
-    const isEditableTarget = (target: EventTarget | null) => {
-      const el = target as HTMLElement | null;
-      if (!el) return false;
-      const tag = el.tagName?.toLowerCase();
-      return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
-    };
+    const isEditableTarget = isTypingTarget;
     const down = (event: KeyboardEvent) => {
       if (event.code === "Space" && !isEditableTarget(event.target)) {
         event.preventDefault();
@@ -3582,11 +3581,11 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     filter: `hue-rotate(${hue}deg) saturate(${saturation}%) brightness(${brightness}%)`,
                     pointerEvents: "none",
                     transition: snapshotUrls[object.id] && !renderMode ? "none" : "opacity 180ms ease-out",
-                    opacity: (nativeReady.has(object.id) && !(symbolView && symbolView.objectId === object.id)) || heldForSwaps(object) || (!renderMode && !swapGateTimedOut && !editsDrawn.has(object.id)) ? 0 : undefined,
+                    opacity: (nativeReady.has(object.id) && !(symbolView && symbolView.objectId === object.id) && !nativeStandsDown(object)) || heldForSwaps(object) || (!renderMode && !swapGateTimedOut && !editsDrawn.has(object.id)) ? 0 : undefined,
                   }}
                   tabIndex={-1}
                 />
-                {object.nativePose && Object.keys(object.nativePose).length > 0 && !(symbolView && symbolView.objectId === object.id) && (
+                {drawsNatively(object as CoverageSource) && !(symbolView && symbolView.objectId === object.id) && (
                   <NativeCharacterCanvas
                     object={object}
                     seekMs={resolveSourceSeekMs(object, playhead)}
@@ -3597,6 +3596,8 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     playerFrame={() => frameRefs.current.get(object.id)}
                     playerReady={readyCharacterIds.has(object.id)}
                     savedFit={object.nativePoseFit}
+                    standDown={nativeStandsDown(object)}
+                    partEdits={object.partOverrides || object.partKeyframes ? resolvePartOverridesAtTime(object, playhead) : undefined}
                   />
                 )}
                 {renderSourcePartReplacements(object)}

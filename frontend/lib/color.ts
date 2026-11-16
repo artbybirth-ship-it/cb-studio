@@ -58,13 +58,15 @@ export function shiftLightness(hex: string, delta: number): string {
   return hslToHex(hsl.h, hsl.s, Math.max(0.02, Math.min(0.98, hsl.l + delta)));
 }
 
-/** `hex` made lighter or darker in the same ratio as `from` became `to`: its lightness is scaled by
- *  to ÷ from, so an outline or a shadow stays as much darker than the colour as it was; hue and
- *  saturation stay. Light/Dark uses it for the outlines and shadows that go with a colour. */
+/** `hex` made lighter or darker as `from` became `to`: its lightness is scaled by to ÷ from (so an
+ *  outline or a shadow stays as much darker than the colour as it was), but never moves less than the
+ *  colour itself did (a black outline scaled alone would not move at all); hue and saturation stay.
+ *  Light/Dark uses it for the outlines, shadows and light tones that go with a colour. */
 export function shiftLike(hex: string, from: string, to: string): string {
   const a = hexToHsl(from), b = hexToHsl(to), c = hexToHsl(hex);
   if (!a || !b || !c) return hex;
-  const l = a.l > 0.01 ? c.l * (b.l / a.l) : c.l + (b.l - a.l);
+  const step = b.l - a.l, scaled = a.l > 0.01 ? c.l * (b.l / a.l) - c.l : step;
+  const l = c.l + (Math.abs(step) > Math.abs(scaled) ? step : scaled);
   return hslToHex(c.h, c.s, Math.max(0, Math.min(0.98, l)));
 }
 

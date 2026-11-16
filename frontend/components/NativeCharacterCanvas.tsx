@@ -7,12 +7,14 @@
  * same drawing (lib/native/character.ts) from its own page, so a pasted head, retimed frames or a
  * moved part shows in playback and in the exported video.
  *
- * The character's colour rules (Recolour panel) are drawn here too (lib/native/colour.ts). Limit for now:
- * part-transform edits made with the old tools are applied by the Animate player and are not drawn here.
+ * The character's colour rules (Recolour panel), the part tools' edits, part layers and variant swaps are drawn here too. A character
+ * with no native edits is drawn here by default when its Animate file is available and nothing on it is drawn only by the player
+ * (lib/native/character.ts drawsNatively / covers); otherwise its player stays.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { EditorObject } from "@/types";
-import { createNativeCharacter, playerFitOf, type Fit, type NativeCharacter } from "@/lib/native/character";
+import type { PartEdit } from "@/lib/native/render";
+import { createNativeCharacter, hasNativePose, playerFitOf, type CoverageSource, type Fit, type NativeCharacter } from "@/lib/native/character";
 
 /** How many native characters are still loading: the render page waits for zero before it starts. */
 const pending = (delta: number) => {
@@ -20,8 +22,10 @@ const pending = (delta: number) => {
   w.__CBS_NATIVE_PENDING__ = Math.max(0, (w.__CBS_NATIVE_PENDING__ || 0) + delta);
 };
 
-export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCanvas, onHandle, onReady, playerFrame, playerReady, savedFit }: {
+export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCanvas, onHandle, onReady, playerFrame, playerReady, savedFit, partEdits, standDown }: {
   object: EditorObject;
+  /** The part tools' edits at the playhead (lib/partKeyframes.ts resolvePartOverridesAtTime): drawn over the pose. */
+  partEdits?: Record<string, PartEdit>;
   /** Source time to show, in ms (the same number the player is sent). */
   seekMs: number;
   hueFilter?: string;
@@ -36,6 +40,8 @@ export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCan
   playerReady?: boolean;
   /** The placement saved with the edits, used until (or without) the player. */
   savedFit?: Fit | null;
+  /** The player is shown instead for now (part editing on a character with no native edits: the player draws the drag and the picked part). */
+  standDown?: boolean;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [character, setCharacter] = useState<NativeCharacter | null>(null);
@@ -52,10 +58,17 @@ export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCan
     return () => { alive = false; };
   }, [made]);
 
+  // A character with no native edits is drawn natively only while the drawing shows it as its player does (Phase 6: drawn natively by
+  // default), and only once the player's own placement is known, so switching over never moves it. Native edits are always drawn.
+  const ownPose = hasNativePose(object);
+  const covered = Boolean(character && character.covers(object as CoverageSource));
+  const fitNow = playerFitOf(playerFrame?.()) ?? savedFit ?? null;
+  const placed = ownPose || Boolean(fitNow);
+  const ready = covered && placed;
   useEffect(() => {
-    onReady?.(object.id, Boolean(character));
+    onReady?.(object.id, ready);
     return () => onReady?.(object.id, false);
-  }, [character, object.id, onReady]);
+  }, [ready, object.id, onReady]);
   useEffect(() => {
     onHandle?.(object.id, character);
     return () => onHandle?.(object.id, null);
@@ -66,15 +79,18 @@ export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCan
   }, [character, object.id, onCanvas]);
 
   const rulesKey = JSON.stringify(object.colorReplacements || []);
+  const partsKey = JSON.stringify(partEdits || {}) + JSON.stringify(object.onlyParts || []);
   useEffect(() => {
     const el = canvas.current;
     if (el && character) character.setColourRules(object.colorReplacements);
-    if (el && character) character.draw(el, seekMs, Math.min(2, window.devicePixelRatio || 1), playerFitOf(playerFrame?.()) ?? savedFit ?? null);
+    if (el && character) character.setPartEdits(partEdits);
+    if (el && character) character.setOnlyParts(object.onlyParts);
+    if (el && character && ready) character.draw(el, seekMs, Math.min(2, window.devicePixelRatio || 1), playerFitOf(playerFrame?.()) ?? savedFit ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [character, seekMs, playerReady, rulesKey]);
+  }, [character, ready, seekMs, playerReady, rulesKey, partsKey]);
 
   return (
     <canvas ref={canvas} width={720} height={960} data-native-character={object.id} className="cb-native-character-canvas"
-      style={{ filter: hueFilter, visibility: character ? "visible" : "hidden" }} />
+      style={{ filter: hueFilter, visibility: ready && !standDown ? "visible" : "hidden" }} />
   );
 }

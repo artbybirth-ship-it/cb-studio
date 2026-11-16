@@ -212,16 +212,16 @@
         for (var i = 0; i < kids.length; i++) visit(kids[i]);
       })(root);
       if (top) {
-        var best = null, bestD = Infinity, gl = graphicsList(top.graphics);
+        var best = null, bestNow = null, bestD = Infinity, gl = graphicsList(top.graphics);
         for (var i = 0; i < gl.length; i++) {
           var ins = gl[i], isFill = ins instanceof createjs.Graphics.Fill, isStroke = ins instanceof createjs.Graphics.Stroke;
           if (!isFill && !isStroke) continue;
           stylesOf(ins).forEach(function (c) {
             var now = mapColor(c, activeRules, isStroke) || c, d = dist(now) + (isStroke ? 2000 : 0);
-            if (d < bestD) { bestD = d; best = hexOf(c); }
+            if (d < bestD) { bestD = d; best = hexOf(c); bestNow = hexOf(now); }
           });
         }
-        if (best) return { picked: hexOf(picked), original: best };
+        if (best) return { picked: hexOf(picked), original: best, current: bestNow };
       }
       var near = null, nearD = Infinity;
       window.cbColorPalette().forEach(function (e) { var c = parseColor(e.current), d = dist(c); if (d < nearD) { nearD = d; near = e; } });

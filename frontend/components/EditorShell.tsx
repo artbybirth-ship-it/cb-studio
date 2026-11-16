@@ -62,6 +62,7 @@ import { playChime, unlockChime } from "@/lib/chime";
 import TransformPanel, { spacedShortcut, type TransformField, type TransformReading } from "./TransformPanel";
 import { alignMoves, localReference, positionFor, stageBounds, toStage, type AlignAction, type LayerGeometry, type Orientation } from "@/lib/layerTransform";
 import type { MediaLibraryItem } from "@/lib/mediaLibrary";
+import { isTypingTarget } from "@/lib/typingTarget";
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
@@ -910,10 +911,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // A part swapped in from another character is drawn by its own small player, over the character's.
   // swapPlayerAt: the swapped part's player under the pointer (opaque pixel) with the original colour
   // there, else null — every colour tool tries this before the character's own player.
-  type SwapColourPlayer = Window & { cbColorAt?: (x: number, y: number) => { original: string } | null; cbColorPalette?: () => { color: string; current: string; fills: number; strokes: number }[] };
+  type SwapColourPlayer = Window & { cbColorAt?: (x: number, y: number) => { original: string; current?: string } | null; cbColorPalette?: () => { color: string; current: string; fills: number; strokes: number }[] };
   /** A screen point as 0..1 of a character player's box. Inside a pose the player's frame is bigger than the box by a margin (data-pad) on every side. */
   const playerPointOf = (frame: HTMLElement, rect: DOMRect, clientX: number, clientY: number) => {
-    const pad = Number(frame.dataset.pad || 0) || 0, factor = 1 + 2 * pad;
+    // The native drawing's stand-in (StageCanvas colourFrame) has no dataset and no margin.
+    const pad = Number(frame.dataset?.pad || 0) || 0, factor = 1 + 2 * pad;
     return { x: ((clientX - rect.left) / rect.width) * factor - pad, y: ((clientY - rect.top) / rect.height) * factor - pad };
   };
   const swapPlayerAt = (objectId: string, clientX: number, clientY: number) => {
@@ -923,8 +925,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         if (query.get("objectId") !== objectId) continue;
         const box = candidate.getBoundingClientRect();
         if (clientX < box.left || clientX > box.right || clientY < box.top || clientY > box.bottom || box.width <= 0 || box.height <= 0) continue;
-        const original = normalizeHex((candidate.contentWindow as SwapColourPlayer | null)?.cbColorAt?.((clientX - box.left) / box.width, (clientY - box.top) / box.height)?.original);
-        if (original) return { frame: candidate, partKey: query.get("partKey") || "", original };
+        const hit = (candidate.contentWindow as SwapColourPlayer | null)?.cbColorAt?.((clientX - box.left) / box.width, (clientY - box.top) / box.height);
+        const original = normalizeHex(hit?.original);
+        if (original) return { frame: candidate, partKey: query.get("partKey") || "", original, current: normalizeHex(hit?.current) || original };
       } catch { /* a frame that cannot be read is skipped */ }
     }
     return null;
@@ -957,11 +960,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     type PlayerColours = Window & {
       cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null;
       cbColorPalette?: (scope: string) => { color: string; current: string }[];
-      cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[] };
+      cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[]; lights?: string[] };
     };
     let original = "";
     let palette: { color: string; current: string }[] = [];
-    let relatives = { strokes: [] as string[], shadows: [] as string[] };
+    let relatives: { strokes: string[]; shadows: string[]; lights?: string[] } = { strokes: [], shadows: [], lights: [] };
     try {
       const player = frame.contentWindow as PlayerColours | null;
       const point = playerPointOf(frame, rect, clientX, clientY);
@@ -984,13 +987,14 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const changes: { from: string; to: string; target: ColorReplacement["target"] }[] = [{ from: original, to: after, target }];
     // Outlines and shadows follow the clicked colour's whole change from its original, so clicking
     // back to the original puts them back exactly.
-    if (toneStroke) for (const stroke of relatives.strokes) changes.push({ from: stroke, to: shiftLike(stroke, original, after), target: "stroke" });
-    if (toneShadow) for (const shadow of relatives.shadows) changes.push({ from: shadow, to: shiftLike(shadow, original, after), target });
+    // An outline colour changes wherever it is drawn: many outlines are brush shapes (fills), not strokes.
+    if (toneStroke) for (const stroke of relatives.strokes) changes.push({ from: stroke, to: shiftLike(stroke, original, after), target: "both" });
+    if (toneShadow) for (const shadow of [...relatives.shadows, ...(relatives.lights || [])]) changes.push({ from: shadow, to: shiftLike(shadow, original, after), target });
     mutateColour((item) => {
       let list = item.colorReplacements || [];
       changes.forEach((change, index) => {
-        // The colour clicked keeps one rule, whatever it covered before; the others one per target.
-        list = list.filter((rule) => !(isTone(rule) && rule.from === change.from && (rule.target === change.target || change.from === original)));
+        // One Light/Dark rule per colour (an older one for the same colour, whatever it covered, is replaced).
+        list = list.filter((rule) => !(isTone(rule) && rule.from === change.from));
         if (change.to !== change.from) list = [...list, { id: `tone-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`, from: change.from, to: change.to, target: change.target, scope, match: "exact" }];
       });
       item.colorReplacements = list;
@@ -1012,10 +1016,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       const swap = swapPlayerAt(object.id, clientX, clientY);
       const frame = colourFrameOf(object.id);
       const rect = frame?.getBoundingClientRect();
-      if (swap) colour = swap.original;
+      // The colour as it is drawn now (after Light/Dark and earlier replacements), not the artwork's original.
+      if (swap) colour = swap.current;
       else try {
-        const colorAt = (frame?.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string } | null }) | null | undefined)?.cbColorAt;
-        if (frame && rect && typeof colorAt === "function") { const at = playerPointOf(frame, rect, clientX, clientY); colour = colorAt(at.x, at.y, "")?.original || null; }
+        const colorAt = (frame?.contentWindow as (Window & { cbColorAt?: (x: number, y: number, scope: string) => { picked: string; original: string; current?: string } | null }) | null | undefined)?.cbColorAt;
+        if (frame && rect && typeof colorAt === "function") { const at = playerPointOf(frame, rect, clientX, clientY); const hit = colorAt(at.x, at.y, ""); colour = hit?.current || hit?.original || null; }
       } catch { colour = null; }
     } else if (object?.type === "text") colour = object.fillColor || "#ffffff";
     else if (object?.type === "prop") colour = object.fillColor || null;
@@ -1245,17 +1250,17 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     else if (boxState.kind === "character" && colourItem?.type === "character") {
       const original = box === "fill" ? boxState.fillOriginal : boxState.strokeOriginal;
       if (!original) return;
-      let relatives = { strokes: [] as string[], shadows: [] as string[] };
+      let relatives: { strokes: string[]; shadows: string[]; lights?: string[] } = { strokes: [], shadows: [], lights: [] };
       if (effects?.stroke || effects?.shadow) {
         try {
-          const player = colourFrameOf(colourItem.id)?.contentWindow as (Window & { cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[] } }) | null | undefined;
+          const player = colourFrameOf(colourItem.id)?.contentWindow as (Window & { cbColorRelatives?: (hex: string, scope: string) => { strokes: string[]; shadows: string[]; lights?: string[] } }) | null | undefined;
           relatives = player?.cbColorRelatives?.(original, boxScope === "*" ? "" : boxScope) || relatives;
         } catch { /* player not reachable: the colour alone */ }
       }
       mutateColour((item) => {
         let rules = withBoxRule(item.colorReplacements || [], original, box, hex);
         if (effects?.stroke) for (const stroke of relatives.strokes) rules = withBoxRule(rules, stroke, "stroke", followColour(stroke, original, hex));
-        if (effects?.shadow) for (const shadow of relatives.shadows) rules = withBoxRule(rules, shadow, box, followColour(shadow, original, hex));
+        if (effects?.shadow) for (const shadow of [...relatives.shadows, ...(relatives.lights || [])]) rules = withBoxRule(rules, shadow, box, followColour(shadow, original, hex));
         item.colorReplacements = rules;
       });
     }
@@ -1954,12 +1959,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   }, []);
 
   useEffect(() => {
-    const isEditableTarget = (target: EventTarget | null) => {
-      const element = target as HTMLElement | null;
-      if (!element) return false;
-      const tag = element.tagName?.toLowerCase();
-      return tag === "input" || tag === "textarea" || tag === "select" || element.isContentEditable;
-    };
+    const isEditableTarget = isTypingTarget;
 
     const onEditorShortcut = (event: KeyboardEvent) => {
       if (scaleRotateOpenRef.current) return;
@@ -4973,12 +4973,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   }, [mutate]);
 
   useEffect(() => {
-    const isEditableTarget = (target: EventTarget | null) => {
-      const element = target as HTMLElement | null;
-      if (!element) return false;
-      const tag = element.tagName?.toLowerCase();
-      return tag === "input" || tag === "textarea" || tag === "select" || element.isContentEditable;
-    };
+    const isEditableTarget = isTypingTarget;
 
     const deleteSelectedObject = (event: KeyboardEvent) => {
       if (scaleRotateOpenRef.current || (event.key !== "Delete" && event.key !== "Backspace") || isEditableTarget(event.target)) return;
@@ -5279,12 +5274,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   }, [mutate]);
 
   useEffect(() => {
-    const isEditableTarget = (target: EventTarget | null) => {
-      const element = target as HTMLElement | null;
-      if (!element) return false;
-      const tag = element.tagName?.toLowerCase();
-      return tag === "input" || tag === "textarea" || tag === "select" || element.isContentEditable;
-    };
+    const isEditableTarget = isTypingTarget;
     const handleKeyframeShortcut = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k" || isEditableTarget(event.target)) return;
       if (!selectedObjectId) return;
@@ -6121,7 +6111,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 <label><input type="checkbox" checked={toneStroke} onChange={(event) => setToneStroke(event.target.checked)} /> Include Stroke</label>
                 <label title="Text shadows"><input type="checkbox" checked={toneShadow} onChange={(event) => setToneShadow(event.target.checked)} /> Include Shadow</label>
               </div>
-              <p>Select a character first, then click its colours{selected?.type === "character" && activeCharacterPart ? " (selected part only)" : ""}, or click a text layer. Include Stroke: its outlines change too; Include Shadow: its shadows change too, in the same ratio. Press Option for reverse, Shift for a small step.</p>
+              <p>Select a character first, then click its colours{selected?.type === "character" && activeCharacterPart ? " (selected part only)" : ""}, or click a text layer. Include Stroke: its outlines change too; Include Shadow: its shadows and light tones change too. Press Option for reverse, Shift for a small step.</p>
             </div>
           </div>
         )}

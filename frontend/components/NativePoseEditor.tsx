@@ -12,7 +12,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FlaDocument, FlaElement, Layer, Matrix, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
-import { clearKeyframe, commit, deleteLayers, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
+import { clearKeyframe, commit, deleteLayers, history, insertBlankKeyframe, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
+import { movePoint, shapePoints, type PointRef, type Pt } from "../lib/native/points";
 import { innerFrame, layerStateAt } from "../lib/native/evaluate";
 import { applyEdits, editsOf, parseEdits, serializeEdits, type NativeEdits } from "../lib/native/store";
 import { IDENTITY, importElements, invert, mul, poseScale, registerLibrary } from "../lib/native/library";
@@ -24,7 +25,7 @@ const ROW = 24;
 type Working = ReadonlyMap<string, Timeline>;
 type Pose = { item: string; name: string };
 type Sel = { layer: number; el: number };
-type Drag = { kind: "part"; start: [number, number]; held: Array<Sel & { m: Matrix }>; preview?: Map<number, Layer> } | { kind: "box"; from: [number, number]; to: [number, number] } | { kind: "key"; layer: number; from: number; start: number; to: number };
+type Drag = { kind: "part"; start: [number, number]; held: Array<Sel & { m: Matrix }>; preview?: Map<number, Layer> } | { kind: "point"; layer: number; el: number; ref: PointRef; preview?: Map<number, Layer> } | { kind: "box"; from: [number, number]; to: [number, number] } | { kind: "key"; layer: number; from: number; start: number; to: number };
 
 const lengthOf = (layers: Layer[]) => Math.max(1, ...layers.flatMap((l) => l.frames.map((k) => k.i + k.d)));
 const short = (name: string) => name.split("/").pop() || name;
@@ -56,6 +57,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   /** Parts selected besides the main one (layerIndex/elIndex): shift-click adds, a drag box adds, they all move together. */
   const [others, setOthers] = useState<Sel[]>([]);
   const [allLayers, setAllLayers] = useState(false);
+  /** Point editing (A, Animate's Subselection tool): the selected drawn shape shows its anchor points, which can be dragged. */
+  const [pointMode, setPointMode] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, w: 500, h: 900 });
@@ -69,7 +72,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   // The timeline on screen: the working copy with a drag in progress laid over it.
   const shown: Timeline | undefined = useMemo(() => {
     if (!base) return undefined;
-    if (drag?.kind === "part" && drag.preview) return { ...base, layers: base.layers.map((l, i) => drag.preview!.get(i) ?? l) };
+    if ((drag?.kind === "part" || drag?.kind === "point") && drag.preview) return { ...base, layers: base.layers.map((l, i) => drag.preview!.get(i) ?? l) };
     return base;
   }, [base, drag]);
   const length = shown?.length || 1;
@@ -136,6 +139,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       if (e.key === "F5") { take(); (e.shiftKey ? commands["remove-frames"] : commands["insert-frame"])(); }
       else if (e.key === "F6") { take(); (e.shiftKey ? commands["clear-keyframe"] : commands["insert-keyframe"])(); }
       else if (e.key === "F7") { take(); commands["blank-keyframe"](); }
+      else if (!mod && !e.shiftKey && e.key.toLowerCase() === "a") { take(); setPointMode((on) => !on); }
       else if (e.key === "," || e.key === ".") { take(); setFrame((f) => Math.max(0, Math.min(length - 1, f + (e.key === "," ? -1 : 1)))); }
     };
     window.addEventListener("keydown", onKey, true);
@@ -273,12 +277,31 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       ctx.strokeStyle = mark.main ? "#e5007d" : "#1a73e8"; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(px * s + tx, py * s + ty, 9, 0, Math.PI * 2); ctx.moveTo(px * s + tx - 14, py * s + ty); ctx.lineTo(px * s + tx + 14, py * s + ty); ctx.moveTo(px * s + tx, py * s + ty - 14); ctx.lineTo(px * s + tx, py * s + ty + 14); ctx.stroke();
     }
+    // Point editing: the main selected part, when it is a drawn shape, shows its anchors (squares) and curve control points (dots).
+    let pointsShown = false;
+    if (pointMode && elIndex != null) {
+      const shape = shown.layers[layerIndex] && resolveElements(shown.layers[layerIndex], frame)[elIndex];
+      if (shape?.k === "shape") {
+        const toScreen = (p: Pt): Pt => [(shape.m[0] * p[0] + shape.m[2] * p[1] + shape.m[4]) * s + tx, (shape.m[1] * p[0] + shape.m[3] * p[1] + shape.m[5]) * s + ty];
+        const { anchors, controls } = shapePoints(shape);
+        ctx.lineWidth = 1; ctx.strokeStyle = "rgba(229,0,125,0.55)";
+        for (const c of controls) { const [cx, cy] = toScreen(c.at), [ax, ay] = toScreen(c.a), [bx, by] = toScreen(c.b); ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(cx, cy); ctx.lineTo(bx, by); ctx.stroke(); }
+        ctx.fillStyle = "#e5007d";
+        for (const c of controls) { const [x, y] = toScreen(c.at); ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill(); }
+        ctx.lineWidth = 1.5; ctx.strokeStyle = "#1a73e8"; ctx.fillStyle = "#fff";
+        for (const a of anchors) { const [x, y] = toScreen(a); ctx.fillRect(x - 4, y - 4, 8, 8); ctx.strokeRect(x - 4, y - 4, 8, 8); }
+        // Where the points are on the canvas, for the headless tests.
+        el.dataset.points = JSON.stringify([...anchors.slice(0, 60).map((a) => ({ k: "anchor", p: toScreen(a) })), ...controls.slice(0, 30).map((c) => ({ k: "control", p: toScreen(c.at) }))]);
+        pointsShown = true;
+      }
+    }
+    if (!pointsShown) delete el.dataset.points;
     if (drag?.kind === "box") {
       ctx.strokeStyle = "#1a73e8"; ctx.fillStyle = "rgba(26,115,232,0.12)"; ctx.lineWidth = 1;
       const x = Math.min(drag.from[0], drag.to[0]), y = Math.min(drag.from[1], drag.to[1]), w = Math.abs(drag.to[0] - drag.from[0]), h = Math.abs(drag.to[1] - drag.from[1]);
       ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
     }
-  }, [renderer, working, shown, symbol, frame, fit, layerIndex, elIndex, others, drag]);
+  }, [renderer, working, shown, symbol, frame, fit, layerIndex, elIndex, others, drag, pointMode]);
 
   /** Topmost layer, and part of it, drawn at the point (x, y) of `timeline`'s own space, probed at `scale` pixels per unit. */
   function pickAt(timeline: Timeline, at: number, x: number, y: number, scale: number): { layer: number; el: number } | null {
@@ -364,8 +387,30 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const selected = (): Sel[] => [...(elIndex != null ? [{ layer: layerIndex, el: elIndex }] : []), ...others];
   const same = (a: Sel, b: Sel) => a.layer === b.layer && a.el === b.el;
 
+  /** The anchor or control point of the selected drawn shape under the pointer (canvas pixels), when point editing is on. */
+  function pointAt(cx: number, cy: number): { ref: PointRef; layer: number; el: number } | null {
+    if (!pointMode || elIndex == null || !shown || !canvas.current) return null;
+    const shape = shown.layers[layerIndex] && resolveElements(shown.layers[layerIndex], frame)[elIndex];
+    if (!shape || shape.k !== "shape") return null;
+    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
+    const screen = (p: Pt): Pt => [(shape.m[0] * p[0] + shape.m[2] * p[1] + shape.m[4]) * s + tx, (shape.m[1] * p[0] + shape.m[3] * p[1] + shape.m[5]) * s + ty];
+    const { anchors, controls } = shapePoints(shape);
+    const R = 9;
+    let best: { ref: PointRef; d: number } | null = null;
+    // Anchors win over a control point lying on top of them.
+    for (const a of anchors) { const [x, y] = screen(a), d = Math.hypot(x - cx, y - cy); if (d <= R && (!best || d < best.d)) best = { ref: { kind: "anchor", at: a }, d }; }
+    if (!best) for (const c of controls) { const [x, y] = screen(c.at), d = Math.hypot(x - cx, y - cy); if (d <= R && (!best || d < best.d)) best = { ref: c, d }; }
+    return best ? { ref: best.ref, layer: layerIndex, el: elIndex } : null;
+  }
+
   const onStageDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const [cx, cy] = toCanvas(e);
+    const point = pointAt(cx, cy);
+    if (point) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setDrag({ kind: "point", layer: point.layer, el: point.el, ref: point.ref });
+      return;
+    }
     const hit = pick(cx, cy);
     if (!hit || !shown) {
       // Empty stage: a drag draws a box (shift keeps what is selected already).
@@ -392,6 +437,17 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     if (!drag || !shown || !canvas.current) return;
     const [cx, cy] = toCanvas(e);
     if (drag.kind === "box") { setDrag({ ...drag, to: [cx, cy] }); return; }
+    if (drag.kind === "point") {
+      const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
+      const level = base!.layers[drag.layer] && resolveElements(base!.layers[drag.layer], frame)[drag.el];
+      if (!level || level.k !== "shape") return;
+      // The pointer, in the level's space and then in the shape's own space.
+      const back = invert(level.m), x = (cx - tx) / s, y = (cy - ty) / s;
+      const to: Pt = [back[0] * x + back[2] * y + back[4], back[1] * x + back[3] * y + back[5]];
+      const moved = setElement(base!.layers[drag.layer], frame, drag.el, (el) => (el.k === "shape" ? movePoint(el, drag.ref, to) : el));
+      setDrag({ ...drag, preview: new Map([[drag.layer, moved]]) });
+      return;
+    }
     if (drag.kind !== "part") return;
     const { s } = fit(canvas.current.width, canvas.current.height);
     const dx = (cx - drag.start[0]) / s, dy = (cy - drag.start[1]) / s;
@@ -400,7 +456,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     setDrag({ ...drag, preview });
   };
   const onStageUp = () => {
-    if (drag?.kind === "part" && drag.preview) {
+    if ((drag?.kind === "part" || drag?.kind === "point") && drag.preview) {
       const preview = drag.preview;
       const layers = base!.layers.map((l, i) => preview.get(i) ?? l);
       const map = new Map(working);
@@ -479,6 +535,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         <button data-testid="copy-part" style={btn} onClick={copyPart}>⌘C Copy part</button>
         <button data-testid="paste-part" style={btn} onClick={() => void pastePart()}>⌘V Paste as layer</button>
         <button data-testid="swap-part" style={btn} onClick={() => void swapPart()}>⇄ Swap with copied part</button>
+        <button data-testid="point-mode" style={{ ...btn, background: pointMode ? "#cfe3ff" : undefined }} aria-pressed={pointMode} title="Point editing: select a drawn shape, then drag its anchor points and curve handles" onClick={() => setPointMode((on) => !on)}>A Edit points</button>
         <button data-testid="delete-layer" style={btn} onClick={deleteSelected}>⌫ Delete layer</button>
         <button data-testid="undo" style={btn} onClick={doUndo} disabled={!hist.past.length}>Undo</button>
         <button data-testid="redo" style={btn} onClick={doRedo} disabled={!hist.future.length}>Redo</button>
@@ -489,7 +546,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         <span data-testid="note" style={{ font: "12px system-ui" }}>{note}</span>
       </div>
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-        <canvas data-testid="stage" ref={canvas} width={760} height={560} style={{ border: "1px solid #ccc", width: 570, height: 420, touchAction: "none", cursor: drag?.kind === "part" ? "grabbing" : drag?.kind === "box" ? "crosshair" : "default" }}
+        <canvas data-testid="stage" ref={canvas} width={760} height={560} style={{ border: "1px solid #ccc", width: 570, height: 420, touchAction: "none", cursor: drag?.kind === "part" || drag?.kind === "point" ? "grabbing" : drag?.kind === "box" ? "crosshair" : "default" }}
           onPointerDown={onStageDown} onPointerMove={onStageMove} onPointerUp={onStageUp} onDoubleClick={onStageDouble} />
         <div style={{ font: "12px system-ui", minWidth: 240 }}>
           <div><b>frame {frame + 1}</b> of {length}{range[1] > range[0] ? ` (selected ${range[0] + 1}–${range[1] + 1})` : ""} · layer {shown?.layers[layerIndex]?.name || "—"}</div>
@@ -501,7 +558,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
             </div>
           ))}
           {part && <div style={{ marginTop: 6 }}>x {part.m[4].toFixed(1)} · y {part.m[5].toFixed(1)}</div>}
-          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move; Delete removes its layer, the dot beside a layer hides it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it. ⇧-click extends the frame selection. , and . step frames.</div>
+          <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move; A (or Edit points) shows the anchor points of a drawn shape (double-click a symbol to step into it first) and drag one, or a curve handle, to reshape it; Delete removes its layer, the dot beside a layer hides it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). ⌥-drag a keyframe in the timeline to move it. ⇧-click extends the frame selection. , and . step frames.</div>
         </div>
       </div>
       {shown && (

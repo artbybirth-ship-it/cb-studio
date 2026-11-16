@@ -348,6 +348,9 @@
     var root = null;
     try{ root = entry.frame && entry.frame.contentWindow && entry.frame.contentWindow.exportRoot; }catch(e){}
     var fit = native.fit || (root && isFinite(root.scaleX) && root.scaleX > 0 ? {s:root.scaleX, tx:root.x, ty:root.y} : null);
+    // The part tools' edits (move / rotate / scale / flip / hide of a rig part) at this time, drawn over the pose.
+    if(native.handle.setOnlyParts) native.handle.setOnlyParts(entry.object.onlyParts || null);
+    if(entry.object.partOverrides || entry.object.partKeyframes) native.handle.setPartEdits(resolvePartOverrides(entry.object, seconds == null ? currentTimeSeconds : seconds)); else native.handle.setPartEdits(null);
     native.handle.draw(native.canvas, resolveSourceSeekMs(entry.object, seconds == null ? currentTimeSeconds : seconds), resolution, fit);
   }
 
@@ -427,9 +430,12 @@
     layer.appendChild(frame);
     var entry = {frame:frame,layer:layer,object:object,native:null};
     // A character with edits from the native editor (lib/native, built into /vendor/cb-native.js) is drawn
-    // natively over its player: its edited timelines, pasted symbols and all. The player stays underneath
-    // (it still takes its seeks) and is hidden once the native drawing is ready; if that cannot load, the player's drawing stays.
-    if(object.nativePose && Object.keys(object.nativePose).length && window.CBNative){
+    // natively over its player: its edited timelines, pasted symbols and all. So is any other character whose Animate file is
+    // available and that has nothing only the player draws (CBNative.drawsNatively, and covers() once loaded). The player stays
+    // underneath (it still takes its seeks and gives the exact placement) and is hidden once the native drawing is ready; if that
+    // cannot load, or does not cover the character, the player's drawing stays.
+    var ownPose = !!(object.nativePose && Object.keys(object.nativePose).length);
+    if(window.CBNative && (ownPose || (window.CBNative.drawsNatively && window.CBNative.drawsNatively(object)))){
       var canvas = document.createElement('canvas');
       canvas.width = 720; canvas.height = 960;
       canvas.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;visibility:hidden;filter:' + frame.style.filter;
@@ -438,8 +444,8 @@
       entry.native = {canvas:canvas,handle:handle,ready:false};
       nativePending++;
       handle.load().then(function(ok){
-        entry.native.ready = !!ok;
-        if(ok){ frame.style.visibility = 'hidden'; canvas.style.visibility = 'visible'; drawNative(entry, currentTimeSeconds); }
+        entry.native.ready = !!ok && (!handle.covers || handle.covers(object));
+        if(entry.native.ready){ frame.style.visibility = 'hidden'; canvas.style.visibility = 'visible'; drawNative(entry, currentTimeSeconds); }
       }, function(error){ console.error('[native character] ' + (error && error.message ? error.message : error)); }).then(function(){ nativePending--; markReadyWhenPossible(); });
     }
     stage.appendChild(layer);

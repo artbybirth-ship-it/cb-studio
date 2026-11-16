@@ -116,7 +116,9 @@ try:
     got = drop(840, 250); check("head: the dropper reads the face", got.lower() == "fbb057", got)
     check("a dropper click does not step into a symbol", "Head copy" in level(), level())
     # a dark spot of the hair, found in the drawing itself
-    dark = next(((x, y) for y in range(188, 215, 3) for x in range(822, 870, 3) if (lambda p: p[3] > 250 and lum(p) < 50)(pixel(x, y))), None)
+    # (read from a screenshot: inside a pose the drawing may be the native one, not the player's canvas)
+    screen = Image.open(io.BytesIO(b64.b64decode(cmd("Page.captureScreenshot", format="png")["data"]))).convert("RGB")
+    dark = next(((x, y) for y in range(188, 215, 3) for x in range(822, 870, 3) if lum(screen.getpixel((x, y))) < 50), None)
     check("a hair pixel was found", bool(dark), str(dark))
     clk(826, 250); picked = selected()
     check("a piece is picked in the head", len(picked) == 1, str(picked))

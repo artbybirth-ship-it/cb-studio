@@ -4,7 +4,8 @@
  * character's cb-fla-timeline index) and the frame rate the player runs at. Nothing about the
  * character has to be passed in, so the scene editor and the render page resolve it the same way.
  */
-export type PoseSource = { flaUrl: string; js: string; item: string; fps: number };
+/** `width` / `height`: the player's stage size (its data-width / data-height), the units the part tools' offsets are in. */
+export type PoseSource = { flaUrl: string; js: string; item: string; fps: number; width?: number; height?: number };
 
 const cache = new Map<string, Promise<PoseSource | null>>();
 
@@ -24,7 +25,8 @@ async function resolve(assetUrl: string): Promise<PoseSource | null> {
   if (!item) return null;
   // The .fla has to be there to draw from.
   try { if (!(await fetch(flaUrl, { method: "HEAD" })).ok) return null; } catch { return null; }
-  return { flaUrl, js, item, fps };
+  const width = Number(html.match(/data-width="(\d+)"/)?.[1]) || undefined, height = Number(html.match(/data-height="(\d+)"/)?.[1]) || undefined;
+  return { flaUrl, js, item, fps, width, height };
 }
 
 export function resolvePoseSource(assetUrl: string): Promise<PoseSource | null> {

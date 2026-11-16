@@ -11,8 +11,10 @@
 defs["lib/native/character"] = function (exports, require) {
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BOX_H = exports.BOX_W = void 0;
+exports.hasNativePose = exports.BOX_H = exports.BOX_W = void 0;
 exports.playerFitOf = playerFitOf;
+exports.drawsNatively = drawsNatively;
+exports.partKeysUsed = partKeysUsed;
 exports.createNativeCharacter = createNativeCharacter;
 const loadDoc_1 = require("lib/native/loadDoc");
 const library_1 = require("lib/native/library");
@@ -62,16 +64,71 @@ function fitOf(key, loaded, item) {
     fitCache.set(key, fit);
     return fit;
 }
+const holdsSomething = (value) => {
+    if (!value || typeof value !== "object")
+        return Boolean(value);
+    return Object.values(value).some((v) => (v && typeof v === "object" ? Object.keys(v).length > 0 : v != null && v !== ""));
+};
+const hasNativePose = (object) => Boolean(object.nativePose && Object.keys(object.nativePose).length);
+exports.hasNativePose = hasNativePose;
+/**
+ * Whether a character is drawn natively by default (Phase 6): always when it has native edits; otherwise only when nothing on it is
+ * drawn by the Animate player alone — edits from the old pose timeline, image part replacements, region colours, stroke weight.
+ * Whether its part edits name parts the drawing knows is checked once the file is loaded (NativeCharacter.covers); a character
+ * whose Animate file (.fla) is not available keeps its player too (load() answers false).
+ */
+function drawsNatively(object) {
+    if ((0, exports.hasNativePose)(object))
+        return true;
+    // For side-by-side checks (tools/native-test): every character without native edits stays on its player.
+    if (globalThis.__CBS_PLAYER_ONLY__)
+        return false;
+    if (holdsSomething(object.symbolKeys) || holdsSomething(object.symbolValues) || holdsSomething(object.symbolEases) || holdsSomething(object.symbolLayers))
+        return false;
+    if (holdsSomething(object.partReplacements) || holdsSomething(object.colorOverrides))
+        return false;
+    if (object.strokeScale != null && Number(object.strokeScale) !== 1)
+        return false;
+    return true;
+}
+/** The part keys a character's part edits and part layers name (edits that change nothing are left out). */
+function partKeysUsed(object) {
+    const keys = new Set();
+    for (const [key, edit] of Object.entries(object.partOverrides || {}))
+        if (edit && (edit.visible === false || edit.swapSymbol || !(0, render_1.isIdentity)(edit)))
+            keys.add(key);
+    for (const [key, frames] of Object.entries(object.partKeyframes || {}))
+        if (Array.isArray(frames) && frames.length)
+            keys.add(key);
+    for (const key of object.onlyParts || [])
+        keys.add(String(key));
+    return [...keys];
+}
 function createNativeCharacter(object) {
     let state = null;
     const edits = Object.values(object.nativePose || {});
     let rulesNow = object.colorReplacements;
+    let partEditsNow;
+    let onlyNow = object.onlyParts;
     /** Where the last draw put the pose: the frame and placement the colour finder looks at. */
     let last = null;
     const huesOf = (style) => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [(0, colour_1.hexOf)((0, colour_1.parseColour)(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
     return {
         get ready() { return Boolean(state); },
         setColourRules(rules) { rulesNow = rules; state?.renderer.setColourRules(rules); },
+        setPartEdits(edits) { partEditsNow = edits; state?.renderer.setPartEdits(edits); },
+        setOnlyParts(keys) { if (JSON.stringify(keys || []) === JSON.stringify(onlyNow || []))
+            return; onlyNow = keys; state?.renderer.setOnlyParts(keys); },
+        covers(target) {
+            if (!state)
+                return false;
+            if ((0, exports.hasNativePose)(target))
+                return true;
+            if (!drawsNatively(target))
+                return false;
+            const known = state.renderer.partKeys(state.source.item);
+            return partKeysUsed(target).every((key) => known.has(key));
+        },
         async load() {
             const source = object.assetUrl ? await (0, resolve_1.resolvePoseSource)(object.assetUrl) : null;
             if (!source)
@@ -89,6 +146,10 @@ function createNativeCharacter(object) {
                     renderer.classes.set(item, cls);
             }
             renderer.setColourRules(rulesNow);
+            renderer.setPartEdits(partEditsNow);
+            renderer.setOnlyParts(onlyNow);
+            if (source.width && source.height)
+                renderer.stage = { width: source.width, height: source.height };
             for (const edit of edits)
                 for (const [name, timeline] of Object.entries(edit.symbols))
                     if (loaded.doc.symbols.has(name))
@@ -117,6 +178,7 @@ function createNativeCharacter(object) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             const fit = fitOverride || fitOf(`${source.flaUrl}|${source.item}`, loaded, source.item);
             ctx.setTransform(fit.s * scale, 0, 0, fit.s * scale, fit.tx * scale, fit.ty * scale);
+            renderer.setPartBase(new DOMMatrix().scale(scale));
             renderer.drawSymbol(ctx, source.item, frame);
             last = { frame, fit };
         },
@@ -127,10 +189,12 @@ function createNativeCharacter(object) {
             const ctx = new OffscreenCanvas(1, 1).getContext("2d");
             // The pose's own placement, shifted so the asked-for point of the box lands on the middle of the one pixel.
             ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - x * exports.BOX_W + 0.5, fit.ty - y * exports.BOX_H + 0.5);
+            renderer.setPartBase(new DOMMatrix().translate(-x * exports.BOX_W + 0.5, -y * exports.BOX_H + 0.5));
             const hit = renderer.hitAt(ctx, source.item, frame, 0.5, 0.5, scope);
             if (!hit)
                 return null;
-            return { picked: renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part), original: (0, colour_1.hexOf)((0, colour_1.parseColour)(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }) };
+            const shown = renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part);
+            return { picked: shown, original: (0, colour_1.hexOf)((0, colour_1.parseColour)(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }), current: shown };
         },
         palette(scope) {
             if (!state)
@@ -155,12 +219,12 @@ function createNativeCharacter(object) {
             return [...found.values()].sort((a, b) => b.fills + b.strokes - (a.fills + a.strokes)).slice(0, 80);
         },
         relatives(hexIn, scope) {
-            const none = { strokes: [], shadows: [] };
+            const none = { strokes: [], shadows: [], lights: [] };
             const base = (0, colour_1.parseColour)(hexIn);
             if (!state || !base)
                 return none;
             const baseHex = (0, colour_1.hexOf)(base), baseHsl = (0, colour_1.toHsl)(base);
-            const strokes = new Set(), shadows = new Set(), ownersWithBase = new Set(), linesByOwner = new Map();
+            const strokes = new Set(), shadows = new Set(), lights = new Set(), ownersWithBase = new Set(), linesByOwner = new Map();
             // An outline of this colour: darker, and its hue (or grey / black), not a neighbour's outline drawn in the same shape.
             const outlineOf = (h) => {
                 if (h === baseHex)
@@ -183,11 +247,13 @@ function createNativeCharacter(object) {
                 const own = linesByOwner.get(owner) ?? linesByOwner.set(owner, new Set()).get(owner);
                 lines.forEach((h) => own.add(h));
                 for (const h of fills) {
-                    if (h === baseHex || shadows.has(h))
+                    if (h === baseHex || shadows.has(h) || lights.has(h))
                         continue;
                     const hsl = (0, colour_1.toHsl)((0, colour_1.parseColour)(h));
                     if (hsl.l < baseHsl.l - 0.01 && (0, colour_1.sameFamily)(hsl, baseHsl))
                         shadows.add(h);
+                    else if (hsl.l > baseHsl.l + 0.01 && (0, colour_1.sameFamily)(hsl, baseHsl))
+                        lights.add(h);
                 }
             });
             // Outlines drawn as shapes of their own: those of the symbols that hold the colour.
@@ -196,7 +262,7 @@ function createNativeCharacter(object) {
                     for (const h of linesByOwner.get(owner) ?? [])
                         if (outlineOf(h))
                             strokes.add(h);
-            return { strokes: [...strokes], shadows: [...shadows] };
+            return { strokes: [...strokes], shadows: [...shadows], lights: [...lights] };
         },
     };
 }
@@ -866,11 +932,16 @@ async function decodeBitmap(data) {
 defs["lib/native/render"] = function (exports, require) {
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.NativeRenderer = exports.styleColour = void 0;
+exports.NativeRenderer = exports.styleColour = exports.isIdentity = void 0;
 const colour_1 = require("lib/native/colour");
 const names_1 = require("lib/native/names");
 const colour_2 = require("lib/native/colour");
 const evaluate_1 = require("lib/native/evaluate");
+/** The box the player is shown in (lib/native/character.ts BOX_W / BOX_H). */
+const BOX_W = 720, BOX_H = 960;
+const stretchOf = (v) => Math.max(0.02, Number(v ?? 1) || 1);
+const isIdentity = (o) => !o.offsetX && !o.offsetY && !o.rotation && (o.scale == null || Number(o.scale) === 1) && !o.flipX && !o.skewX && !o.skewY && stretchOf(o.stretchX) === 1 && stretchOf(o.stretchY) === 1;
+exports.isIdentity = isIdentity;
 /** The colour a fill stands for when picking it: the colour of a solid, the first stop of a gradient; nothing when it is see-through. */
 const styleColour = (style) => (style.t === "solid" ? (style.alpha >= 0.05 ? style.color : null) : (style.stops.find((s) => s[2] >= 0.05)?.[1] ?? null));
 exports.styleColour = styleColour;
@@ -968,6 +1039,19 @@ class NativeRenderer {
         this.probe = null;
         /** Library items whose Animate class is not their own name (a pose called "Symbol 1" that the player knows as "Sardar_01"). */
         this.classes = new Map();
+        this.partEdits = new Map();
+        this.partBase = null;
+        /** The player's stage size (the units part offsets are in); the box it is shown in is 720 × 960. */
+        this.stage = { width: BOX_W, height: BOX_H };
+        /**
+         * Part layers (Distribute to Layers, CHARACTER_EDITS.onlyParts): only these rig parts are drawn, as the player does it: along the way
+         * from the pose to each kept part every other piece is left out; inside a kept part everything draws. Parts that are not found draw
+         * the whole character (as the player).
+         */
+        this.onlyKeys = [];
+        this.only = null;
+        this.onlyRoot = "";
+        this.insideKept = 0;
         this.pieceCache = new Map();
     }
     probeTest(ctx, path, style, stroke, rule) {
@@ -1063,6 +1147,130 @@ class NativeRenderer {
     setColourRules(list) { this.rules = (0, colour_2.prepareRules)(list); }
     classFor(item) { return this.classes.get(item) ?? (0, colour_2.classOf)(item); }
     rulesHere() { return this.rules.length ? (0, colour_2.rulesAt)(this.rules, this.trail, this.partOf(this.inside[0], this.trail)) : this.rules; }
+    /** The part edits to draw with (by rig part key); only parts that change something are kept. */
+    setPartEdits(edits) {
+        this.partEdits = new Map(Object.entries(edits || {}).filter(([, o]) => o && (o.visible === false || o.swapSymbol || !(0, exports.isIdentity)(o))));
+    }
+    setOnlyParts(keys) { this.onlyKeys = (keys || []).map(String).filter(Boolean); this.onlyRoot = ""; this.only = null; }
+    /** The kept parts' instance paths for the pose `root` (worked out once per pose). */
+    onlyFor(root) {
+        if (!this.onlyKeys.length)
+            return null;
+        if (this.onlyRoot === root)
+            return this.only;
+        this.onlyRoot = root;
+        const keep = new Set(), path = new Set();
+        for (const [at, key] of this.piecesOf(root)) {
+            if (!this.onlyKeys.includes(key))
+                continue;
+            keep.add(at);
+            const names = at.split("/");
+            for (let k = 1; k < names.length; k += 1)
+                path.add(names.slice(0, k).join("/"));
+        }
+        this.only = keep.size ? { keep, path } : null;
+        return this.only;
+    }
+    /** Part layers: "draw" (a kept part, or nothing is filtered), "path" (a piece on the way to one: draw it, its other pieces are left out) or "skip". */
+    onlyState(el, autoName) {
+        if (this.insideKept || !this.onlyKeys.length)
+            return "draw";
+        const root = this.inside[0];
+        const only = root ? this.onlyFor(root) : null;
+        if (!only)
+            return "draw";
+        if (el.k !== "instance")
+            return "skip";
+        const at = [...this.trail.map((t) => t.name), el.name || autoName].join("/");
+        return only.keep.has(at) ? "draw" : only.path.has(at) ? "path" : "skip";
+    }
+    /** The library symbol drawn for a swapped variant (partOverrides[key].swapSymbol, the export's class name, e.g. "Headcopy5"). */
+    swapItemOf(symbol) {
+        if (this.doc.symbols.has(symbol))
+            return symbol;
+        for (const item of this.doc.symbols.keys())
+            if (this.classFor(item) === symbol)
+                return item;
+        return undefined;
+    }
+    /** The transform that takes the 720 × 960 box to the canvas, for the next draw (part edits are made in the box's units). */
+    setPartBase(boxToCanvas) { this.partBase = boxToCanvas; }
+    /**
+     * Where a part's unedited drawing lies in the box: the pixels it covers at this frame (as the player's own tight measure does), looked for on a
+     * half-size drawing of just that part.
+     */
+    boxOf(ctx, el, offset, override, autoName) {
+        if (!this.partBase)
+            return null;
+        const Q = 0.5, W = Math.round(BOX_W * Q), H = Math.round(BOX_H * Q);
+        const off = new OffscreenCanvas(W, H), octx = off.getContext("2d", { willReadFrequently: true });
+        // The parent's place in the box, then at half size.
+        octx.setTransform(new DOMMatrix().scale(Q).multiply(this.partBase.inverse()).multiply(ctx.getTransform()));
+        const savedEdits = this.partEdits, savedProbe = this.probe;
+        // The part is measured as it is drawn, so a swapped variant is measured with its own artwork (as the player does).
+        this.partEdits = new Map([...savedEdits].flatMap(([k, o]) => (o.swapSymbol ? [[k, { swapSymbol: o.swapSymbol }]] : [])));
+        this.probe = null;
+        const savedOnly = this.insideKept;
+        this.insideKept = 1;
+        try {
+            this.drawElement(octx, el, offset, override, autoName);
+        }
+        finally {
+            this.partEdits = savedEdits;
+            this.probe = savedProbe;
+            this.insideKept = savedOnly;
+        }
+        const data = octx.getImageData(0, 0, W, H).data;
+        let x0 = W, y0 = H, x1 = -1, y1 = -1;
+        for (let y = 0; y < H; y += 1)
+            for (let x = 0; x < W; x += 1)
+                if (data[(y * W + x) * 4 + 3] > 24) {
+                    if (x < x0)
+                        x0 = x;
+                    if (x > x1)
+                        x1 = x;
+                    if (y < y0)
+                        y0 = y;
+                    if (y > y1)
+                        y1 = y;
+                }
+        if (x1 < x0)
+            return null;
+        return { x0: x0 / Q, y0: y0 / Q, x1: (x1 + 1) / Q, y1: (y1 + 1) / Q };
+    }
+    /** The part edit that applies to this instance (a top-level rig piece of the pose), as a canvas transform to lay over it. */
+    partEditFor(ctx, el, offset, override, autoName) {
+        const root = this.inside[0];
+        if (!root || !this.partBase)
+            return undefined;
+        const names = [...this.trail.map((t) => t.name), el.name || autoName];
+        if (names.some((n) => !n))
+            return undefined;
+        const key = this.piecesOf(root).get(names.join("/"));
+        const edit = key ? this.partEdits.get(key) : undefined;
+        if (!edit)
+            return undefined;
+        if (edit.visible === false)
+            return { hide: true };
+        // A same-character variant: the part keeps its place, motion and edit, and draws another library symbol's artwork in its own space.
+        const swap = edit.swapSymbol ? this.swapItemOf(String(edit.swapSymbol)) : undefined;
+        if ((0, exports.isIdentity)(edit))
+            return swap ? { hide: false, swap } : undefined;
+        const box = this.boxOf(ctx, el, offset, override, autoName);
+        if (!box)
+            return swap ? { hide: false, swap } : undefined;
+        const th = (Number(edit.rotation || 0) * Math.PI) / 180, c = Math.cos(th), sn = Math.sin(th);
+        const sc = Math.max(0.02, Number(edit.scale == null ? 1 : edit.scale || 1)), sx = sc * stretchOf(edit.stretchX) * (edit.flipX ? -1 : 1), sy = sc * stretchOf(edit.stretchY);
+        const tx = Math.tan((Number(edit.skewX || 0) * Math.PI) / 180), ty = Math.tan((Number(edit.skewY || 0) * Math.PI) / 180);
+        const a11 = sx * (c - sn * ty), a12 = sy * (c * tx - sn), a21 = sx * (sn + c * ty), a22 = sy * (sn * tx + c);
+        const fx = edit.pivotX == null || !isFinite(Number(edit.pivotX)) ? 0.5 : Number(edit.pivotX), fy = edit.pivotY == null || !isFinite(Number(edit.pivotY)) ? 1 : Number(edit.pivotY);
+        const pivotX = box.x0 + fx * (box.x1 - box.x0), pivotY = box.y0 + fy * (box.y1 - box.y0);
+        // Offsets are in the player's stage units (the Animate document's pixels), the box is 720 × 960.
+        const kx = BOX_W / Math.max(1, this.stage.width), ky = BOX_H / Math.max(1, this.stage.height);
+        const ex = Number(edit.offsetX || 0) * kx + pivotX - (a11 * pivotX + a12 * pivotY), ey = Number(edit.offsetY || 0) * ky + pivotY - (a21 * pivotX + a22 * pivotY);
+        const inBox = new DOMMatrix([a11, a21, a12, a22, ex, ey]);
+        return { hide: false, m: this.partBase.multiply(inBox).multiply(this.partBase.inverse()), swap };
+    }
     /**
      * The rig's parts as the Animate player finds them (cb-animate-bridge.js discoverNamed): the pose's instances whose symbol has a
      * real name ("Head", "Leftarm"; copies and numbers dropped), looking through unnamed wrappers; one lone piece is opened up. Each gets
@@ -1122,6 +1330,8 @@ class NativeRenderer {
         this.pieceCache.set(root, found);
         return found;
     }
+    /** The rig part keys the pose `root` has (what part edits and part layers can name). */
+    partKeys(root) { return new Set(this.piecesOf(root).values()); }
     /** The key of the rig part a shape drawn at `trail` is inside (the outermost one), or undefined. */
     partOf(root, trail) {
         if (!root || !trail.length)
@@ -1264,6 +1474,9 @@ class NativeRenderer {
         this.stats.morphs += 1;
     }
     drawElement(ctx, el, offset, override, autoName = "") {
+        const only = this.onlyState(el, autoName);
+        if (only === "skip")
+            return;
         if (el.k === "shape") {
             this.drawShape(ctx, el);
             return;
@@ -1282,13 +1495,19 @@ class NativeRenderer {
             ctx.restore();
             return;
         }
-        const timeline = this.timelineOf(el.item);
+        const part = this.partEdits.size ? this.partEditFor(ctx, el, offset, override, autoName) : undefined;
+        if (part?.hide)
+            return;
+        const item = part?.swap || el.item;
+        const timeline = this.timelineOf(item);
         if (!timeline) {
-            this.stats.missing.add(el.item);
+            this.stats.missing.add(item);
             return;
         }
         this.stats.instances += 1;
         ctx.save();
+        if (part?.m)
+            ctx.setTransform(part.m.multiply(ctx.getTransform()));
         ctx.transform(...(override?.m || el.m));
         const alpha = override?.alpha ?? el.alpha;
         if (alpha != null)
@@ -1298,8 +1517,16 @@ class NativeRenderer {
             return;
         }
         this.trail.push({ cls: this.classFor(this.inside[this.inside.length - 1] || ""), name: el.name || autoName || "" });
-        this.inside.push(el.item);
-        this.drawTimeline(ctx, timeline, (0, evaluate_1.innerFrame)(el, offset, timeline.length));
+        this.inside.push(item);
+        if (only === "draw" && this.onlyKeys.length)
+            this.insideKept += 1;
+        try {
+            this.drawTimeline(ctx, timeline, (0, evaluate_1.innerFrame)(el, offset, timeline.length));
+        }
+        finally {
+            if (only === "draw" && this.onlyKeys.length)
+                this.insideKept -= 1;
+        }
         this.inside.pop();
         this.trail.pop();
         ctx.restore();
@@ -1316,10 +1543,12 @@ class NativeRenderer {
         const offset = key.i === 0 && key.d >= length && !next ? frame - key.i : state.offset;
         const t = (0, evaluate_1.tweenProgress)(state);
         // What the player calls each unnamed instance, for part-scoped colour rules (only worked out when there are rules).
-        const names = this.rules.length && lkey ? this.namesOf(this.inside[this.inside.length - 1]) : undefined;
+        const names = (this.rules.length || this.partEdits.size || this.onlyKeys.length) && lkey ? this.namesOf(this.inside[this.inside.length - 1]) : undefined;
         const auto = (e) => (names ? (0, names_1.autoNameAt)(names, lkey, key.i, e) : "");
         if (t != null && next) {
             if (key.tween === "shape" && key.morph) {
+                if (!this.insideKept && this.onlyKeys.length && this.onlyFor(this.inside[0] || ""))
+                    return;
                 this.drawMorph(ctx, key, next, t);
                 return;
             }
@@ -2048,7 +2277,8 @@ async function resolve(assetUrl) {
     catch {
         return null;
     }
-    return { flaUrl, js, item, fps };
+    const width = Number(html.match(/data-width="(\d+)"/)?.[1]) || undefined, height = Number(html.match(/data-height="(\d+)"/)?.[1]) || undefined;
+    return { flaUrl, js, item, fps, width, height };
 }
 function resolvePoseSource(assetUrl) {
     let found = cache.get(assetUrl.split("?")[0]);
@@ -2061,5 +2291,5 @@ function resolvePoseSource(assetUrl) {
 
 };
 
-  window.CBNative = { createNativeCharacter: require("lib/native/character").createNativeCharacter };
+  window.CBNative = { createNativeCharacter: require("lib/native/character").createNativeCharacter, drawsNatively: require("lib/native/character").drawsNatively };
 })();

@@ -37,9 +37,9 @@ const ruleId = () => `fr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}
 export const addColorRule = (object: EditorObject, find: string, replace: string) => {
   if (find === replace) return false;
   const rules = object.colorReplacements || [];
-  // A colour that is itself the result of an earlier replacement: change that result instead.
-  const chained = rules.find((rule) => rule.scope === "*" && rule.to === find);
-  if (chained) { object.colorReplacements = rules.map((rule) => (rule === chained ? { ...rule, to: replace } : rule)); return true; }
+  // A colour that is itself the result of earlier changes (Light/Dark, Fill/Stroke, a replacement, on the whole character or on a part):
+  // change those results instead, as the colour is found by what it looks like now.
+  if (rules.some((rule) => rule.to === find)) { object.colorReplacements = rules.map((rule) => (rule.to === find ? { ...rule, to: replace } : rule)); return true; }
   const same = rules.find((rule) => rule.scope === "*" && rule.match === "exact" && rule.from === find);
   if (same) {
     if (same.to === replace) return false;
@@ -168,7 +168,7 @@ export async function charactersUsingColour(library: Html5CharacterLibraryCharac
 }
 
 /**
- * Whether a character's OWN edits (parts drawn or recoloured inside a pose, pasted clones) hold the colour.
+ * Whether a character's OWN edits (parts drawn or recoloured inside a pose, pasted clones, colour rules) hold the colour.
  * Those colours are in the saved edits, not in the exported script, so the script search alone misses them.
  */
 export const editsUseColour = (object: EditorObject, hex: string) => {
@@ -179,7 +179,8 @@ export const editsUseColour = (object: EditorObject, hex: string) => {
     try { text = JSON.stringify(value).toLowerCase(); } catch { return false; }
     return forms.some((form) => text.includes(form));
   };
-  return holds(object.nativePose) || holds(object.symbolLayers);
+  // A colour shown because a rule made it (Light/Dark, Fill/Stroke, an earlier replacement).
+  return (object.colorReplacements || []).some((rule) => normalizeHex(rule.to) === normalizeHex(hex)) || holds(object.nativePose) || holds(object.symbolLayers);
 };
 
 export const libraryIdOf = (object: EditorObject) => String(object.characterId || "").replace(/^html5:/, "");
