@@ -121,9 +121,35 @@ try:
     # pick one drawn shape: try points over the nose until a single row is selected, then see what is picked
     before = canvas(); picked = None
     # a box over a few of the earring's beads (drawn shapes), from empty stage
-    marquee(930, 230, 900, 262)
+
+    # Where the ear is drawn now (the pasted head was moved onto the neck after these boxes were written): its shapes are drawn from the
+    # player's own objects (as the ground truth is) and their ink found; the boxes below are placed from it.
+    EAR_SCAN = """(()=>{const f=document.querySelector('iframe.cb-character-source-frame'), w=f.contentWindow, root=w.exportRoot, st=w.stage, seen=new Set(); let c=null;
+      (function walk(n){ if(!n||seen.has(n)||c) return; seen.add(n); if(n.shape_197){c=n;return} (n.children||[]).forEach(walk); Object.keys(n).forEach(k=>{ if(k!=='parent'&&n[k]&&typeof n[k]==='object'&&n[k].timeline) walk(n[k])})})(root);
+      if(!c) return null; const W=720,H=960, cv=document.createElement('canvas'); cv.width=W; cv.height=H; const ctx=cv.getContext('2d');
+      for(const key of Object.keys(c).filter(k=>/^shape/.test(k))){ const o=c[key]; if(o.parent!==c||o.visible===false) continue;
+        let m=o.getConcatenatedMatrix(); const inv=st.getMatrix(); inv.invert(); m=m.clone().prependMatrix(inv); ctx.setTransform(m.a,m.b,m.c,m.d,m.tx,m.ty); try{o.draw(ctx,true)}catch(e){} }
+      const d=ctx.getImageData(0,0,W,H).data; let x0=W,y0=H,x1=-1,y1=-1; for(let y=0;y<H;y++) for(let x=0;x<W;x++) if(d[(y*W+x)*4+3]>0){ if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y }
+      // Inside a pose the player has a margin of half a box on every side (data-pad): the box is the middle of the frame.
+      if(x1<0) return null; const r=f.getBoundingClientRect(), p=Number(f.dataset.pad||0), k=1+2*p;
+      const sx=u=>r.left+(p+u/W)/k*r.width, sy=v=>r.top+(p+v/H)/k*r.height; return JSON.stringify([sx(x0), sy(y0), sx(x1+1), sy(y1+1)])})()"""
+    def ear_box():
+        for _ in range(4):
+            got = js(EAR_SCAN)
+            if got: return json.loads(got)
+            time.sleep(1)
+        return None
+    ear = ear_box(); print("ear drawn over", ear)
+    def ear_boxes(ear):
+        """Selection boxes over parts of the ear, each starting on empty stage to the right of it (a press on the ear would drag it)."""
+        x0, y0, x1, y1 = ear; w, h = x1 - x0, y1 - y0
+        f = lambda a, b, c, d: (x1 + a * w, y0 + b * h, x0 + c * w, y0 + d * h)
+        return {"right half": f(0.6, 0.1, 0.5, 0.9), "most of it": f(0.6, 0.1, 0.2, 0.9), "a band across": f(0.4, 0.3, -0.3, 0.5),
+                "all of it": f(0.8, -0.2, -0.8, 1.2), "a small band": f(0.5, 0.6, 0.3, 0.75), "the earring": f(0.4, 0.75, 0.2, 1.1), "the middle": f(0.3, 0.45, 0.4, 0.85)}
+    bead_box = ear_boxes(ear)["the earring"] if ear else (930, 230, 900, 262)
+    marquee(*bead_box)
     got = selected(); print("selected after the box:", got)
-    if len(got) == 1: picked = (930, 230, got[0])
+    if len(got) == 1: picked = (bead_box[0], bead_box[1], got[0])
     print("picked:", picked, "row count:", nlayers)
     check("a drawn shape of the ear is picked", bool(picked), str(picked))
     layers_before = edit_now()
@@ -137,7 +163,7 @@ try:
     check("only part of the layer was taken out (deletedProps), not the layer", bool(rec.get("deletedProps")) and not rec.get("deleted"), json.dumps({f: rec.get(f) for f in ("deleted", "deletedProps")}))
     check("the rest of the ear (and the earring) is still there: the stage changed only a little", 0 < diff < 1500, f"{diff} px changed")
     # Cut with only part of a layer picked refuses (a copy holds whole layers), and changes nothing
-    marquee(934, 247, 897, 268)
+    marquee(*(ear_boxes(ear)["a small band"] if ear else (934, 247, 897, 268)))
     for kind in ("rawKeyDown", "keyUp"): cmd("Input.dispatchKeyEvent", type=kind, key="x", code="KeyX", windowsVirtualKeyCode=88, modifiers=4)
     time.sleep(1.5)
     notice = js("(document.body.innerText.match(/Cut takes whole layers[^\\n]*/)||[''])[0]")

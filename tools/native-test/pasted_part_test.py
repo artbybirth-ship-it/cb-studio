@@ -81,6 +81,9 @@ try:
     level = lambda: js("(document.body.innerText.match(/\\d+ layers · [^\\n]*/)||[])[0]") or ""
     selected = lambda: js("[...document.querySelectorAll('.cb-symbol-row.is-selected')].map(e=>(e.textContent||'').trim().slice(0,22))") or []
     def step_in():
+        # A refresh keeps the stepped-into pose open (EditorShell symbolViewKey): forgotten here, so the page opens on the scene and the
+        # head is stepped into from there, as a person coming back to the project would.
+        js("Object.keys(localStorage).filter(k=>k.startsWith('cb-symbol-view')).forEach(k=>localStorage.removeItem(k))")
         cmd("Page.navigate", url=f"http://localhost:3000/editor/{PROJECT}"); time.sleep(10)
         js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.2,view:window}))})()"""); time.sleep(3)
         clk(840, 235, 2); clk(840, 235, 2)
