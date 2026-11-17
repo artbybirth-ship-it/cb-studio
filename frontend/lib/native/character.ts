@@ -138,6 +138,8 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       // This character's own renderer over the shared document: its edits are laid over the pose, other placed characters keep theirs.
       const renderer = new NativeRenderer(loaded.doc, loaded.renderer.assets);
       await renderer.loadBrushes();
+      // The pose by the class its player knows it by ("Sardar_01" for "Symbol 1"): part-scoped colour rules ("@Sardar_01/instance_7") name it so.
+      renderer.classes.set(source.item, source.js);
       for (const [cls, edit] of Object.entries(object.nativePose || {})) {
         const keys = Object.keys(edit.symbols);
         const item = edit.pose ?? (keys.includes(source.item) ? source.item : keys[0]);

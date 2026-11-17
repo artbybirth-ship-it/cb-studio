@@ -4,7 +4,7 @@ usage: python3 inplace_test.py <throwaway project id> <out dir> <source project 
 The throwaway scene gets the source's first character (Sardar, plain). A double-click opens its pose IN PLACE (native stage over the canvas,
 its timeline in the timeline row; no older pose timeline, no beta window). Arrow nudges are saved on the character at once, each one step of
 the scene's one Undo (⌘Z / ⌘⇧Z). Light/Dark inside the pose recolours the native stage, and ⌘Z undoes that colour, not the pose edits.
-Esc goes back to the scene, which draws the edit; opening again shows it; a double-click on empty stage steps out.
+Esc first puts Light/Dark away, the next goes back to the scene, which draws the edit; opening again shows it; a double-click on empty stage steps out.
 """
 import base64, io, json, os, subprocess, sys, time, urllib.request, websocket
 from PIL import Image
@@ -96,7 +96,10 @@ try:
     key("z", "KeyZ", 90, 4 | 8)
     check("⌘⇧Z brings it back", abs(val("x") - (x0 + 5)) < 0.11, str(val("x")))
 
-    # ---- Light/Dark inside the pose: the native stage changes colour; ⌘Z undoes the colour only
+    # ---- Light/Dark inside the pose: the native stage changes colour; ⌘Z undoes the colour only.
+    # Nothing picked first (a picked part would scope the colour tools to it; inplace_scope_test.py covers that).
+    click_at(*centre("[data-testid=native-stage-host] [data-testid=stage]", 0.05, 0.9))
+    check("a click on empty stage drops the pick", not js("!!document.querySelector('[data-testid=native-props]')"))
     spot = js("""(()=>{const c=document.querySelector('[data-testid=native-stage-host] [data-testid=stage]');const r=c.getBoundingClientRect();const g=c.getContext('2d');
       for(let fy=0.5;fy<0.95;fy+=0.03){const d=g.getImageData(Math.round(c.width*0.5),Math.round(c.height*fy),1,1).data;if(d[3]>200&&(d[0]+d[1]+d[2])<600)return [r.left+r.width*0.5,r.top+r.height*fy]}return null})()""")
     check("found a coloured spot on the native stage", bool(spot), str(spot))
@@ -118,19 +121,16 @@ try:
     check("⌘Z undoes the colour", stage_px(*spot) == before, f"{stage_px(*spot)} vs {before}")
     check("...and not the pose edits", val("x") is None or abs(val("x") - (x0 + 5)) < 0.11, str(val("x")))
 
-    # ---- out (Esc), the scene draws the edit; in again, it is there
-    while js(IN):
-        key("Escape", "Escape", 27)
-        if not js(IN): break
-        time.sleep(0.5)
-        if js(IN): break
-    check("Esc goes back to the scene", not js(IN))
+    # ---- Esc: first puts Light/Dark away (still in the pose), then goes back to the scene, which draws the edit; in again, it is there
+    key("Escape", "Escape", 27)
+    check("Esc with Light/Dark open closes it and stays in the pose", js(IN) and not js("!!document.querySelector('.cb-light-dark')"))
+    key("Escape", "Escape", 27)
+    check("the next Esc goes back to the scene", wait(f"!({IN})", 10))
     time.sleep(3)
     nowimg = scene_char()
     diff = sum(1 for a, b in zip(plain.resize((240, 320)).getdata(), nowimg.resize((240, 320)).getdata()) if sum(abs(p - q) for p, q in zip(a, b)) > 60)
     check("the scene draws the edited pose", diff > 30, f"{diff} pixels differ from before")
     shot("3-scene")
-    key("v", "KeyV", 86); time.sleep(0.3)  # back to the Selection tool (Light/Dark takes clicks on the character)
     check("in again", enter())
     for dy in (0.5, 0.45, 0.55, 0.4):
         x, y = centre("[data-testid=native-stage-host] [data-testid=stage]", 0.5, dy); click_at(x, y)

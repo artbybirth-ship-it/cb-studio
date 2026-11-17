@@ -178,6 +178,23 @@ export class NativeRenderer {
   /** Library items whose Animate class is not their own name (a pose called "Symbol 1" that the player knows as "Sardar_01"). */
   readonly classes = new Map<string, string>();
   private classFor(item: string) { return this.classes.get(item) ?? classOf(item); }
+  /**
+   * The colour scope of parts picked in `item` (the pose or a symbol stepped into): "@<class>/<name>+<name>", the instances by the
+   * names the player knows them by, as the old pose view made it. Drawn shapes at that level have no name and are left out; null when
+   * nothing picked has one (the colour tools then work on the whole character).
+   */
+  partScope(item: string, timeline: Timeline, picks: Array<{ layer: number; el: number }>, frame: number): string | null {
+    const names = this.namesOf(item), out: string[] = [];
+    for (const pick of picks) {
+      const layer = timeline.layers[pick.layer];
+      const state = layer && layerStateAt(layer, frame % Math.max(1, timeline.length));
+      const el = state?.key.elements[pick.el];
+      if (!state || el?.k !== "instance") continue;
+      const name = el.name || autoNameAt(names, layerKey(timeline.layers, pick.layer), state.key.i, pick.el);
+      if (name && !out.includes(name)) out.push(name);
+    }
+    return out.length ? `@${this.classFor(item)}/${out.join("+")}` : null;
+  }
   private rulesHere() { return this.rules.length ? rulesAt(this.rules, this.trail, this.partOf(this.inside[0], this.trail)) : this.rules; }
 
   private partEdits = new Map<string, PartEdit>();
@@ -499,7 +516,7 @@ export class NativeRenderer {
     const offset = key.i === 0 && key.d >= length && !next ? frame - key.i : state.offset;
     const t = tweenProgress(state);
     // What the player calls each unnamed instance, for part-scoped colour rules (only worked out when there are rules).
-    const names = (this.rules.length || this.partEdits.size || this.onlyKeys.length) && lkey ? this.namesOf(this.inside[this.inside.length - 1]) : undefined;
+    const names = (this.rules.length || this.partEdits.size || this.onlyKeys.length || this.probe?.scope) && lkey ?this.namesOf(this.inside[this.inside.length - 1]) : undefined;
     const auto = (e: number) => (names ? autoNameAt(names, lkey, key.i, e) : "");
     if (t != null && next) {
       if (key.tween === "shape" && key.morph) { if (!this.insideKept && this.onlyKeys.length && this.onlyFor(this.inside[0] || "")) return; this.drawMorph(ctx, key, next, t); return; }

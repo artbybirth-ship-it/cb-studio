@@ -3542,6 +3542,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     setSymbolView((state) => (!state || state.levels.length <= 1 ? null : { ...state, playing: false, hidden: new Set(), levels: state.levels.slice(0, -1) }));
   }, []);
   useEscClose(Boolean(symbolView), stepOutOfSymbol);
+  // Inside a pose, Esc first puts a tool with its own panel (Light/Dark, the dropper, Scale, …) back to Select; the next Esc steps
+  // out. Registered after the pose, so it closes first.
+  const panelTool = activeTool === "scale" || activeTool === "tone" || activeTool === "eyedropper" || activeTool === "reflect" || activeTool === "zoom" || activeTool === "text";
+  useEscClose(Boolean(symbolView) && panelTool, () => setActiveTool("select"));
   // A part double-clicked on the stage: step into its symbol; a drawn shape has none.
   const symbolDoubleClick = useCallback((prop: string | null) => {
     const current = symbolView?.levels[symbolView.levels.length - 1];
@@ -3882,7 +3886,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const now = selectedPropsRef.current;
     setPartSelection(now.includes(prop) ? now.filter((item) => item !== prop) : [...now, prop]);
   }, [setPartSelection]);
-  const poseScopeNow = selectedProps.length && symbolLevelNow ? `@${symbolLevelNow.js}/${selectedProps.join("+")}` : null;
+  // In place, the native editor tells the scope of its picked parts.
+  const [nativeScope, setNativeScope] = useState<string | null>(null);
+  const poseScopeNow = selectedProps.length && symbolLevelNow ? `@${symbolLevelNow.js}/${selectedProps.join("+")}` : nativeInPlace && nativeInPlace !== "checking" ? nativeScope : null;
   // Inside a pose the colour tools work on its character: on the picked parts in the older pose timeline, on the whole character in the native editor.
   const poseOwnerNow = symbolView && (selectedProps.length || (nativeInPlace && nativeInPlace !== "checking")) ? symbolView.objectId : null;
   useEffect(() => { setPoseColourScope(poseScopeNow); setPoseOwnerId(poseOwnerNow); }, [poseScopeNow, poseOwnerNow]);
@@ -6455,6 +6461,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                     onSave={(edits) => saveNativePose(target, edits)}
                     colourPick={stageColourTool || frPicking || boxPicking ? handleStageColorPress : null}
                     onColourFrame={(frame) => { nativeColourRef.current = frame ? { objectId: target.objectId, frame } : null; }}
+                    onScope={setNativeScope}
                   />
                 )}
               </div>

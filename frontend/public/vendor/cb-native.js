@@ -141,6 +141,8 @@ function createNativeCharacter(object) {
             // This character's own renderer over the shared document: its edits are laid over the pose, other placed characters keep theirs.
             const renderer = new render_1.NativeRenderer(loaded.doc, loaded.renderer.assets);
             await renderer.loadBrushes();
+            // The pose by the class its player knows it by ("Sardar_01" for "Symbol 1"): part-scoped colour rules ("@Sardar_01/instance_7") name it so.
+            renderer.classes.set(source.item, source.js);
             for (const [cls, edit] of Object.entries(object.nativePose || {})) {
                 const keys = Object.keys(edit.symbols);
                 const item = edit.pose ?? (keys.includes(source.item) ? source.item : keys[0]);
@@ -1156,6 +1158,25 @@ class NativeRenderer {
     }
     setColourRules(list) { this.rules = (0, colour_2.prepareRules)(list); }
     classFor(item) { return this.classes.get(item) ?? (0, colour_2.classOf)(item); }
+    /**
+     * The colour scope of parts picked in `item` (the pose or a symbol stepped into): "@<class>/<name>+<name>", the instances by the
+     * names the player knows them by, as the old pose view made it. Drawn shapes at that level have no name and are left out; null when
+     * nothing picked has one (the colour tools then work on the whole character).
+     */
+    partScope(item, timeline, picks, frame) {
+        const names = this.namesOf(item), out = [];
+        for (const pick of picks) {
+            const layer = timeline.layers[pick.layer];
+            const state = layer && (0, evaluate_1.layerStateAt)(layer, frame % Math.max(1, timeline.length));
+            const el = state?.key.elements[pick.el];
+            if (!state || el?.k !== "instance")
+                continue;
+            const name = el.name || (0, names_1.autoNameAt)(names, (0, names_1.layerKey)(timeline.layers, pick.layer), state.key.i, pick.el);
+            if (name && !out.includes(name))
+                out.push(name);
+        }
+        return out.length ? `@${this.classFor(item)}/${out.join("+")}` : null;
+    }
     rulesHere() { return this.rules.length ? (0, colour_2.rulesAt)(this.rules, this.trail, this.partOf(this.inside[0], this.trail)) : this.rules; }
     /** The part edits to draw with (by rig part key); only parts that change something are kept. */
     setPartEdits(edits) {
@@ -1553,7 +1574,7 @@ class NativeRenderer {
         const offset = key.i === 0 && key.d >= length && !next ? frame - key.i : state.offset;
         const t = (0, evaluate_1.tweenProgress)(state);
         // What the player calls each unnamed instance, for part-scoped colour rules (only worked out when there are rules).
-        const names = (this.rules.length || this.partEdits.size || this.onlyKeys.length) && lkey ? this.namesOf(this.inside[this.inside.length - 1]) : undefined;
+        const names = (this.rules.length || this.partEdits.size || this.onlyKeys.length || this.probe?.scope) && lkey ? this.namesOf(this.inside[this.inside.length - 1]) : undefined;
         const auto = (e) => (names ? (0, names_1.autoNameAt)(names, lkey, key.i, e) : "");
         if (t != null && next) {
             if (key.tween === "shape" && key.morph) {

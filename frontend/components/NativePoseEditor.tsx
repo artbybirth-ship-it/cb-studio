@@ -99,7 +99,7 @@ function inkBox(draw: (ctx: OffscreenCanvasRenderingContext2D) => void): { x: nu
 /** The colour tools' view of the open level (what the Animate player's colour finder answers), for the scene editor's dropper and the like. */
 export type NativeColourFrame = { getBoundingClientRect: () => DOMRect; contentWindow: { cbColorAt: (x: number, y: number, scope: string) => unknown; cbColorPalette: (scope: string) => unknown; cbColorRelatives: (hex: string, scope: string) => unknown } };
 
-export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl, uploadPicture, embedded, crumbs, onStepOut, colourPick, onColourFrame, redrawKey, note: outsideNote, sceneHistory }: {
+export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl, uploadPicture, embedded, crumbs, onStepOut, colourPick, onColourFrame, onScope, redrawKey, note: outsideNote, sceneHistory }: {
   doc: FlaDocument; renderer: NativeRenderer; poses: Pose[];
   /** Where this character's .fla came from: lets a copied part be found again after a reload. */
   flaUrl?: string;
@@ -118,6 +118,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   colourPick?: ((clientX: number, clientY: number, keys: { altKey: boolean; shiftKey: boolean }) => void) | null;
   /** Told the colour tools' view of the open level (null when it goes). */
   onColourFrame?: (frame: NativeColourFrame | null) => void;
+  /** Told the colour scope of the picked parts ("@<class>/<names>", what the colour tools then work on), or null for the whole character. */
+  onScope?: (scope: string | null) => void;
   /** Draw again when this changes (the character's colour rules changed). */
   redrawKey?: string;
   /** A message from outside (older edits converted…), shown with the editor's own notes. */
@@ -668,6 +670,10 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     return found;
   }
   const selected = (): Sel[] => [...(elIndex != null ? [{ layer: layerIndex, el: elIndex }] : []), ...others];
+  // The colour tools work on the picked parts (as in the old pose view): their scope goes out whenever the selection changes.
+  const scopeNow = base && (elIndex != null || others.length) ? renderer.partScope(symbol, base, selected(), frame) : null;
+  useEffect(() => { onScope?.(scopeNow); }, [onScope, scopeNow]);
+  useEffect(() => () => onScope?.(null), [onScope]);
   const same = (a: Sel, b: Sel) => a.layer === b.layer && a.el === b.el;
 
   /** The anchor or control point of the selected drawn shape under the pointer (canvas pixels), when point editing is on. */

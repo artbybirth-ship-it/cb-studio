@@ -16,7 +16,7 @@ import { convertLegacy, type LegacyFields } from "../lib/native/legacy";
 import { buildClones } from "../lib/native/legacyClones";
 import type { ColourRule } from "../lib/native/colour";
 
-export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial, legacy, colours, uploadPicture, hosts, crumbs, onStepOut, onSave, colourPick, onColourFrame, history }: {
+export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial, legacy, colours, uploadPicture, hosts, crumbs, onStepOut, onSave, colourPick, onColourFrame, onScope, history }: {
   flaUrl: string; item: string; poseName: string;
   /** The pose's class in the player (what old edits and colour rules call it). */
   js: string;
@@ -35,6 +35,8 @@ export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial,
   onSave: (edits: NativeEdits | null) => void;
   colourPick?: ((clientX: number, clientY: number, keys: { altKey: boolean; shiftKey: boolean }) => void) | null;
   onColourFrame?: (frame: NativeColourFrame | null) => void;
+  /** The colour scope of the parts picked in the editor (null: the whole character). */
+  onScope?: (scope: string | null) => void;
   /** The scene's one Undo / Redo (each change here is one step of it); `turn` changes after each, and the editor takes the edits again. */
   history: { turn: number; undo: () => void; redo: () => void };
 }) {
@@ -100,7 +102,7 @@ export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial,
   }
   return (
     <NativePoseEditor flaUrl={flaUrl} doc={loaded.doc} renderer={loaded.renderer} poses={[{ item, name: poseName }]} initialEdits={opening.current ?? seed} onChange={onChange}
-      uploadPicture={uploadPicture} embedded={hosts} crumbs={crumbs} onStepOut={onStepOut} colourPick={colourPick} onColourFrame={onColourFrame} redrawKey={coloursKey} note={converted}
+      uploadPicture={uploadPicture} embedded={hosts} crumbs={crumbs} onStepOut={onStepOut} colourPick={colourPick} onColourFrame={onColourFrame} onScope={onScope} redrawKey={coloursKey} note={converted}
       sceneHistory={{ turn: history.turn, edits: initial ?? seed, undo: history.undo, redo: history.redo }} />
   );
 }

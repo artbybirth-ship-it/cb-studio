@@ -130,6 +130,7 @@ try:
     # controls: same character with no old edits, drawn by the player (C) and natively (D)
     ed = json.loads(json.dumps(sc1["editor_data"])); o = ed["objects"][0]
     saved_native = o["nativePose"]
+    json.dump(saved_native, open(f"{OUT}/converted.json", "w"), sort_keys=True)  # the conversion as saved, to compare runs
     for k in OLD: o.pop(k, None)
     o.pop("nativePose", None)
     patch(sc1, ed)
