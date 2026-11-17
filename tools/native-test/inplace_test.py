@@ -2,7 +2,7 @@
 
 usage: python3 inplace_test.py <throwaway project id> <out dir> <source project id>
 The throwaway scene gets the source's first character (Sardar, plain). A double-click opens its pose IN PLACE (native stage over the canvas,
-its timeline in the timeline row; no older pose timeline, no beta window). Arrow nudges are saved on the character at once, each one step of
+its timeline in the timeline row; no older pose timeline, no beta window). A turns point editing on (the tool rail shows Direct select), V off. Arrow nudges are saved on the character at once, each one step of
 the scene's one Undo (⌘Z / ⌘⇧Z). Light/Dark inside the pose recolours the native stage, and ⌘Z undoes that colour, not the pose edits.
 Esc first puts Light/Dark away, the next goes back to the scene, which draws the edit; opening again shows it; a double-click on empty stage steps out.
 """
@@ -76,6 +76,16 @@ try:
     crumbs = js("document.querySelector('[data-testid=native-crumbs]').textContent")
     check("the crumbs say where you are", "Scene" in crumbs and (o.get("name") or "") in crumbs, crumbs)
     shot("1-in-place")
+
+    # ---- Direct select and point editing follow each other: A turns point editing on and the tool rail shows Direct select; V turns it off
+    POINTS_ON = "document.querySelector('[data-testid=point-mode]')?.getAttribute('aria-pressed')==='true'"
+    RAIL_DIRECT = "!!document.querySelector('[title^=\"Direct select tool (A)\"]')"
+    js("document.activeElement && document.activeElement.blur()")
+    key("a", "KeyA", 65)
+    check("A inside the pose turns point editing on", bool(js(POINTS_ON)))
+    check("...and the tool rail shows Direct select", bool(js(RAIL_DIRECT)))
+    key("v", "KeyV", 86)
+    check("V (the scene's Select tool) turns point editing off", not js(POINTS_ON))
 
     # ---- a part nudged: saved at once, the scene's undo
     for dy in (0.5, 0.45, 0.55, 0.4):  # well inside a part, so the same spot still hits it after it moves

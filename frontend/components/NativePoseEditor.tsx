@@ -15,7 +15,7 @@ import { colourAtPoint, paletteOf, relativesOf } from "../lib/native/character";
 import type { Ease, FlaDocument, FlaElement, Keyframe, Layer, Matrix, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
 import { clearKeyframe, commit, copyFrames, cutFrames, deleteLayers, duplicateLayers, pasteFrames, type FrameClip, history, insertBlankKeyframe, insertLayer, renameLayer, setLayerLocked, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setEase, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
-import { movePoint, shapePoints, type PointRef, type Pt } from "../lib/native/points";
+import { addAnchor, convertAnchor, deleteAnchors, edgeAt, moveAnchors, movePoint, samePoint, shapePoints, type PointRef, type Pt } from "../lib/native/points";
 import { innerFrame, layerStateAt } from "../lib/native/evaluate";
 import { applyEdits, editsOf, parseEdits, serializeEdits, type NativeEdits } from "../lib/native/store";
 import { IDENTITY, addPicture, importElements, invert, mul, poseScale, registerLibrary } from "../lib/native/library";
@@ -33,7 +33,7 @@ const ROW = 24;
 type Working = ReadonlyMap<string, Timeline>;
 type Pose = { item: string; name: string };
 type Sel = { layer: number; el: number };
-type Drag = { kind: "part"; start: [number, number]; held: Array<Sel & { m: Matrix }>; preview?: Map<number, Layer> } | { kind: "point"; layer: number; el: number; ref: PointRef; preview?: Map<number, Layer> } | { kind: "box"; from: [number, number]; to: [number, number] } | { kind: "key"; layer: number; from: number; start: number; to: number; copy: boolean; toLayer: number; d: number }
+type Drag = { kind: "part"; start: [number, number]; held: Array<Sel & { m: Matrix }>; preview?: Map<number, Layer> } | { kind: "point"; layer: number; el: number; ref: PointRef; preview?: Map<number, Layer> } | { kind: "anchors"; layer: number; el: number; from: Pt[]; start: [number, number]; to?: Pt[]; preview?: Map<number, Layer> } | { kind: "box"; from: [number, number]; to: [number, number]; points?: { add: boolean; onShape: boolean } } | { kind: "key"; layer: number; from: number; start: number; to: number; copy: boolean; toLayer: number; d: number }
   | { kind: "handle"; handle: Handle; frame: Matrix; box: Box; pivot: [number, number]; start: [number, number]; held: Array<Sel & { m: Matrix }>; preview?: Map<number, Layer> }
   | { kind: "pivot"; layer: number; el: number; m: Matrix; preview?: Map<number, Layer> };
 
@@ -99,7 +99,7 @@ function inkBox(draw: (ctx: OffscreenCanvasRenderingContext2D) => void): { x: nu
 /** The colour tools' view of the open level (what the Animate player's colour finder answers), for the scene editor's dropper and the like. */
 export type NativeColourFrame = { getBoundingClientRect: () => DOMRect; contentWindow: { cbColorAt: (x: number, y: number, scope: string) => unknown; cbColorPalette: (scope: string) => unknown; cbColorRelatives: (hex: string, scope: string) => unknown } };
 
-export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl, uploadPicture, embedded, crumbs, onStepOut, colourPick, onColourFrame, onScope, redrawKey, note: outsideNote, sceneHistory }: {
+export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl, uploadPicture, embedded, crumbs, onStepOut, colourPick, onColourFrame, onScope, pointTool, onPointTool, redrawKey, note: outsideNote, sceneHistory }: {
   doc: FlaDocument; renderer: NativeRenderer; poses: Pose[];
   /** Where this character's .fla came from: lets a copied part be found again after a reload. */
   flaUrl?: string;
@@ -120,6 +120,10 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   onColourFrame?: (frame: NativeColourFrame | null) => void;
   /** Told the colour scope of the picked parts ("@<class>/<names>", what the colour tools then work on), or null for the whole character. */
   onScope?: (scope: string | null) => void;
+  /** In place: point editing follows the scene's Direct select tool (A on the tool rail; V turns it off). */
+  pointTool?: boolean;
+  /** Told when point editing is turned on or off here (A, or the button), so the scene's tool rail follows. */
+  onPointTool?: (on: boolean) => void;
   /** Draw again when this changes (the character's colour rules changed). */
   redrawKey?: string;
   /** A message from outside (older edits converted…), shown with the editor's own notes. */
@@ -170,8 +174,15 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const [allLayers, setAllLayers] = useState(false);
   /** Point editing (A, Animate's Subselection tool): the selected drawn shape shows its anchor points, which can be dragged. */
   const [pointMode, setPointMode] = useState(false);
+  /** The selected anchors of the shape being point-edited, in its own space (click, Shift-click, a box; drawn filled). */
+  const [selPts, setSelPts] = useState<Pt[]>([]);
+  const togglePointMode = () => { const on = !pointMode; setPointMode(on); onPointTool?.(on); };
+  useEffect(() => { if (pointTool !== undefined) setPointMode(pointTool); }, [pointTool]);
   const [playing, setPlaying] = useState(false);
-  const [drag, setDrag] = useState<Drag | null>(null);
+  const [drag, setDragState] = useState<Drag | null>(null);
+  /** The drag as last set (not as last drawn): a release that comes before the screen has caught up with a slow move still keeps that move. */
+  const dragNow = useRef<Drag | null>(null);
+  const setDrag = useCallback((next: Drag | null) => { dragNow.current = next; setDragState(next); }, []);
   /** The ease while the Ease box is being dragged: the tween plays with it on the stage, nothing is kept until the drag ends. */
   const [easePreview, setEasePreview] = useState<{ layer: number; at: number; value: number } | null>(null);
   /** A Properties number while it is being dragged: shown on the stage, kept as one undo step when the drag ends. */
@@ -199,7 +210,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   // The timeline on screen: the working copy with a drag in progress laid over it.
   const shown: Timeline | undefined = useMemo(() => {
     if (!base) return undefined;
-    if ((drag?.kind === "part" || drag?.kind === "point" || drag?.kind === "handle" || drag?.kind === "pivot") && drag.preview) return { ...base, layers: base.layers.map((l, i) => drag.preview!.get(i) ?? l) };
+    if ((drag?.kind === "part" || drag?.kind === "point" || drag?.kind === "anchors" || drag?.kind === "handle" || drag?.kind === "pivot") && drag.preview) return { ...base, layers: base.layers.map((l, i) => drag.preview!.get(i) ?? l) };
     if (easePreview) return { ...base, layers: base.layers.map((l, i) => (i === easePreview.layer ? setEase(l, easePreview.at, easeOfNumber(easePreview.value)) : l)) };
     if (valuePreview) return { ...base, layers: base.layers.map((l, i) => (i === valuePreview.layer ? valuePreview.next : l)) };
     return base;
@@ -292,7 +303,10 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     setNote(`Deleted ${doomed.length > 1 ? `${doomed.length} layers` : `layer ${base.layers[doomed[0]].name}`}`);
   }, [base, working, symbol, elIndex, layerIndex, others]);
   const deleteRef = useRef<() => void>(() => {});
-  deleteRef.current = deleteSelected;
+  deleteRef.current = () => { if (!deletePointsRef.current()) deleteSelected(); };
+  const deletePointsRef = useRef<() => boolean>(() => false);
+  const togglePointRef = useRef(togglePointMode);
+  togglePointRef.current = togglePointMode;
   /** The eye: hides or shows one layer (undoable). */
   const toggleEye = (index: number) => { const layer = base?.layers[index]; if (layer) { edit((l) => setLayerOff(l, !layer.off), index); } };
   /** The padlock (undoable): a locked layer's parts cannot be picked or changed on the stage; what was selected on it is let go. */
@@ -356,7 +370,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       if (e.key === "F5") { take(); (e.shiftKey ? commands["remove-frames"] : commands["insert-frame"])(); }
       else if (e.key === "F6") { take(); (e.shiftKey ? commands["clear-keyframe"] : commands["insert-keyframe"])(); }
       else if (e.key === "F7") { take(); commands["blank-keyframe"](); }
-      else if (!mod && !e.shiftKey && e.key.toLowerCase() === "a") { take(); setPointMode((on) => !on); }
+      else if (!mod && !e.shiftKey && e.key.toLowerCase() === "a") { take(); togglePointRef.current(); }
       else if (e.key === "," || e.key === ".") { take(); setFrame((f) => Math.max(0, Math.min(length - 1, f + (e.key === "," ? -1 : 1)))); }
     };
     window.addEventListener("keydown", onKey, true);
@@ -573,19 +587,31 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         ctx.fillStyle = "#e5007d";
         for (const c of controls) { const [x, y] = toScreen(c.at); ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill(); }
         ctx.lineWidth = 1.5; ctx.strokeStyle = "#1a73e8"; ctx.fillStyle = "#fff";
-        for (const a of anchors) { const [x, y] = toScreen(a); ctx.fillRect(x - 4, y - 4, 8, 8); ctx.strokeRect(x - 4, y - 4, 8, 8); }
+        for (const a of anchors) { const [x, y] = toScreen(a); ctx.fillStyle = selPts.some((p) => samePoint(p, a)) ? "#1a73e8" : "#fff"; ctx.fillRect(x - 4, y - 4, 8, 8); ctx.strokeRect(x - 4, y - 4, 8, 8); }
         // Where the points are on the canvas, for the headless tests.
-        el.dataset.points = JSON.stringify([...anchors.slice(0, 60).map((a) => ({ k: "anchor", p: toScreen(a) })), ...controls.slice(0, 30).map((c) => ({ k: "control", p: toScreen(c.at) }))]);
+        el.dataset.points = JSON.stringify([...anchors.slice(0, 60).map((a) => ({ k: "anchor", p: toScreen(a), sel: selPts.some((q) => samePoint(q, a)) })), ...controls.slice(0, 30).map((c) => ({ k: "control", p: toScreen(c.at), a: toScreen(c.a), b: toScreen(c.b) }))]);
+        el.dataset.pointCount = String(anchors.length);
+        el.dataset.pointSel = String(anchors.filter((a) => selPts.some((p) => samePoint(p, a))).length);
         pointsShown = true;
       }
     }
-    if (!pointsShown) delete el.dataset.points;
+    if (!pointsShown) { delete el.dataset.points; delete el.dataset.pointCount; delete el.dataset.pointSel; }
     if (drag?.kind === "box") {
       ctx.strokeStyle = "#1a73e8"; ctx.fillStyle = "rgba(26,115,232,0.12)"; ctx.lineWidth = 1;
       const x = Math.min(drag.from[0], drag.to[0]), y = Math.min(drag.from[1], drag.to[1]), w = Math.abs(drag.to[0] - drag.from[0]), h = Math.abs(drag.to[1] - drag.from[1]);
       ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
     }
-  }, [renderer, working, shown, symbol, frame, fit, layerIndex, elIndex, others, drag, pointMode, canvasW, canvasH, redrawKey]);
+  }, [renderer, working, shown, symbol, frame, fit, layerIndex, elIndex, others, drag, pointMode, selPts, canvasW, canvasH, redrawKey]);
+  // The selected points belong to one shape at one frame.
+  useEffect(() => { setSelPts([]); }, [symbol, frame, layerIndex, elIndex, pointMode]);
+  // After Undo / Redo (or any change to the shape), only the selected points the shape still has stay selected.
+  useEffect(() => {
+    const ps = pointShape(base);
+    if (!ps) return;
+    const there = shapePoints(ps.shape).anchors;
+    setSelPts((now) => { const kept = now.filter((p) => there.some((a) => samePoint(a, p))); return kept.length === now.length ? now : kept; });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [working]);
 
   /** Topmost layer, and part of it, drawn at the point (x, y) of `timeline`'s own space, probed at `scale` pixels per unit. */
   function pickAt(timeline: Timeline, at: number, x: number, y: number, scale: number): { layer: number; el: number } | null {
@@ -624,7 +650,21 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     if (!shown || !canvas.current) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const cx = (e.clientX - rect.left) * (e.currentTarget.width / rect.width), cy = (e.clientY - rect.top) * (e.currentTarget.height / rect.height);
+    // Point editing a shape: a double-click on one of its edges adds an anchor there (the outline keeps its shape).
+    const ps = pointShape(base);
+    if (ps && pointAt(cx, cy)) return;  // on a point already: nothing to add
+    if (ps) {
+      const found = edgeAt(ps.shape, ps.local(cx, cy), 7 / ps.scale);
+      if (found) {
+        const made = addAnchor(ps.shape, found.edge, found.t);
+        editShape(ps.layer, ps.el, () => made.shape);
+        setSelPts([made.point]);
+        setNote("Point added");
+        return;
+      }
+    }
     const hit = pick(cx, cy);
+    if (ps && hit && hit.layer === ps.layer && hit.el === ps.el) return;
     if (!hit) {
       if (stack.length > 1) setStack((st) => st.slice(0, -1));
       else onStepOut?.();
@@ -676,6 +716,43 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   useEffect(() => () => onScope?.(null), [onScope]);
   const same = (a: Sel, b: Sel) => a.layer === b.layer && a.el === b.el;
 
+  /** The drawn shape being point-edited (the main selected part, when point editing is on and it is a drawn shape on an unlocked layer), in `timeline`. */
+  function pointShape(timeline: Timeline | undefined) {
+    if (!pointMode || elIndex == null || !timeline || !canvas.current || timeline.layers[layerIndex]?.locked) return null;
+    const shape = timeline.layers[layerIndex] && resolveElements(timeline.layers[layerIndex], frame)[elIndex];
+    if (!shape || shape.k !== "shape") return null;
+    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
+    const m = shape.m, back = invert(m);
+    return {
+      shape, layer: layerIndex, el: elIndex,
+      /** Shape space to canvas pixels, and back. */
+      screen: (p: Pt): Pt => [(m[0] * p[0] + m[2] * p[1] + m[4]) * s + tx, (m[1] * p[0] + m[3] * p[1] + m[5]) * s + ty],
+      local: (cx: number, cy: number): Pt => { const x = (cx - tx) / s, y = (cy - ty) / s; return [back[0] * x + back[2] * y + back[4], back[1] * x + back[3] * y + back[5]]; },
+      /** A move of (dx, dy) in the level's units, in the shape's own space. */
+      delta: (dx: number, dy: number): Pt => [back[0] * dx + back[2] * dy, back[1] * dx + back[3] * dy],
+      /** Canvas pixels per shape unit (for how near the pointer must be). */
+      scale: s * Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || s,
+    };
+  }
+  /** One point edit kept as one undo step. */
+  const editShape = (layer: number, el: number, change: (shape: Extract<FlaElement, { k: "shape" }>) => Extract<FlaElement, { k: "shape" }>) => {
+    if (!base) return;
+    const layers = base.layers.slice();
+    layers[layer] = setElement(layers[layer], frame, el, (x) => (x.k === "shape" ? change(x) : x));
+    const map = new Map(working);
+    map.set(symbol, { ...base, layers, length: lengthOf(layers) });
+    setHist((h) => commit(h, map));
+  };
+  deletePointsRef.current = () => {
+    const ps = pointShape(base);
+    if (!ps || !selPts.length) return false;
+    const gone = selPts;
+    editShape(ps.layer, ps.el, (shape) => deleteAnchors(shape, gone));
+    setSelPts([]);
+    setNote(`Deleted ${gone.length} point${gone.length === 1 ? "" : "s"}`);
+    return true;
+  };
+
   /** The anchor or control point of the selected drawn shape under the pointer (canvas pixels), when point editing is on. */
   function pointAt(cx: number, cy: number): { ref: PointRef; layer: number; el: number } | null {
     if (!pointMode || elIndex == null || !shown || !canvas.current || shown.layers[layerIndex]?.locked) return null;
@@ -697,12 +774,33 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     if (colourPick) { colourPick(e.clientX, e.clientY, { altKey: e.altKey, shiftKey: e.shiftKey }); return; }
     const [cx, cy] = toCanvas(e);
     const point = pointAt(cx, cy);
+    if (point && point.ref.kind === "anchor") {
+      const a = point.ref.at, has = selPts.some((p) => samePoint(p, a));
+      // Option-click: corner <-> curve (Animate's Convert Anchor Point tool).
+      if (e.altKey) { editShape(point.layer, point.el, (shape) => convertAnchor(shape, a)); setSelPts([a]); return; }
+      // Shift-click adds the anchor to the selected ones, or takes it out.
+      if (e.shiftKey) { setSelPts(has ? selPts.filter((p) => !samePoint(p, a)) : [...selPts, a]); return; }
+      const from = has ? selPts : [a];
+      setSelPts(from);
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setDrag({ kind: "anchors", layer: point.layer, el: point.el, from, start: [cx, cy] });
+      return;
+    }
     if (point) {
       e.currentTarget.setPointerCapture(e.pointerId);
       setDrag({ kind: "point", layer: point.layer, el: point.el, ref: point.ref });
       return;
     }
     const hit = pick(cx, cy);
+    // Point editing a shape: a drag on empty stage or on the shape itself (its edges count, even under another part) draws a box that selects the
+    // anchors inside it.
+    const editing = pointShape(shown);
+    const onEdge = Boolean(editing && edgeAt(editing.shape, editing.local(cx, cy), 7 / editing.scale));
+    if (editing && (!hit || onEdge || (hit.layer === layerIndex && hit.el === elIndex))) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setDrag({ kind: "box", from: [cx, cy], to: [cx, cy], points: { add: e.shiftKey, onShape: Boolean(hit) || onEdge } });
+      return;
+    }
     if (!hit || !shown) {
       // Empty stage: a drag draws a box (shift keeps what is selected already).
       if (!e.shiftKey) { setElIndex(null); setOthers([]); }
@@ -728,6 +826,16 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     if (!drag || !shown || !canvas.current) return;
     const [cx, cy] = toCanvas(e);
     if (drag.kind === "box") { setDrag({ ...drag, to: [cx, cy] }); return; }
+    if (drag.kind === "anchors") {
+      const ps = pointShape(base);
+      if (!ps) return;
+      const { s } = fit(canvas.current.width, canvas.current.height);
+      const d = ps.delta((cx - drag.start[0]) / s, (cy - drag.start[1]) / s);
+      const to = drag.from.map((p): Pt => [p[0] + d[0], p[1] + d[1]]);
+      const moved = setElement(base!.layers[drag.layer], frame, drag.el, (el) => (el.k === "shape" ? moveAnchors(el, drag.from, to) : el));
+      setDrag({ ...drag, to, preview: new Map([[drag.layer, moved]]) });
+      return;
+    }
     if (drag.kind === "point") {
       const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
       const level = base!.layers[drag.layer] && resolveElements(base!.layers[drag.layer], frame)[drag.el];
@@ -747,7 +855,26 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     setDrag({ ...drag, preview });
   };
   const onStageUp = () => {
-    if ((drag?.kind === "part" || drag?.kind === "point" || drag?.kind === "handle" || drag?.kind === "pivot") && drag.preview) {
+    const drag = dragNow.current;
+    if (drag?.kind === "anchors" && drag.to) setSelPts(drag.to);
+    if (drag?.kind === "box" && drag.points) {
+      const ps = pointShape(shown);
+      const big = Math.abs(drag.to[0] - drag.from[0]) > 3 || Math.abs(drag.to[1] - drag.from[1]) > 3;
+      if (ps && big) {
+        const [x0, x1] = [Math.min(drag.from[0], drag.to[0]), Math.max(drag.from[0], drag.to[0])], [y0, y1] = [Math.min(drag.from[1], drag.to[1]), Math.max(drag.from[1], drag.to[1])];
+        const inside = shapePoints(ps.shape).anchors.filter((a) => { const [x, y] = ps.screen(a); return x >= x0 && x <= x1 && y >= y0 && y <= y1; });
+        const next = drag.points.add ? [...selPts, ...inside.filter((a) => !selPts.some((p) => samePoint(p, a)))] : inside;
+        setSelPts(next);
+        setNote(`${next.length} point${next.length === 1 ? "" : "s"} selected`);
+      } else if (!big && !drag.points.add) {
+        // A click: drops the selected points; on empty stage with none selected, drops the shape too.
+        if (selPts.length || drag.points.onShape) setSelPts([]);
+        else { setElIndex(null); setOthers([]); }
+      }
+      setDrag(null);
+      return;
+    }
+    if ((drag?.kind === "part" || drag?.kind === "point" || drag?.kind === "anchors" || drag?.kind === "handle" || drag?.kind === "pivot") && drag.preview) {
       const preview = drag.preview;
       const layers = base!.layers.map((l, i) => preview.get(i) ?? l);
       const map = new Map(working);
@@ -802,6 +929,13 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   })();
   const nudgeRef = useRef<((by: [number, number]) => boolean) | null>(null);
   nudgeRef.current = (by) => {
+    const ps = pointShape(base);
+    if (ps && selPts.length) {
+      const d = ps.delta(by[0], by[1]), from = selPts, to = from.map((p): Pt => [p[0] + d[0], p[1] + d[1]]);
+      editShape(ps.layer, ps.el, (shape) => moveAnchors(shape, from, to));
+      setSelPts(to);
+      return true;
+    }
     if (!base || !handleModel) return false;
     let layers = base.layers.slice();
     for (const p of handleModel.parts) layers[p.layer] = setMatrix(layers[p.layer], frame, p.el, [p.part.m[0], p.part.m[1], p.part.m[2], p.part.m[3], p.part.m[4] + by[0], p.part.m[5] + by[1]]);
@@ -996,10 +1130,10 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         <button data-testid="swap-part" style={btn} onClick={() => void swapPart()}>⇄ Swap with copied part</button>
         <button data-testid="add-from-library" style={btn} title="New layer above the picked one: a symbol of this file's library, a picture, or a picture file from your computer"
           onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setLibFilter(""); setLibMenu((open) => (open ? null : { x: r.left, y: r.bottom + 4 })); }}>＋ Layer from library</button>
-        <button data-testid="point-mode" style={{ ...btn, background: pointMode ? "#cfe3ff" : undefined }} aria-pressed={pointMode} title="Point editing: select a drawn shape, then drag its anchor points and curve handles" onClick={() => setPointMode((on) => !on)}>A Edit points</button>
+        <button data-testid="point-mode" style={{ ...btn, background: pointMode ? "#cfe3ff" : undefined }} aria-pressed={pointMode} title="Point editing (A): select a drawn shape, then drag its anchor points and curve handles; ⇧-click or a box selects several, Delete removes them, double-click an edge adds one, ⌥-click switches corner / curve" onClick={togglePointMode}>A Edit points</button>
         <button data-testid="delete-layer" style={btn} onClick={deleteSelected}>⌫ Delete layer</button>
         <button data-testid="duplicate-layer" style={btn} onClick={duplicateSelected} title="A copy of the picked layer (or the layers of the selected parts), just above it">⧉ Duplicate layer</button>
-        <button data-testid="undo" style={btn} onClick={doUndo} disabled={!sceneHistory && !hist.past.length}>Undo</button>
+        <button data-testid="undo" data-steps={hist.past.length} style={btn} onClick={doUndo} disabled={!sceneHistory && !hist.past.length}>Undo</button>
         <button data-testid="redo" style={btn} onClick={doRedo} disabled={!sceneHistory && !hist.future.length}>Redo</button>
         <label style={{ font: "12px system-ui" }}><input type="checkbox" checked={allLayers} onChange={(e) => setAllLayers(e.target.checked)} /> all layers</label>
         <button style={btn} onClick={() => setPlaying((p) => !p)}>{playing ? "Pause" : "Play"}</button>
@@ -1088,7 +1222,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
               {part.k === "instance" && <><br /><PropField id="alpha" label="Opacity" unit="%" value={(part.alpha ?? 1) * 100} decimals={0} min={0} max={100} onChange={(v) => setPartValue({ alpha: Math.round(v * 10) / 1000 })} /></>}
             </div>
           )}
-          {embedded ? <details style={{ marginTop: 8, color: "#555" }}><summary style={{ cursor: "pointer" }}>How to…</summary>Click a part on the stage, drag to move (or drag a number in its Properties left / right, or click it and type); its box scales from the squares (Shift on a corner keeps the shape, Alt scales from the transformation point), rotates just outside a corner (Shift: 15° steps), skews along an edge; drag the pink transformation point to move it (double-click: back to the middle); arrow keys nudge 1 (Shift 10); A (or Edit points) shows the anchor points of a drawn shape (double-click a symbol to step into it first) and drag one, or a curve handle, to reshape it; Delete removes its layer, the dot beside a layer hides it, the padlock locks it, double-click a layer's name to rename it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). drag a keyframe in the timeline to move it, ⌥-drag to drop a copy (onto any layer); Copy / Cut / Paste frames (⌥⌘C / ⌥⌘X / ⌥⌘V, ⌘⇧V back in place) work on the selected frames; click inside a tween to change its Ease (drag the number, or double-click to type). ⇧-click extends the frame selection. , and . step frames.</details> : <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move (or drag a number in its Properties left / right, or click it and type); its box scales from the squares (Shift on a corner keeps the shape, Alt scales from the transformation point), rotates just outside a corner (Shift: 15° steps), skews along an edge; drag the pink transformation point to move it (double-click: back to the middle); arrow keys nudge 1 (Shift 10); A (or Edit points) shows the anchor points of a drawn shape (double-click a symbol to step into it first) and drag one, or a curve handle, to reshape it; Delete removes its layer, the dot beside a layer hides it, the padlock locks it, double-click a layer's name to rename it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). drag a keyframe in the timeline to move it, ⌥-drag to drop a copy (onto any layer); Copy / Cut / Paste frames (⌥⌘C / ⌥⌘X / ⌥⌘V, ⌘⇧V back in place) work on the selected frames; click inside a tween to change its Ease (drag the number, or double-click to type). ⇧-click extends the frame selection. , and . step frames.</div>}
+          {embedded ? <details style={{ marginTop: 8, color: "#555" }}><summary style={{ cursor: "pointer" }}>How to…</summary>Click a part on the stage, drag to move (or drag a number in its Properties left / right, or click it and type); its box scales from the squares (Shift on a corner keeps the shape, Alt scales from the transformation point), rotates just outside a corner (Shift: 15° steps), skews along an edge; drag the pink transformation point to move it (double-click: back to the middle); arrow keys nudge 1 (Shift 10); A (or Edit points, or Direct select on the tool rail) shows the anchor points of a drawn shape (double-click a symbol to step into it first): drag one, or a curve handle, to reshape it; ⇧-click or drag a box to select several (they move together, arrow keys nudge them, Delete removes them); double-click an edge to add a point; ⌥-click a point to switch it between corner and curve; Delete removes its layer, the dot beside a layer hides it, the padlock locks it, double-click a layer's name to rename it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). drag a keyframe in the timeline to move it, ⌥-drag to drop a copy (onto any layer); Copy / Cut / Paste frames (⌥⌘C / ⌥⌘X / ⌥⌘V, ⌘⇧V back in place) work on the selected frames; click inside a tween to change its Ease (drag the number, or double-click to type). ⇧-click extends the frame selection. , and . step frames.</details> : <div style={{ marginTop: 6, color: "#666" }}>Click a part on the stage, drag to move (or drag a number in its Properties left / right, or click it and type); its box scales from the squares (Shift on a corner keeps the shape, Alt scales from the transformation point), rotates just outside a corner (Shift: 15° steps), skews along an edge; drag the pink transformation point to move it (double-click: back to the middle); arrow keys nudge 1 (Shift 10); A (or Edit points, or Direct select on the tool rail) shows the anchor points of a drawn shape (double-click a symbol to step into it first): drag one, or a curve handle, to reshape it; ⇧-click or drag a box to select several (they move together, arrow keys nudge them, Delete removes them); double-click an edge to add a point; ⌥-click a point to switch it between corner and curve; Delete removes its layer, the dot beside a layer hides it, the padlock locks it, double-click a layer's name to rename it; ⇧-click adds or removes a part, drag a box on empty stage to select every part it touches (they move together); double-click a symbol to step into it (double-click empty stage steps out). drag a keyframe in the timeline to move it, ⌥-drag to drop a copy (onto any layer); Copy / Cut / Paste frames (⌥⌘C / ⌥⌘X / ⌥⌘V, ⌘⇧V back in place) work on the selected frames; click inside a tween to change its Ease (drag the number, or double-click to type). ⇧-click extends the frame selection. , and . step frames.</div>}
         </div>
         );
   const libMenuEl = (

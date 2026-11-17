@@ -6462,6 +6462,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                     colourPick={stageColourTool || frPicking || boxPicking ? handleStageColorPress : null}
                     onColourFrame={(frame) => { nativeColourRef.current = frame ? { objectId: target.objectId, frame } : null; }}
                     onScope={setNativeScope}
+                    pointTool={activeTool === "direct"}
+                    onPointTool={(on) => setActiveTool(on ? "direct" : "select")}
                   />
                 )}
               </div>

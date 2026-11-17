@@ -108,14 +108,36 @@ try:
     said = js("document.querySelector('[data-testid=note]')?.textContent || ''")
     check("older edits were converted", said.startswith("Older edits on this character were converted"), said)
     # In place the converted edits are kept with the first change: hide a layer and show it again (the picture is the same).
-    click("[data-testid=eye-1]"); time.sleep(0.5); click("[data-testid=eye-1]"); time.sleep(1.5)
+    # Each click is checked on the editor before the next (on a busy machine a click measured before a redraw can land elsewhere).
+    SHOWN = "document.querySelector('[data-testid=eye-1]')?.getAttribute('aria-pressed')"
+    def eye_to(state):
+        for attempt in range(3):
+            click("[data-testid=eye-1]")
+            for _ in range(20):
+                if js(SHOWN) == state: return True
+                time.sleep(0.25)
+        return False
+    check("layer 1 hidden", eye_to("false"))
+    check("...and shown again", eye_to("true")); time.sleep(1.5)
     click("[data-testid=native-step-out]"); time.sleep(2)
     sc1 = scene()
-    for _ in range(10):   # the scene is saved a moment after Done
+    for _ in range(10):   # the scene is saved a moment after each change
         if sc1["editor_data"]["objects"][0].get("nativePose"): break
         time.sleep(1); sc1 = scene()
     saved_now = bool(sc1["editor_data"]["objects"][0].get("nativePose"))
-    if saved_now: check("native edits saved", True)
+    if saved_now:
+        check("native edits saved", True)
+        # Each eye click is saved: wait for the last save (layer 1 shown again), not the first (layer 1 hidden). Drawing the first one
+        # leaves an arm layer out (the "sleeve cut short" failures of 17 Nov).
+        def layer1_off(sc):
+            edits = next(iter(sc["editor_data"]["objects"][0]["nativePose"].values()))
+            pose = edits["symbols"].get(edits.get("pose") or "")
+            return bool(pose and len(pose["layers"]) > 1 and pose["layers"][1].get("off"))
+        waited = 0
+        while layer1_off(sc1) and waited < 30:
+            time.sleep(1); waited += 1; sc1 = scene()
+        if waited: print(f"(the last save came {waited} s after the first)")
+        check("the last change is saved (layer 1 shown again)", not layer1_off(sc1))
     if not sc1["editor_data"]["objects"][0].get("nativePose"):
         # Nothing to save: every old edit converted to the file's own values (fixture 2 is one skew of 1.62 degrees that the file already has).
         # That is right only if the old edit changes nothing the player draws either, so the player with and without it is compared.
