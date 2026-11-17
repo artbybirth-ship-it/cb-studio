@@ -65,6 +65,8 @@ try:
         click("[data-testid=open-native]")
         ok = wait("[data-testid=native-editor]", 90); time.sleep(2); return ok
     cmd("Runtime.enable"); cmd("Page.enable")
+    # These checks are about the older pose timeline (kept for characters without a .fla): Sardar is opened in it, not in the native editor.
+    cmd("Page.addScriptToEvaluateOnNewDocument", source="window.__CBS_OLD_POSE_TIMELINE__=true")
 
     src = [p for p in json.load(urllib.request.urlopen("http://localhost:3000/api/projects")) if p["id"] == SOURCE][0]["scenes"][0]["editor_data"]
     sc = scene(); ed = json.loads(json.dumps(sc["editor_data"]))

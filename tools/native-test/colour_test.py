@@ -62,8 +62,6 @@ try:
     def open_pose():
         cmd("Page.navigate", url=f"http://localhost:3000/editor/{PROJECT}"); time.sleep(9)
         js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
-        if not wait("[data-testid=open-native]", 20): return False
-        click("[data-testid=open-native]")
         ok = wait("[data-testid=native-editor]", 90); time.sleep(2); return ok
     cmd("Runtime.enable"); cmd("Page.enable")
 
@@ -124,11 +122,11 @@ try:
     hp = hist("[data-testid=stage]")
     check("the pose editor shows the colour rule", green(hp) > 200, f"green px {green(hp)}")
     shot("3-editor")
-    click("[data-testid=native-cancel]"); time.sleep(1)
+    click("[data-testid=native-step-out]"); time.sleep(1)
     # and without the rule the editor is back to the file's colours
     patch(scene(), ed)
     check("without the rule the pose editor has the file's colours", open_pose() and green(hist("[data-testid=stage]")) < 50)
-    click("[data-testid=native-cancel]")
+    click("[data-testid=native-step-out]")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

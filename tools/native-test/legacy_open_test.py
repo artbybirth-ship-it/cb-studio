@@ -65,19 +65,20 @@ try:
         # step into the pose: a double-click on the character (sent as the DOM event; headless Chrome's
         # synthetic double click does not reach the character's overlay)
         js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
-        return wait("[data-testid=open-native]", 20)
+        return wait("[data-testid=native-editor] [data-testid=stage]", 90)
 
     check("Double-click steps into the pose and shows the native button", open_native())
-    click("[data-testid=open-native]")
     check("native dialog opens and loads the .fla", wait("[data-testid=native-editor]", 90))
     time.sleep(2)
     shot("legacy-open")
-    said = js("document.querySelector('[data-testid=native-converted]')?.textContent || ''")
+    said = js("document.querySelector('[data-testid=note]')?.textContent || ''")
     check("the dialog says the older edits were converted", said.startswith("Older edits on this character were converted") and "Sardar_01" in said, said)
     keys = js("[...document.querySelectorAll('[data-key^=\"1:\"]')].map(e=>e.dataset.key.split(':')[1]*1).sort((a,b)=>a-b)")
     check("layer 1 has the moved keyframes (15 moved to 20)", keys == [0, 9, 20, 27, 69, 79, 85], str(keys))
-    check("Undo is disabled (converted edits are the starting point)", js("document.querySelector('[data-testid=undo]').disabled"))
-    click("[data-testid=native-cancel]")
+    # In place, Undo is the scene's: the converted edits are the starting point, so opening the pose saves nothing yet.
+    time.sleep(2)
+    check("opening saves nothing yet (the converted edits are the starting point)", not scene_object().get("nativePose"))
+    click("[data-testid=native-step-out]")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

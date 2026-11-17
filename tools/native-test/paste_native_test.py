@@ -60,6 +60,7 @@ try:
         return p["scenes"][0]["editor_data"]["objects"][0]
 
     def to_scene():
+        if rect("[data-testid=native-step-out]"): click("[data-testid=native-step-out]"); time.sleep(1.5)
         if rect(".cb-symbol-crumbs button"): click(".cb-symbol-crumbs button"); time.sleep(1.5)
 
     def enter(name):
@@ -68,13 +69,12 @@ try:
         for which in (first, 1 - first):
             to_scene()
             js("""(()=>{const els=[...document.querySelectorAll('[title*="step inside it"]')].sort((a,b)=>a.getBoundingClientRect().left-b.getBoundingClientRect().left);const e=els[%d];if(!e)return;const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""" % which)
-            if not wait("[data-testid=open-native]", 20): shot(f"enter-{name}-{which}-no-button"); continue
-            click("[data-testid=open-native]")
+            if not wait("[data-testid=native-editor] [data-testid=stage]", 90): shot(f"enter-{name}-{which}-no-button"); continue
             if not wait("[data-testid=native-editor]", 90): shot(f"enter-{name}-{which}-no-editor"); return False
             time.sleep(2)
-            title = js("document.querySelector('[data-testid=native-dialog] b').textContent") or ""
-            if f"· {name} ·" in title: return True
-            click("[data-testid=native-cancel]"); time.sleep(1)
+            title = js("document.querySelector('[data-testid=native-crumbs]').textContent") or ""
+            if f"›{name} ›" in title.replace(" ›", " ›") or f"{name} ›" in title: return True
+            click("[data-testid=native-step-out]"); time.sleep(1)
         return False
     def layer_names():
         return js("[...document.querySelectorAll('[data-layer]')].map(e=>e.previousElementSibling.querySelector('span').textContent)")
@@ -103,9 +103,9 @@ try:
     check("a part near the top of Rajkumar is picked", bool(picked), str(picked))
     click("[data-testid=copy-part]")
     check("copy reports what was copied", (note() or "").startswith("Copied"), note())
-    click("[data-testid=native-cancel]"); time.sleep(1)
+    click("[data-testid=native-step-out]"); time.sleep(1)
     # back out to the scene
-    click(".cb-symbol-crumbs button"); time.sleep(1.5)
+    to_scene()
 
     # ---- paste into Sardar
     check("Sardar's pose opens in the native editor", enter("Sardar"))
@@ -151,7 +151,7 @@ try:
     shot("4-after-commands")
 
     # ---- save, reload, reopen
-    click("[data-testid=native-done]"); time.sleep(2)
+    click("[data-testid=native-step-out]"); time.sleep(2)
     saved = None
     for _ in range(30):
         projects = json.load(urllib.request.urlopen("http://localhost:3000/api/projects"))
@@ -169,7 +169,7 @@ try:
     names = layer_names()
     check("the pasted layer is still there", bool(names) and names[0].startswith("Pasted"), str(names[:2]))
     shot("5-reopened")
-    click("[data-testid=native-cancel]")
+    click("[data-testid=native-step-out]")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

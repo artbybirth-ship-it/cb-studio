@@ -62,8 +62,6 @@ try:
     def open_pose():
         cmd("Page.navigate", url=f"http://localhost:3000/editor/{PROJECT}"); time.sleep(9)
         js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
-        if not wait("[data-testid=open-native]", 20): return False
-        click("[data-testid=open-native]")
         ok = wait("[data-testid=native-editor]", 90); time.sleep(2); return ok
     cmd("Runtime.enable"); cmd("Page.enable")
 
@@ -119,7 +117,7 @@ try:
     final_names = layer_names(); final_stage = stage()
     # hide one more so the saved file carries both kinds of change
     eye = js("[...document.querySelectorAll('[data-testid^=eye-]')].length")
-    click("[data-testid=native-done]"); time.sleep(2)
+    click("[data-testid=native-step-out]"); time.sleep(2)
 
     saved = scene()["editor_data"]["objects"][0].get("nativePose") or {}
     tl = next(iter(saved.values()), {}).get("symbols", {}) if saved else {}
@@ -131,7 +129,7 @@ try:
     check("after a reload the pose reopens", open_pose())
     check("the deleted layers are still gone", layer_names() == final_names, f"{layer_count()} layers")
     check("the stage is the same as before the reload", stage() == final_stage)
-    click("[data-testid=native-cancel]")
+    click("[data-testid=native-step-out]")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

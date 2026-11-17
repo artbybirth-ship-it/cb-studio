@@ -54,6 +54,8 @@ try:
     def click(selector):
         r = rect(selector); click_at(r[0] + r[2] / 2, r[1] + r[3] / 2)
     cmd("Runtime.enable"); cmd("Page.enable")
+    # "player" pictures must be the Animate player's own: characters with no native edits are drawn natively by default (Phase 6 A).
+    cmd("Page.addScriptToEvaluateOnNewDocument", source="if(location.search.indexOf('player-only')>=0)window.__CBS_PLAYER_ONLY__=true")
 
     def scene():
         ps = json.load(urllib.request.urlopen("http://localhost:3000/api/projects"))
@@ -61,14 +63,14 @@ try:
     def patch(sc, ed):
         req = urllib.request.Request(f"http://localhost:3000/api/scenes/{sc['id']}", data=json.dumps({"editor_data": ed}).encode(), method="PATCH", headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req).read()
-    def render_page(sc):
-        cmd("Page.navigate", url=f"http://localhost:3000/render/scene/{sc['id']}"); time.sleep(3)
+    def render_page(sc, player=False):
+        cmd("Page.navigate", url=f"http://localhost:3000/render/scene/{sc['id']}" + ("?player-only=1" if player else "")); time.sleep(3)
         for _ in range(180):
             if js("window.__CBS_RENDER_READY__ === true"): return True
             time.sleep(0.5)
         return False
-    def shots(label, sc):
-        ok = render_page(sc)
+    def shots(label, sc, player=False):
+        ok = render_page(sc, player)
         check(f"{label}: render page ready", ok, str(js("window.__CBS_RENDER_ERROR__")))
         out = []
         for t in TIMES:
@@ -101,12 +103,13 @@ try:
     # convert by opening the pose in the editor and pressing Done
     cmd("Page.navigate", url=f"http://localhost:3000/editor/{PROJECT}"); time.sleep(10)
     js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
-    check("pose opens", wait("[data-testid=open-native]", 20))
-    click("[data-testid=open-native]")
+    check("pose opens", wait("[data-testid=native-editor] [data-testid=stage]", 90))
     check("native dialog opens", wait("[data-testid=native-editor]", 90)); time.sleep(2)
-    said = js("document.querySelector('[data-testid=native-converted]')?.textContent || ''")
+    said = js("document.querySelector('[data-testid=note]')?.textContent || ''")
     check("older edits were converted", said.startswith("Older edits on this character were converted"), said)
-    click("[data-testid=native-done]"); time.sleep(2)
+    # In place the converted edits are kept with the first change: hide a layer and show it again (the picture is the same).
+    click("[data-testid=eye-1]"); time.sleep(0.5); click("[data-testid=eye-1]"); time.sleep(1.5)
+    click("[data-testid=native-step-out]"); time.sleep(2)
     sc1 = scene()
     for _ in range(10):   # the scene is saved a moment after Done
         if sc1["editor_data"]["objects"][0].get("nativePose"): break
@@ -118,7 +121,7 @@ try:
         # That is right only if the old edit changes nothing the player draws either, so the player with and without it is compared.
         ed = json.loads(json.dumps(sc1["editor_data"])); [ed["objects"][0].pop(k, None) for k in OLD]
         patch(sc1, ed)
-        C0 = shots("C-player-unedited", scene())
+        C0 = shots("C-player-unedited", scene(), player=True)
         diffs = [pct(C0[i], A[i]) for i in range(len(TIMES))]
         check("no native edits because the old edits change nothing the player draws", said.startswith("Older edits on this character were converted") and max(diffs) < 0.2, f"largest player difference {max(diffs):.2f}%")
         print("FAILED:" if failed else "ALL PASSED", failed); sys.exit(1 if failed else 0)
@@ -130,7 +133,7 @@ try:
     for k in OLD: o.pop(k, None)
     o.pop("nativePose", None)
     patch(sc1, ed)
-    C = shots("C-player-unedited", scene())
+    C = shots("C-player-unedited", scene(), player=True)
     o["nativePose"] = {k: {**v, "symbols": {}} for k, v in saved_native.items()}
     patch(scene(), ed)
     D = shots("D-native-unedited", scene())

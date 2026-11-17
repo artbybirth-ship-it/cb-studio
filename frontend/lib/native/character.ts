@@ -118,7 +118,6 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
   let onlyNow: string[] | undefined | null = object.onlyParts;
   /** Where the last draw put the pose: the frame and placement the colour finder looks at. */
   let last: { frame: number; fit: Fit } | null = null;
-  const huesOf = (style: import("../fla/xfl").Fill): string[] => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [hexOf(parseColour(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
   return {
     get ready() { return Boolean(state); },
     setColourRules(rules) { rulesNow = rules; state?.renderer.setColourRules(rules); },
@@ -175,62 +174,75 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
     colourAt(x, y, scope) {
       if (!state || !last) return null;
       const { source, renderer } = state, { frame, fit } = last;
-      const ctx = new OffscreenCanvas(1, 1).getContext("2d")!;
-      // The pose's own placement, shifted so the asked-for point of the box lands on the middle of the one pixel.
-      ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - x * BOX_W + 0.5, fit.ty - y * BOX_H + 0.5);
-      renderer.setPartBase(new DOMMatrix().translate(-x * BOX_W + 0.5, -y * BOX_H + 0.5));
-      const hit = renderer.hitAt(ctx, source.item, frame, 0.5, 0.5, scope);
-      if (!hit) return null;
-      const shown = renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part);
-      return { picked: shown, original: hexOf(parseColour(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }), current: shown };
+      return colourAtPoint(renderer, source.item, frame, fit, x * BOX_W, y * BOX_H, scope);
     },
-    palette(scope) {
-      if (!state) return [];
-      const found = new Map<string, ColourEntry>();
-      state.renderer.eachShape(state.source.item, scope, (shape, trail, _owner, part) => {
-        const note = (style: import("../fla/xfl").Fill, stroke: boolean) => {
-          for (const hex of huesOf(style)) {
-            const entry = found.get(hex) ?? found.set(hex, { color: hex, current: state!.renderer.shownColour(hex, stroke, trail, part), fills: 0, strokes: 0 }).get(hex)!;
-            if (stroke) entry.strokes += 1; else entry.fills += 1;
-            const now = state!.renderer.shownColour(hex, stroke, trail, part);
-            if (now !== hex) entry.current = now;
-          }
-        };
-        shape.fills.forEach((f) => note(f.style, false));
-        shape.strokes.forEach((s) => note(s.style.fill, true));
-      });
-      return [...found.values()].sort((a, b) => b.fills + b.strokes - (a.fills + a.strokes)).slice(0, 80);
-    },
-    relatives(hexIn, scope) {
-      const none = { strokes: [], shadows: [], lights: [] };
-      const base = parseColour(hexIn);
-      if (!state || !base) return none;
-      const baseHex = hexOf(base), baseHsl = toHsl(base);
-      const strokes = new Set<string>(), shadows = new Set<string>(), lights = new Set<string>(), ownersWithBase = new Set<string>(), linesByOwner = new Map<string, Set<string>>();
-      // An outline of this colour: darker, and its hue (or grey / black), not a neighbour's outline drawn in the same shape.
-      const outlineOf = (h: string) => {
-        if (h === baseHex) return false;
-        const c = toHsl(parseColour(h)!);
-        if (c.l >= baseHsl.l) return false;
-        if (c.s < 0.08 || baseHsl.s < 0.12) return true;
-        const dh = Math.abs(c.h - baseHsl.h);
-        return Math.min(dh, 360 - dh) <= 30;
-      };
-      state.renderer.eachShape(state.source.item, scope, (shape, _trail, owner) => {
-        const fills = shape.fills.flatMap((f) => huesOf(f.style)), lines = shape.strokes.flatMap((s) => huesOf(s.style.fill));
-        if (fills.includes(baseHex)) { ownersWithBase.add(owner); lines.forEach((h) => { if (outlineOf(h)) strokes.add(h); }); }
-        const own = linesByOwner.get(owner) ?? linesByOwner.set(owner, new Set()).get(owner)!;
-        lines.forEach((h) => own.add(h));
-        for (const h of fills) {
-          if (h === baseHex || shadows.has(h) || lights.has(h)) continue;
-          const hsl = toHsl(parseColour(h)!);
-          if (hsl.l < baseHsl.l - 0.01 && sameFamily(hsl, baseHsl)) shadows.add(h);
-          else if (hsl.l > baseHsl.l + 0.01 && sameFamily(hsl, baseHsl)) lights.add(h);
-        }
-      });
-      // Outlines drawn as shapes of their own: those of the symbols that hold the colour.
-      if (!strokes.size) for (const owner of ownersWithBase) for (const h of linesByOwner.get(owner) ?? []) if (outlineOf(h)) strokes.add(h);
-      return { strokes: [...strokes], shadows: [...shadows], lights: [...lights] };
-    },
+    palette(scope) { return state ? paletteOf(state.renderer, state.source.item, scope) : []; },
+    relatives(hexIn, scope) { return state ? relativesOf(state.renderer, state.source.item, hexIn, scope) : { strokes: [], shadows: [], lights: [] }; },
   };
+}
+
+// ---------- the colour tools' questions, for any drawing (the scene's character, or the level open in the native pose editor)
+const huesOf = (style: import("../fla/xfl").Fill): string[] => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [hexOf(parseColour(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
+
+/** The colour drawn at (px, py) of a drawing of `item` at `frame` placed by `fit` (pixels of that drawing): as shown, and as the file has it. */
+export function colourAtPoint(renderer: NativeRenderer, item: string, frame: number, fit: Fit, px: number, py: number, scope: string): { picked: string; original: string; current: string } | null {
+  const ctx = new OffscreenCanvas(1, 1).getContext("2d")!;
+  // The placement, shifted so the asked-for point lands on the middle of the one pixel.
+  ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - px + 0.5, fit.ty - py + 0.5);
+  renderer.setPartBase(new DOMMatrix().translate(-px + 0.5, -py + 0.5));
+  const hit = renderer.hitAt(ctx, item, frame, 0.5, 0.5, scope);
+  if (!hit) return null;
+  const shown = renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part);
+  return { picked: shown, original: hexOf(parseColour(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }), current: shown };
+}
+
+/** The colours `item` is drawn with (most used first), each with what it shows as now. */
+export function paletteOf(renderer: NativeRenderer, item: string, scope: string): ColourEntry[] {
+  const found = new Map<string, ColourEntry>();
+  renderer.eachShape(item, scope, (shape, trail, _owner, part) => {
+    const note = (style: import("../fla/xfl").Fill, stroke: boolean) => {
+      for (const hex of huesOf(style)) {
+        const entry = found.get(hex) ?? found.set(hex, { color: hex, current: renderer.shownColour(hex, stroke, trail, part), fills: 0, strokes: 0 }).get(hex)!;
+        if (stroke) entry.strokes += 1; else entry.fills += 1;
+        const now = renderer.shownColour(hex, stroke, trail, part);
+        if (now !== hex) entry.current = now;
+      }
+    };
+    shape.fills.forEach((f) => note(f.style, false));
+    shape.strokes.forEach((st) => note(st.style.fill, true));
+  });
+  return [...found.values()].sort((a, b) => b.fills + b.strokes - (a.fills + a.strokes)).slice(0, 80);
+}
+
+/** The outlines, shadows and light tones that go with a colour (Light/Dark's Include Stroke / Include Shadow). */
+export function relativesOf(renderer: NativeRenderer, item: string, hexIn: string, scope: string): { strokes: string[]; shadows: string[]; lights: string[] } {
+  const none = { strokes: [], shadows: [], lights: [] };
+  const base = parseColour(hexIn);
+  if (!base) return none;
+  const baseHex = hexOf(base), baseHsl = toHsl(base);
+  const strokes = new Set<string>(), shadows = new Set<string>(), lights = new Set<string>(), ownersWithBase = new Set<string>(), linesByOwner = new Map<string, Set<string>>();
+  // An outline of this colour: darker, and its hue (or grey / black), not a neighbour's outline drawn in the same shape.
+  const outlineOf = (h: string) => {
+    if (h === baseHex) return false;
+    const c = toHsl(parseColour(h)!);
+    if (c.l >= baseHsl.l) return false;
+    if (c.s < 0.08 || baseHsl.s < 0.12) return true;
+    const dh = Math.abs(c.h - baseHsl.h);
+    return Math.min(dh, 360 - dh) <= 30;
+  };
+  renderer.eachShape(item, scope, (shape, _trail, owner) => {
+    const fills = shape.fills.flatMap((f) => huesOf(f.style)), lines = shape.strokes.flatMap((st) => huesOf(st.style.fill));
+    if (fills.includes(baseHex)) { ownersWithBase.add(owner); lines.forEach((h) => { if (outlineOf(h)) strokes.add(h); }); }
+    const own = linesByOwner.get(owner) ?? linesByOwner.set(owner, new Set()).get(owner)!;
+    lines.forEach((h) => own.add(h));
+    for (const h of fills) {
+      if (h === baseHex || shadows.has(h) || lights.has(h)) continue;
+      const hsl = toHsl(parseColour(h)!);
+      if (hsl.l < baseHsl.l - 0.01 && sameFamily(hsl, baseHsl)) shadows.add(h);
+      else if (hsl.l > baseHsl.l + 0.01 && sameFamily(hsl, baseHsl)) lights.add(h);
+    }
+  });
+  // Outlines drawn as shapes of their own: those of the symbols that hold the colour.
+  if (!strokes.size) for (const owner of ownersWithBase) for (const h of linesByOwner.get(owner) ?? []) if (outlineOf(h)) strokes.add(h);
+  return { strokes: [...strokes], shadows: [...shadows], lights: [...lights] };
 }

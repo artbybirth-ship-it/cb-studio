@@ -23,4 +23,13 @@ assert.equal(at(3, 0, 0), "instance_6", "a repeated layer name is told apart by 
 assert.equal(at(3, 7, 0), "instance_6", "a later frame uses the keyframe at or before it (an F6 copy is the same instance)");
 assert.equal(at(1, 0, 0), "", "folders have no instances");
 assert.equal(n.autoNameAt(undefined, "x", 0, 0), "");
+// a renamed layer keeps its instance names (found by the file name it keeps); a layer the file does not have takes none and does not shift the others
+{
+  const renamed = { ...tl, layers: tl.layers.map((l, i) => (i === 2 ? { ...l, name: "arms", fileName: "b" } : l)) };
+  assert.equal(n.autoNameAt(names, n.layerKey(renamed.layers, 2), 0, 1), at(2, 0, 1), "renamed layer: same names");
+  const extra = { ...tl, layers: [L("a", [{ i: 0, d: 10, elements: [ins("P")] }]), ...tl.layers].map((l, i) => (i === 0 ? { ...l, fileName: "" } : l)) };
+  assert.equal(n.autoNameAt(names, n.layerKey(extra.layers, 0), 0, 0), "", "an added layer named like a file layer has no player names");
+  assert.equal(n.autoNameAt(names, n.layerKey(extra.layers, 1), 0, 0), at(0, 0, 0), "and the file's own \"a\" layers keep theirs");
+  assert.equal(n.autoNameAt(names, n.layerKey(extra.layers, 4), 0, 0), at(3, 0, 0), "the second \"a\" too");
+}
 console.log("names ok");

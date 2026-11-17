@@ -41,6 +41,16 @@ export function resolveElements(layer: Layer, frame: number): FlaElement[] {
   return key.elements;
 }
 
+/**
+ * The elements of a keyframe split `by` frames after its start: a nested symbol carries on from the frame it had reached instead of starting
+ * again (Animate sets a graphic's first frame so; a movie clip carries on the same way through `first`). "Single frame" graphics stay.
+ */
+const carriedOn = (elements: FlaElement[], by: number): FlaElement[] => (by <= 0 ? elements : elements.map((el) => {
+  if (el.k !== "instance" || (el.symbolType === "graphic" && el.loop === "single frame")) return el;
+  if (el.symbolType !== "graphic") return { ...el, carried: (el.carried || 0) + by };
+  return { ...el, first: (el.first || 0) + (/reverse/.test(el.loop) ? -by : by) };
+}));
+
 /** F6: a keyframe at `frame`. On a tween the new key holds the tweened state; past the layer's end it repeats the last key. */
 export function insertKeyframe(layer: Layer, frame: number): Layer {
   const state = layerStateAt(layer, frame);
@@ -49,11 +59,11 @@ export function insertKeyframe(layer: Layer, frame: number): Layer {
     const last = layer.frames[layer.frames.length - 1];
     if (!last) return withFrames(layer, [{ i: frame, d: 1, elements: [] }]);
     // Extend the last key to the frame before, then start the new key (Animate fills the gap).
-    return withFrames(layer, [...layer.frames.slice(0, -1), { ...last, d: Math.max(last.d, frame - last.i), tween: undefined }, { i: frame, d: 1, elements: last.elements }]);
+    return withFrames(layer, [...layer.frames.slice(0, -1), { ...last, d: Math.max(last.d, frame - last.i), tween: undefined }, { i: frame, d: 1, elements: carriedOn(last.elements, frame - last.i) }]);
   }
   const { key, index } = state;
   const head: Keyframe = { ...key, d: frame - key.i };
-  const tail: Keyframe = { i: frame, d: end(key) - frame, elements: resolveElements(layer, frame), tween: key.tween, ease: key.ease, rotate: key.rotate };
+  const tail: Keyframe = { i: frame, d: end(key) - frame, elements: carriedOn(resolveElements(layer, frame), frame - key.i), tween: key.tween, ease: key.ease, rotate: key.rotate };
   // A shape tween's matched curves belong to the old pair of keys; the editor re-matches them (shapeTween.ts).
   if (key.tween === "shape") { delete head.morph; delete tail.morph; }
   const frames = layer.frames.slice();
@@ -108,22 +118,36 @@ export function clearKeyframe(layer: Layer, frame: number): Layer {
   return withFrames(layer, frames);
 }
 
-/** Moves the keyframe at `from` so it starts at `to`; its span keeps its length and neighbours give way by trimming. */
+/**
+ * Moves the keyframe at `from` to `to`, as dragging one keyframe does in Animate: the frames it leaves join the span before it (or are left
+ * empty when nothing comes before), and it shows from `to` until the next keyframe. Landing inside a span cuts that span there; landing on a
+ * keyframe replaces it; past the layer's end it keeps its length. The keyframes after it stay where they are.
+ */
 export function moveKeyframe(layer: Layer, from: number, to: number): Layer {
   if (from === to) return layer;
   const moving = layer.frames.find((k) => k.i === from);
   if (!moving) return layer;
-  const rest = layer.frames.filter((k) => k !== moving);
-  const placed: Keyframe = { ...moving, i: to };
-  const out: Keyframe[] = [];
-  for (const k of rest) {
-    // Dragged later, the span just before it stretches to fill the place it left (no empty frames).
-    if (end(k) === from && to > from) { out.push({ ...k, d: to - k.i }); continue; }
-    if (end(k) <= to || k.i >= end(placed)) { out.push(k); continue; }
-    if (k.i < to) out.push({ ...k, d: to - k.i });
-    else if (end(k) > end(placed)) out.push({ ...k, i: end(placed), d: end(k) - end(placed) });
+  // Taken out: the span before it carries on over its frames.
+  const left: Keyframe[] = [];
+  for (const k of layer.frames) {
+    if (k === moving) continue;
+    if (end(k) === from) left.push({ ...k, d: k.d + moving.d, morph: undefined });
+    else left.push(k);
   }
-  return withFrames(layer, [...out, placed]);
+  // Put in at `to`.
+  const out: Keyframe[] = [];
+  let d = 0;
+  const after = left.find((k) => k.i > to);
+  for (const k of left) {
+    if (k.i === to) { d = k.d; continue; }                        // lands on a keyframe: replaces it
+    if (k.i < to && end(k) > to) { out.push({ ...k, d: to - k.i, morph: undefined }); d = end(k) - to; continue; } // lands inside a span: cuts it
+    out.push(k);
+  }
+  if (!d) d = after ? after.i - to : moving.d;                     // in empty frames: up to the next keyframe; past the end: its own length
+  out.push({ ...moving, i: to, d, morph: undefined });
+  // A tween that no longer meets a following key stops tweening.
+  const frames = sorted(out);
+  return withFrames(layer, frames.map((k, i) => (k.tween && !(frames[i + 1] && frames[i + 1].i === end(k)) ? { ...k, tween: undefined, ease: undefined, rotate: undefined, morph: undefined } : k)));
 }
 
 /** Replaces one element of the keyframe showing at `frame`. On a held span that key itself changes (as in Animate); on a tween span with no key at `frame`, a key is made first. */
@@ -155,6 +179,48 @@ export function setTween(layer: Layer, frame: number, tween: Keyframe["tween"] |
 }
 
 export const setEase = (layer: Layer, frame: number, ease: Ease): Layer => withFrames(layer, layer.frames.map((k) => (k.i === frame ? { ...k, ease } : k)));
+
+// ---------- copy / cut / paste frames
+/** Frames copied from a layer: keyframes counted from the first copied frame, and how many frames were copied. */
+export type FrameClip = { frames: Keyframe[]; length: number };
+
+/** A keyframe at `frame` when the layer shows something there and none starts there (what is shown is kept: a tween's state is resolved). */
+const keyAt = (layer: Layer, frame: number): Layer => (layerStateAt(layer, frame) && !layer.frames.some((k) => k.i === frame) ? insertKeyframe(layer, frame) : layer);
+
+/**
+ * Copy Frames: frames `from`…`to` of the layer as they show (a span cut in the middle starts with a keyframe holding what shows there).
+ * A tween still running at the last copied frame ends there (a keyframe holding what showed).
+ */
+export function copyFrames(layer: Layer, from: number, to: number): FrameClip {
+  const length = to - from + 1;
+  // Cut at both ends; a tween still running at the last copied frame gets a keyframe there, so the copy ends as it looked (as Animate splits it).
+  const inTween = (l: Layer, f: number) => { const st = layerStateAt(l, f); return !!st && !!st.key.tween && st.key.i < f && !!st.next; };
+  const ends = inTween(layer, to) ? keyAt(keyAt(layer, from), to) : keyAt(layer, from);
+  const cut = keyAt(ends, to + 1);
+  const frames = cut.frames.filter((k) => k.i >= from && k.i <= to).map((k) => ({ ...k, i: k.i - from, d: Math.min(k.d, to + 1 - k.i) }));
+  return { length, frames: frames.map((k, i) => (k.tween && !(frames[i + 1] && frames[i + 1].i === k.i + k.d) ? { ...k, tween: undefined, ease: undefined, rotate: undefined, morph: undefined } : k)) };
+}
+
+/**
+ * Paste Frames (Animate: pasted frames replace what they land on): the clip's frames from `at` on; what showed after them stays. The span
+ * before `at` ends there (a tween from it now runs into the pasted keyframe).
+ */
+export function pasteFrames(layer: Layer, at: number, clip: FrameClip): Layer {
+  const end = at + clip.length;
+  const kept = keyAt(layer, end);
+  const before = kept.frames.filter((k) => k.i < at).map((k) => (k.i + k.d > at ? { ...k, d: at - k.i, morph: undefined } : k));
+  const after = kept.frames.filter((k) => k.i >= end);
+  const pasted = clip.frames.map((k) => ({ ...k, i: k.i + at }));
+  // The key just before the paste no longer meets its old next key: it is re-matched (shape tween) against what now follows it.
+  const frames = [...before, ...pasted, ...after].map((k) => ({ ...k }));
+  return withFrames(layer, frames.map((k, i) => (k.tween && !(frames[i + 1] && frames[i + 1].i === k.i + k.d) ? { ...k, tween: undefined, ease: undefined, rotate: undefined, morph: undefined } : k)));
+}
+
+/** Cut Frames: copied, then the frames are left empty (a blank keyframe); what showed after them stays. */
+export function cutFrames(layer: Layer, from: number, to: number): { layer: Layer; clip: FrameClip } {
+  const clip = copyFrames(layer, from, to);
+  return { clip, layer: pasteFrames(layer, from, { length: clip.length, frames: [{ i: 0, d: clip.length, elements: [] }] }) };
+}
 
 // ---------- swap symbol
 /**
@@ -216,6 +282,33 @@ export function insertLayer(layers: Layer[], at: number, layer: Layer): Layer[] 
   const placed: Layer = { ...layer, parent: shift(folder) };
   return [...layers.slice(0, where).map((l) => (l.parent != null && l.parent >= where ? { ...l, parent: l.parent + 1 } : l)), placed,
     ...layers.slice(where).map((l) => (l.parent != null && l.parent >= where ? { ...l, parent: l.parent + 1 } : l))];
+}
+
+/** Rename: the layer keeps its file name (fileName), so what the player calls its instances does not change. */
+export function renameLayer(layers: Layer[], index: number, name: string): Layer[] {
+  const layer = layers[index], next = name.trim();
+  if (!layer || !next || next === layer.name) return layers;
+  return layers.map((l, i) => (i === index ? { ...l, name: next, fileName: l.fileName ?? l.name } : l));
+}
+
+/** The padlock: a locked layer's parts cannot be picked or changed on the stage. */
+export const setLayerLocked = (layer: Layer, locked: boolean): Layer => (!!layer.locked === locked ? layer : { ...layer, locked });
+
+/**
+ * Duplicate Layers: a copy of each layer at `indices`, just above it, named "<name> copy", in the same folder (a layer under a mask stays
+ * under it). Folders and masks are not duplicated (their layers would need copying too). Answers the layers and where the copies are.
+ */
+export function duplicateLayers(layers: Layer[], indices: number[]): { layers: Layer[]; copies: number[] } {
+  const chosen = [...new Set(indices)].filter((i) => layers[i] && layers[i].type !== "folder" && layers[i].type !== "mask").sort((a, b) => a - b);
+  let out = layers;
+  // From the bottom up, so the indexes still to do are not moved by the copies already made.
+  for (const i of [...chosen].reverse()) {
+    const original = out[i];
+    const copy: Layer = { ...JSON.parse(JSON.stringify(original)) as Layer, name: `${original.name} copy`, fileName: "", locked: false };
+    const shift = (p: number | null) => (p != null && p >= i ? p + 1 : p);
+    out = [...out.slice(0, i).map((l) => ({ ...l, parent: shift(l.parent) })), { ...copy, parent: shift(original.parent) }, ...out.slice(i).map((l) => ({ ...l, parent: shift(l.parent) }))];
+  }
+  return { layers: out, copies: chosen.map((i, k) => i + k) };
 }
 
 // ---------- history

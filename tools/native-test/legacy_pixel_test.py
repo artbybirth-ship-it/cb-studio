@@ -65,7 +65,7 @@ try:
         # step into the pose: a double-click on the character (sent as the DOM event; headless Chrome's
         # synthetic double click does not reach the character's overlay)
         js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
-        return wait("[data-testid=open-native]", 20)
+        return wait("[data-testid=native-editor] [data-testid=stage]", 90)
 
     from PIL import Image, ImageChops
     import io
@@ -101,11 +101,12 @@ try:
     before = snap(); before.save(f"{OUT}/before.png")
     # open the pose, let the converter run, press Done: this is what writes the native edits
     open_native()
-    click("[data-testid=open-native]")
     check("native dialog opens", wait("[data-testid=native-editor]", 90)); time.sleep(2)
-    said = js("document.querySelector('[data-testid=native-converted]')?.textContent || ''")
+    said = js("document.querySelector('[data-testid=note]')?.textContent || ''")
     check("older edits were converted", said.startswith("Older edits on this character were converted"), said)
-    click("[data-testid=native-done]"); time.sleep(2)
+    # In place the converted edits are kept with the first change: hide a layer and show it again (the picture is the same).
+    click("[data-testid=eye-1]"); time.sleep(0.5); click("[data-testid=eye-1]"); time.sleep(1.5)
+    click("[data-testid=native-step-out]"); time.sleep(2)
     cmd("Page.navigate", url=f"http://localhost:3000/editor/{PROJECT}"); time.sleep(14)
     after = snap(); after.save(f"{OUT}/after.png")
     x0, y0, x1, y1 = [int(v) for v in box]

@@ -16,6 +16,9 @@ exports.playerFitOf = playerFitOf;
 exports.drawsNatively = drawsNatively;
 exports.partKeysUsed = partKeysUsed;
 exports.createNativeCharacter = createNativeCharacter;
+exports.colourAtPoint = colourAtPoint;
+exports.paletteOf = paletteOf;
+exports.relativesOf = relativesOf;
 const loadDoc_1 = require("lib/native/loadDoc");
 const library_1 = require("lib/native/library");
 const render_1 = require("lib/native/render");
@@ -112,7 +115,6 @@ function createNativeCharacter(object) {
     let onlyNow = object.onlyParts;
     /** Where the last draw put the pose: the frame and placement the colour finder looks at. */
     let last = null;
-    const huesOf = (style) => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [(0, colour_1.hexOf)((0, colour_1.parseColour)(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
     return {
         get ready() { return Boolean(state); },
         setColourRules(rules) { rulesNow = rules; state?.renderer.setColourRules(rules); },
@@ -186,85 +188,93 @@ function createNativeCharacter(object) {
             if (!state || !last)
                 return null;
             const { source, renderer } = state, { frame, fit } = last;
-            const ctx = new OffscreenCanvas(1, 1).getContext("2d");
-            // The pose's own placement, shifted so the asked-for point of the box lands on the middle of the one pixel.
-            ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - x * exports.BOX_W + 0.5, fit.ty - y * exports.BOX_H + 0.5);
-            renderer.setPartBase(new DOMMatrix().translate(-x * exports.BOX_W + 0.5, -y * exports.BOX_H + 0.5));
-            const hit = renderer.hitAt(ctx, source.item, frame, 0.5, 0.5, scope);
-            if (!hit)
-                return null;
-            const shown = renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part);
-            return { picked: shown, original: (0, colour_1.hexOf)((0, colour_1.parseColour)(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }), current: shown };
+            return colourAtPoint(renderer, source.item, frame, fit, x * exports.BOX_W, y * exports.BOX_H, scope);
         },
-        palette(scope) {
-            if (!state)
-                return [];
-            const found = new Map();
-            state.renderer.eachShape(state.source.item, scope, (shape, trail, _owner, part) => {
-                const note = (style, stroke) => {
-                    for (const hex of huesOf(style)) {
-                        const entry = found.get(hex) ?? found.set(hex, { color: hex, current: state.renderer.shownColour(hex, stroke, trail, part), fills: 0, strokes: 0 }).get(hex);
-                        if (stroke)
-                            entry.strokes += 1;
-                        else
-                            entry.fills += 1;
-                        const now = state.renderer.shownColour(hex, stroke, trail, part);
-                        if (now !== hex)
-                            entry.current = now;
-                    }
-                };
-                shape.fills.forEach((f) => note(f.style, false));
-                shape.strokes.forEach((s) => note(s.style.fill, true));
-            });
-            return [...found.values()].sort((a, b) => b.fills + b.strokes - (a.fills + a.strokes)).slice(0, 80);
-        },
-        relatives(hexIn, scope) {
-            const none = { strokes: [], shadows: [], lights: [] };
-            const base = (0, colour_1.parseColour)(hexIn);
-            if (!state || !base)
-                return none;
-            const baseHex = (0, colour_1.hexOf)(base), baseHsl = (0, colour_1.toHsl)(base);
-            const strokes = new Set(), shadows = new Set(), lights = new Set(), ownersWithBase = new Set(), linesByOwner = new Map();
-            // An outline of this colour: darker, and its hue (or grey / black), not a neighbour's outline drawn in the same shape.
-            const outlineOf = (h) => {
-                if (h === baseHex)
-                    return false;
-                const c = (0, colour_1.toHsl)((0, colour_1.parseColour)(h));
-                if (c.l >= baseHsl.l)
-                    return false;
-                if (c.s < 0.08 || baseHsl.s < 0.12)
-                    return true;
-                const dh = Math.abs(c.h - baseHsl.h);
-                return Math.min(dh, 360 - dh) <= 30;
-            };
-            state.renderer.eachShape(state.source.item, scope, (shape, _trail, owner) => {
-                const fills = shape.fills.flatMap((f) => huesOf(f.style)), lines = shape.strokes.flatMap((s) => huesOf(s.style.fill));
-                if (fills.includes(baseHex)) {
-                    ownersWithBase.add(owner);
-                    lines.forEach((h) => { if (outlineOf(h))
-                        strokes.add(h); });
-                }
-                const own = linesByOwner.get(owner) ?? linesByOwner.set(owner, new Set()).get(owner);
-                lines.forEach((h) => own.add(h));
-                for (const h of fills) {
-                    if (h === baseHex || shadows.has(h) || lights.has(h))
-                        continue;
-                    const hsl = (0, colour_1.toHsl)((0, colour_1.parseColour)(h));
-                    if (hsl.l < baseHsl.l - 0.01 && (0, colour_1.sameFamily)(hsl, baseHsl))
-                        shadows.add(h);
-                    else if (hsl.l > baseHsl.l + 0.01 && (0, colour_1.sameFamily)(hsl, baseHsl))
-                        lights.add(h);
-                }
-            });
-            // Outlines drawn as shapes of their own: those of the symbols that hold the colour.
-            if (!strokes.size)
-                for (const owner of ownersWithBase)
-                    for (const h of linesByOwner.get(owner) ?? [])
-                        if (outlineOf(h))
-                            strokes.add(h);
-            return { strokes: [...strokes], shadows: [...shadows], lights: [...lights] };
-        },
+        palette(scope) { return state ? paletteOf(state.renderer, state.source.item, scope) : []; },
+        relatives(hexIn, scope) { return state ? relativesOf(state.renderer, state.source.item, hexIn, scope) : { strokes: [], shadows: [], lights: [] }; },
     };
+}
+// ---------- the colour tools' questions, for any drawing (the scene's character, or the level open in the native pose editor)
+const huesOf = (style) => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [(0, colour_1.hexOf)((0, colour_1.parseColour)(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
+/** The colour drawn at (px, py) of a drawing of `item` at `frame` placed by `fit` (pixels of that drawing): as shown, and as the file has it. */
+function colourAtPoint(renderer, item, frame, fit, px, py, scope) {
+    const ctx = new OffscreenCanvas(1, 1).getContext("2d");
+    // The placement, shifted so the asked-for point lands on the middle of the one pixel.
+    ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - px + 0.5, fit.ty - py + 0.5);
+    renderer.setPartBase(new DOMMatrix().translate(-px + 0.5, -py + 0.5));
+    const hit = renderer.hitAt(ctx, item, frame, 0.5, 0.5, scope);
+    if (!hit)
+        return null;
+    const shown = renderer.shownColour(hit.color, hit.stroke, hit.trail, hit.part);
+    return { picked: shown, original: (0, colour_1.hexOf)((0, colour_1.parseColour)(hit.color) ?? { r: 0, g: 0, b: 0, a: 1 }), current: shown };
+}
+/** The colours `item` is drawn with (most used first), each with what it shows as now. */
+function paletteOf(renderer, item, scope) {
+    const found = new Map();
+    renderer.eachShape(item, scope, (shape, trail, _owner, part) => {
+        const note = (style, stroke) => {
+            for (const hex of huesOf(style)) {
+                const entry = found.get(hex) ?? found.set(hex, { color: hex, current: renderer.shownColour(hex, stroke, trail, part), fills: 0, strokes: 0 }).get(hex);
+                if (stroke)
+                    entry.strokes += 1;
+                else
+                    entry.fills += 1;
+                const now = renderer.shownColour(hex, stroke, trail, part);
+                if (now !== hex)
+                    entry.current = now;
+            }
+        };
+        shape.fills.forEach((f) => note(f.style, false));
+        shape.strokes.forEach((st) => note(st.style.fill, true));
+    });
+    return [...found.values()].sort((a, b) => b.fills + b.strokes - (a.fills + a.strokes)).slice(0, 80);
+}
+/** The outlines, shadows and light tones that go with a colour (Light/Dark's Include Stroke / Include Shadow). */
+function relativesOf(renderer, item, hexIn, scope) {
+    const none = { strokes: [], shadows: [], lights: [] };
+    const base = (0, colour_1.parseColour)(hexIn);
+    if (!base)
+        return none;
+    const baseHex = (0, colour_1.hexOf)(base), baseHsl = (0, colour_1.toHsl)(base);
+    const strokes = new Set(), shadows = new Set(), lights = new Set(), ownersWithBase = new Set(), linesByOwner = new Map();
+    // An outline of this colour: darker, and its hue (or grey / black), not a neighbour's outline drawn in the same shape.
+    const outlineOf = (h) => {
+        if (h === baseHex)
+            return false;
+        const c = (0, colour_1.toHsl)((0, colour_1.parseColour)(h));
+        if (c.l >= baseHsl.l)
+            return false;
+        if (c.s < 0.08 || baseHsl.s < 0.12)
+            return true;
+        const dh = Math.abs(c.h - baseHsl.h);
+        return Math.min(dh, 360 - dh) <= 30;
+    };
+    renderer.eachShape(item, scope, (shape, _trail, owner) => {
+        const fills = shape.fills.flatMap((f) => huesOf(f.style)), lines = shape.strokes.flatMap((st) => huesOf(st.style.fill));
+        if (fills.includes(baseHex)) {
+            ownersWithBase.add(owner);
+            lines.forEach((h) => { if (outlineOf(h))
+                strokes.add(h); });
+        }
+        const own = linesByOwner.get(owner) ?? linesByOwner.set(owner, new Set()).get(owner);
+        lines.forEach((h) => own.add(h));
+        for (const h of fills) {
+            if (h === baseHex || shadows.has(h) || lights.has(h))
+                continue;
+            const hsl = (0, colour_1.toHsl)((0, colour_1.parseColour)(h));
+            if (hsl.l < baseHsl.l - 0.01 && (0, colour_1.sameFamily)(hsl, baseHsl))
+                shadows.add(h);
+            else if (hsl.l > baseHsl.l + 0.01 && (0, colour_1.sameFamily)(hsl, baseHsl))
+                lights.add(h);
+        }
+    });
+    // Outlines drawn as shapes of their own: those of the symbols that hold the colour.
+    if (!strokes.size)
+        for (const owner of ownersWithBase)
+            for (const h of linesByOwner.get(owner) ?? [])
+                if (outlineOf(h))
+                    strokes.add(h);
+    return { strokes: [...strokes], shadows: [...shadows], lights: [...lights] };
 }
 
 };
@@ -1809,12 +1819,15 @@ exports.autoNames = autoNames;
 exports.autoNameAt = autoNameAt;
 const nameOf = (count) => (count === 0 ? "instance" : `instance_${count}`);
 /** Layers are found by name and, for repeated names, by which one of them it is. */
+/** A layer's name as the file has it: a renamed layer keeps its file name here; a layer the file does not have has "" (it matches nothing). */
+const fileNameOf = (layer) => layer.fileName ?? layer.name;
 const layerKey = (layers, index) => {
+    const name = fileNameOf(layers[index]);
     let nth = 0;
     for (let i = 0; i < index; i += 1)
-        if (layers[i].name === layers[index].name)
+        if (fileNameOf(layers[i]) === name)
             nth += 1;
-    return `${layers[index].name}\u0000${nth}`;
+    return `${name}\u0000${nth}`;
 };
 exports.layerKey = layerKey;
 function autoNames(timeline) {
@@ -1967,7 +1980,9 @@ function innerFrame(el, offset, length) {
             default: return (f + offset) % length;
         }
     }
-    return offset % length; // movie clips run their own timeline
+    // Movie clips run their own timeline (a firstFrame the file may hold is ignored, as the player does); one carried on from a keyframe
+    // before (ops.ts carriedOn) starts where it had got to.
+    return ((el.carried || 0) + offset) % length;
 }
 // ---------- classic tween
 function decompose(m) {

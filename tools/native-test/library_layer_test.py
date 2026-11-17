@@ -50,7 +50,7 @@ try:
         root = cmd("DOM.getDocument", depth=-1, pierce=True)["root"]["nodeId"]
         cmd("DOM.setFileInputFiles", files=[path], nodeId=cmd("DOM.querySelector", nodeId=root, selector=selector)["nodeId"])
     stage = lambda: js("document.querySelector('[data-testid=stage]').toDataURL()")
-    layer_names = lambda: js("[...document.querySelectorAll('[data-testid=timeline] [data-layer]')].map(r=>r.parentElement.firstChild.textContent.replace(/^[●○]/,''))")
+    layer_names = lambda: js("[...document.querySelectorAll('[data-testid=timeline] [data-testid^=layer-name-]')].map(e=>e.textContent)")
     note = lambda: js("document.querySelector('[data-testid=note]').textContent")
     def pick_row(i):  # a click on a layer's row at frame 1 picks that layer
         click(f"[data-testid=timeline] [data-layer='{i}']", 0.004, 0.5)
@@ -118,14 +118,13 @@ try:
     cmd("Page.navigate", url=f"http://localhost:3000/editor/{PROJECT}"); time.sleep(12)
     before = red_in_scene()
     js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
-    check("stepped into the pose", wait("!!document.querySelector('[data-testid=open-native]')", 20))
-    click("[data-testid=open-native]")
-    check("native editor opens in the scene", wait("!!document.querySelector('[data-testid=native-dialog] [data-testid=stage]')", 90))
+    check("stepped into the pose", wait("!!document.querySelector('[data-testid=native-editor] [data-testid=stage]')", 90))
+    check("native editor opens in the scene", wait("!!document.querySelector('[data-testid=native-editor] [data-testid=stage]')", 90))
     time.sleep(1)
     click("[data-testid=add-from-library]"); time.sleep(0.4)
     set_file("[data-testid=native-upload-picture]", PNG)
     check("the picture file is added", wait("/^New layer/.test(document.querySelector('[data-testid=note]').textContent)", 30), note())
-    click("[data-testid=native-done]"); time.sleep(3)
+    click("[data-testid=native-step-out]"); time.sleep(3)
     saved = [p for p in get("http://localhost:3000/api/projects") if p["id"] == PROJECT][0]["scenes"][0]["editor_data"]["objects"][0].get("nativePose") or {}
     bitmaps = [b for e in saved.values() for b in ((e.get("library") or {}).get("bitmaps") or {}).values()]
     print("saved pictures:", [{k: (v if k != "data" else f"{len(v)} chars") for k, v in b.items()} for b in bitmaps])

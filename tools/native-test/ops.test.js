@@ -26,7 +26,20 @@ let rt = o.removeFrames(t, 10, 10); assert.equal(spans(rt), "0+10");
 // Clear keyframe merges into previous
 assert.equal(spans(o.clearKeyframe(a, 4)), "0+10");
 // Move keyframe
-assert.equal(spans(o.moveKeyframe(a, 4, 7)), "0+7 7+6");
+// (as Animate: the frames left join the span before; the key shows until the next keyframe; keys after it stay)
+assert.equal(spans(o.moveKeyframe(a, 4, 7)), "0+7 7+3", "later, inside its own span");
+assert.equal(spans(o.moveKeyframe(a, 4, 2)), "0+2 2+8", "earlier: it shows up to the next keyframe (the layer's end)");
+{
+  const three = L([{ i: 0, d: 4, elements: [inst(0)] }, { i: 4, d: 4, elements: [inst(1)] }, { i: 8, d: 4, elements: [inst(2)] }]);
+  assert.equal(spans(o.moveKeyframe(three, 4, 5)), "0+5 5+3 8+4", "one frame later: the next key stays");
+  assert.equal(spans(o.moveKeyframe(three, 4, 9)), "0+8 8+1 9+3", "over the next key: cuts its span");
+  assert.equal(spans(o.moveKeyframe(three, 4, 8)), "0+8 8+4", "onto the next key: replaces it");
+  assert.equal(o.moveKeyframe(three, 4, 8).frames[1].elements[0].m[4], 1, "...with the moved key's content");
+  assert.equal(spans(o.moveKeyframe(three, 0, 2)), "2+2 4+4 8+4", "the first key moved later leaves empty frames");
+  assert.equal(spans(o.moveKeyframe(three, 8, 15)), "0+4 4+8 15+4", "past the end: keeps its length, the span before carries on");
+  const tw = L([{ i: 0, d: 4, elements: [inst(0)], tween: "motion" }, { i: 4, d: 4, elements: [inst(10)] }, { i: 8, d: 2, elements: [inst(20)] }]);
+  assert.equal(spans(o.moveKeyframe(tw, 4, 6)), "0+6t 6+2 8+2", "the tween before now runs to where the key went");
+}
 // setMatrix on a tween frame makes a key
 let sm = o.setMatrix(t, 5, 0, [1,0,0,1,77,0]); assert.equal(spans(sm), "0+5t 5+5t 10+1"); assert.equal(sm.frames[1].elements[0].m[4], 77);
 // editing mid-span on a held layer changes the span's own key (no split), as in Animate
@@ -131,4 +144,80 @@ console.log("ops: all assertions passed");
   assert.equal(o.insertLayer(layers, 99, fresh)[5].name, "new", "past the end: at the bottom");
   assert.equal(layers[4].parent, 3, "input not changed");
   console.log("insert layer ok");
+}
+
+// rename, lock, duplicate layers
+{
+  const named = (name, type = "normal", parent = null) => ({ name, type, parent, hidden: false, frames: [{ i: 0, d: 2, elements: [inst(5)] }] });
+  const layers = [named("top"), named("M", "mask"), named("under", "normal", 1), named("F", "folder"), named("inF", "normal", 3)];
+  const r = o.renameLayer(layers, 2, " Arm ");
+  assert.equal(r[2].name, "Arm"); assert.equal(r[2].fileName, "under", "keeps its file name");
+  assert.equal(o.renameLayer(r, 2, "Leg")[2].fileName, "under", "a second rename keeps the first file name");
+  assert.equal(o.renameLayer(layers, 2, "  "), layers, "an empty name changes nothing");
+  assert.equal(o.setLayerLocked(layers[0], true).locked, true);
+  assert.equal(o.setLayerLocked(layers[0], false), layers[0], "unchanged: the same layer");
+  const d = o.duplicateLayers(layers, [2, 4, 1, 3]);
+  assert.deepEqual(d.layers.map((l) => l.name), ["top", "M", "under copy", "under", "F", "inF copy", "inF"], "copies above the originals; mask and folder not copied");
+  assert.deepEqual(d.copies, [2, 5]);
+  assert.equal(d.layers[2].parent, 1, "a copy under a mask stays under it");
+  assert.equal(d.layers[5].parent, 4, "a copy in a folder stays in it (the folder moved down one)");
+  assert.equal(d.layers[6].parent, 4);
+  assert.equal(d.layers[2].fileName, "", "a copy is not a layer of the file");
+  assert.notEqual(d.layers[2].frames, layers[2].frames, "the copy has its own keyframes");
+  d.layers[2].frames[0].elements[0].m[4] = 99;
+  assert.equal(layers[2].frames[0].elements[0].m[4], 5, "changing the copy leaves the original");
+  console.log("rename / lock / duplicate layers ok");
+}
+
+// copy / cut / paste frames
+{
+  // a: hold 0-3 (x 0), tween 4-7 (x 40 -> 80), hold 8-9 (x 80)
+  const layer = L([{ i: 0, d: 4, elements: [inst(0)] }, { i: 4, d: 4, elements: [inst(40)], tween: "motion" }, { i: 8, d: 2, elements: [inst(80)] }]);
+  const x = (l, f) => o.resolveElements(l, f)[0]?.m[4];
+  // copying the whole tween with its end key keeps the tween
+  const whole = o.copyFrames(layer, 4, 8);
+  assert.equal(whole.length, 5);
+  assert.deepEqual(whole.frames.map((k) => [k.i, k.d, !!k.tween]), [[0, 4, true], [4, 1, false]]);
+  // copying from the middle of the tween: starts with what shows there and ends as frame 7 looked (a tween between the two)
+  const mid = o.copyFrames(layer, 5, 7);
+  assert.deepEqual(mid.frames.map((k) => [k.i, k.d, !!k.tween]), [[0, 2, true], [2, 1, false]]);
+  assert.equal(mid.frames[0].elements[0].m[4], 50, "the tweened state at the start");
+  assert.equal(mid.frames[1].elements[0].m[4], 70, "the tweened state at the end");
+  const midPasted = o.pasteFrames(L([{ i: 0, d: 20, elements: [inst(0)] }]), 10, mid);
+  for (let k = 0; k < 3; k += 1) assert.equal(x(midPasted, 10 + k), x(layer, 5 + k), "a linear tween pastes exactly, frame " + k);
+  // pasting the tween over frames 0-4: frames 0-4 replaced, 5 on shows as before
+  const pasted = o.pasteFrames(layer, 0, whole);
+  for (const f of [0, 2, 4]) assert.equal(x(pasted, f), x(layer, f + 4), "pasted frame " + f);
+  for (const f of [5, 6, 7, 8, 9]) assert.equal(x(pasted, f), x(layer, f), "after the paste, frame " + f + " shows as before");
+  // pasting a hold into the middle of the tween: the tween before now runs into the pasted key
+  const held = o.pasteFrames(layer, 6, { length: 1, frames: [{ i: 0, d: 1, elements: [inst(500)] }] });
+  assert.equal(x(held, 6), 500); assert.equal(x(held, 5), 40 + (500 - 40) / 2, "tween 4 -> 6 now ends at the pasted key");
+  assert.equal(x(held, 7), x(layer, 7), "frame 7 shows as before");
+  // pasting past the layer's end leaves a gap, then the frames
+  const far = o.pasteFrames(layer, 12, mid);
+  assert.equal(o.resolveElements(far, 11).length, 0, "gap");
+  assert.equal(x(far, 12), 50);
+  // cut: the frames empty, what follows unchanged
+  const cut = o.cutFrames(layer, 1, 5);
+  assert.equal(cut.clip.length, 5);
+  assert.equal(o.resolveElements(cut.layer, 3).length, 0, "cut frames are empty");
+  assert.equal(x(cut.layer, 0), 0); assert.equal(x(cut.layer, 6), x(layer, 6), "after the cut as before");
+  assert.equal(layer.frames.length, 3, "input not changed");
+  console.log("copy / paste frames ok");
+}
+
+// F6 in the middle of a span: nested symbols carry on from the frame they had reached
+{
+  const g = (loop) => ({ k: "instance", item: "G", symbolType: "graphic", m: [1,0,0,1,0,0], pivot: [0,0], loop, first: 2 });
+  const mc = { k: "instance", item: "M", symbolType: "movie clip", m: [1,0,0,1,0,0], pivot: [0,0], loop: "loop", first: 0 };
+  const layer = L([{ i: 0, d: 10, elements: [g("loop"), g("play once reverse"), g("single frame"), mc] }]);
+  const split = o.insertKeyframe(layer, 4).frames[1].elements;
+  assert.deepEqual(split.map((e) => e.first), [6, -2, 2, 0], "graphics: loop +4, reverse -4, single frame stays; a movie clip's first is left");
+  assert.equal(split[3].carried, 4, "a movie clip carries on through its own field");
+  // a movie clip's firstFrame from the file is ignored, as the player does
+  assert.equal(require("./native/evaluate.js").innerFrame({ ...mc, first: 5 }, 2, 7), 2);
+  const ev = require("./native/evaluate.js");
+  for (let f = 4; f < 10; f += 1) for (let e = 0; e < 4; e += 1)
+    assert.equal(ev.innerFrame(split[e], f - 4, 7), ev.innerFrame(layer.frames[0].elements[e], f, 7), `same inner frame at ${f} (element ${e})`);
+  console.log("F6 carries nested animation on ok");
 }

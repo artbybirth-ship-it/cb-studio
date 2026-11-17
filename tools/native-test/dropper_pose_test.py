@@ -64,6 +64,8 @@ try:
         click("[data-testid=open-native]")
         ok = wait("[data-testid=native-editor]", 90); time.sleep(2); return ok
     cmd("Runtime.enable"); cmd("Page.enable")
+    # These checks are about the older pose timeline (kept for characters without a .fla): Sardar is opened in it, not in the native editor.
+    cmd("Page.addScriptToEvaluateOnNewDocument", source="window.__CBS_OLD_POSE_TIMELINE__=true")
 
     SOURCE = sys.argv[3]
     import io, base64 as b64

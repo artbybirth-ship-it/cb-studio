@@ -61,8 +61,6 @@ try:
     def open_pose():
         cmd("Page.navigate", url=f"http://localhost:3000/editor/{PROJECT}"); time.sleep(9)
         js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
-        if not wait("[data-testid=open-native]", 20): return False
-        click("[data-testid=open-native]")
         ok = wait("[data-testid=native-editor]", 90); time.sleep(2); return ok
     cmd("Runtime.enable"); cmd("Page.enable")
 
@@ -82,7 +80,7 @@ try:
             if layer and layer != skip_layer: return layer, (fx, fy)
         return None, None
     def plain():
-        click_at(r[0] + r[2] * 0.02, r[1] + r[3] * 0.02)
+        click_at(r[0] + r[2] * 0.02, r[1] + r[3] * 0.97)  # empty stage away from the crumbs (top left) and the part panel (top right)
         return stage()
 
     # copy one part, then pick a different part to replace
@@ -107,12 +105,12 @@ try:
     # swapping a part for itself does nothing harmful
     click("[data-testid=swap-part]"); time.sleep(1)
     check("swapping again is a no-op or the same picture", plain() == swapped, note())
-    click("[data-testid=native-done]"); time.sleep(2)
+    click("[data-testid=native-step-out]"); time.sleep(2)
     saved = scene()["editor_data"]["objects"][0].get("nativePose") or {}
     check("the swap was saved with the scene", bool(saved))
     check("after a reload the pose reopens", open_pose())
     check("the swap is still there", plain() == swapped)
-    click("[data-testid=native-cancel]")
+    click("[data-testid=native-step-out]")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

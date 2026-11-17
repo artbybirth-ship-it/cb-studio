@@ -65,11 +65,10 @@ try:
         # step into the pose: a double-click on the character (sent as the DOM event; headless Chrome's
         # synthetic double click does not reach the character's overlay)
         js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
-        return wait("[data-testid=open-native]", 20)
+        return wait("[data-testid=native-editor] [data-testid=stage]", 90)
 
     check("Double-click steps into the pose and shows the native button", open_native())
     shot("2-inside-pose")
-    click("[data-testid=open-native]")
     check("native dialog opens and loads the .fla", wait("[data-testid=native-editor]", 90))
     time.sleep(2)
     shot("3-native-open")
@@ -81,8 +80,8 @@ try:
         mouse("mouseMoved", cx + i * 6, cy + i * 3, buttons=1); time.sleep(0.05)
     mouse("mouseReleased", cx + 48, cy + 24, clickCount=1); time.sleep(0.6)
     check("Undo is enabled after the drag (an edit was made)", js("!document.querySelector('[data-testid=undo]').disabled"))
-    click("[data-testid=native-done]"); time.sleep(2)
-    check("dialog closes on Done", rect("[data-testid=native-dialog]") is None)
+    click("[data-testid=native-step-out]"); time.sleep(2)
+    check("dialog closes on Done", rect("[data-testid=native-editor]") is None)
     shot("4-after-done")
 
     # the edit is on the placed character, in the scene (the same data a .cb file carries)
@@ -95,13 +94,14 @@ try:
 
     # reload: the edit comes back
     check("after reload the pose opens again", open_native())
-    click("[data-testid=open-native]")
     check("native dialog reopens", wait("[data-testid=native-editor]", 90))
     time.sleep(2)
-    check("Undo is disabled on reopen (edits loaded as the starting point, not as new changes)", js("document.querySelector('[data-testid=undo]').disabled"))
+    # In place, Undo is the scene's; opening the pose again must not count as a change (nothing is saved by opening it).
+    time.sleep(2)
+    check("opening the pose again saves nothing (the edits are the starting point, not new changes)", json.dumps(scene_object().get("nativePose"), sort_keys=True) == json.dumps(saved, sort_keys=True))
     shot("5-reopened")
     # compare the picture with the first one: the part should be where it was moved to
-    click("[data-testid=native-cancel]")
+    click("[data-testid=native-step-out]")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

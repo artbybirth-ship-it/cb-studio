@@ -26,7 +26,8 @@ import { buildProjectFile, formatEditedAgo, openProjectFileAsNew, saveProjectFil
 import SymbolTimeline, { type FlaSymbol } from "./SymbolTimeline";
 import Timeline, { selectionLayerIds, type FrameAction, type FrameSelection, type LayerDropTarget } from "./Timeline";
 import CharacterEditPanel from "./CharacterEditPanel";
-import NativePoseDialog from "./NativePoseDialog";
+import NativePoseInPlace from "./NativePoseInPlace";
+import type { NativeColourFrame } from "./NativePoseEditor";
 import { findFlaUrl } from "@/lib/native/loadDoc";
 import { playerFitOf } from "@/lib/native/character";
 import FindReplaceDialog from "./FindReplaceDialog";
@@ -466,7 +467,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const frameAccessRef = useRef<((objectId: string) => HTMLIFrameElement | undefined) | null>(null);
   /** What the colour tools read colours from: the player's frame, or for a character drawn natively a stand-in answering the same questions. */
   const colourFrameAccessRef = useRef<((objectId: string) => HTMLIFrameElement | undefined) | null>(null);
-  const colourFrameOf = (objectId: string) => colourFrameAccessRef.current?.(objectId) ?? frameAccessRef.current?.(objectId);
+  // Inside a pose open in the native editor (in place), the colour tools ask the editor's own stage.
+  const nativeColourRef = useRef<{ objectId: string; frame: NativeColourFrame } | null>(null);
+  const colourFrameOf = (objectId: string) => (nativeColourRef.current?.objectId === objectId ? nativeColourRef.current.frame as unknown as HTMLIFrameElement : null)
+    ?? colourFrameAccessRef.current?.(objectId) ?? frameAccessRef.current?.(objectId);
   const viewCenterRef = useRef<(() => { x: number; y: number }) | null>(null);
   const layerGeometryRef = useRef<((objectId: string) => LayerGeometry | null) | null>(null);
   // Tool rail groups (Illustrator): the Edit group's current tool, the Transform and Align panels.
@@ -1926,7 +1930,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   }, [mutate, selectedObjectId]);
 
   // Undo and redo take their step on the first run of the updater and give the same result if React runs it again (development).
+  /** Bumped by every Undo / Redo: a pose open in the native editor (in place) then takes its edits again from the scene. */
+  const [historyTurn, setHistoryTurn] = useState(0);
   const undo = useCallback(() => {
+    setHistoryTurn((n) => n + 1);
     let step: EditorData | null | undefined;
     setDraft((current) => {
       if (!current) return current;
@@ -1943,6 +1950,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   }, []);
 
   const redo = useCallback(() => {
+    setHistoryTurn((n) => n + 1);
     let step: EditorData | null | undefined;
     setDraft((current) => {
       if (!current) return current;
@@ -3489,25 +3497,47 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       showNotice("Couldn't load that symbol's timeline.", "error");
     }
   }, [characterLibraryActions, loadSymbol, showNotice, symbolView]);
-  // Native pose editor (beta): the stepped-into pose opened straight from the character's .fla; its edits live on the placed character (nativePose).
-  const [nativeEdit, setNativeEdit] = useState<{ objectId: string; flaUrl: string; item: string; js: string; title: string } | null>(null);
-  const openNativeEditor = useCallback(async () => {
+  // Native pose editor in place (Phase 6, single timeline): the pose of a character whose Animate file (.fla) is available opens in the native
+  // editor, its drawing over the canvas area and its timeline in the timeline row; a character without one keeps the older pose timeline.
+  type NativeInPlace = { objectId: string; flaUrl: string; item: string; js: string; poseName: string };
+  const [nativeInPlace, setNativeInPlace] = useState<NativeInPlace | "checking" | null>(null);
+  const [nativeStageHost, setNativeStageHost] = useState<HTMLDivElement | null>(null);
+  const [nativeTimelineHost, setNativeTimelineHost] = useState<HTMLDivElement | null>(null);
+  const nativeKey = symbolView ? `${symbolView.objectId}|${symbolView.base}|${symbolView.levels[0]?.js}` : "";
+  useEffect(() => {
     const view = symbolView;
-    const level = view?.levels[view.levels.length - 1];
+    const first = view?.levels[0];
     const object = view ? draft?.objects.find((item) => item.id === view.objectId) : null;
     const action = object?.type === "character" ? characterLibraryActions.find((item) => item.assetUrl === object.assetUrl) : null;
-    if (!view || !level || !object || !action) return;
-    if (splitClass(level.js)[0]) { showNotice("The native editor opens a character's own pose: step out to the pose first."); return; }
-    try {
-      const index = await (await fetch(`${view.base}index.json`)).json() as { document?: string; symbols?: Record<string, { name: string }> };
-      const item = index.symbols?.[level.js]?.name;
-      const flaUrl = item && index.document ? await findFlaUrl(view.base, index.document, action.sourceFolder) : null;
-      if (!item || !flaUrl) { showNotice("The native editor needs the character's Animate file (.fla) uploaded with it.", "error"); return; }
-      setNativeEdit({ objectId: view.objectId, flaUrl, item, js: level.js, title: `${object.name || "Character"} · ${level.data.name.split("/").pop() || level.data.name}` });
-    } catch {
-      showNotice("Couldn't open the native editor for this character.", "error");
-    }
-  }, [characterLibraryActions, draft, showNotice, symbolView]);
+    // For side-by-side checks (tools/native-test): the older pose timeline on every character.
+    const oldTimeline = typeof window !== "undefined" && (window as unknown as { __CBS_OLD_POSE_TIMELINE__?: boolean }).__CBS_OLD_POSE_TIMELINE__;
+    if (!view || !first || !action || oldTimeline) { setNativeInPlace(null); return; }
+    let alive = true;
+    setNativeInPlace("checking");
+    (async () => {
+      try {
+        const index = await (await fetch(`${view.base}index.json`)).json() as { document?: string; symbols?: Record<string, { name: string }> };
+        const item = index.symbols?.[first.js]?.name;
+        const flaUrl = item && index.document ? await findFlaUrl(view.base, index.document, action.sourceFolder) : null;
+        if (alive) setNativeInPlace(item && flaUrl ? { objectId: view.objectId, flaUrl, item, js: first.js, poseName: object?.actionName || first.data.name.split("/").pop() || item } : null);
+      } catch {
+        if (alive) setNativeInPlace(null);
+      }
+    })();
+    return () => { alive = false; };
+  }, [nativeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** Every change made in the native editor is kept on the placed character at once (one scene undo step each). */
+  const saveNativePose = useCallback((target: NativeInPlace, edits: import("@/lib/native/store").NativeEdits | null) => {
+    const fit = playerFitOf(frameAccessRef.current?.(target.objectId));
+    mutate((data) => {
+      const placed = data.objects.find((item) => item.id === target.objectId);
+      if (!placed) return;
+      const all = { ...(placed.nativePose || {}) };
+      if (edits) all[target.js] = edits; else delete all[target.js];
+      if (Object.keys(all).length) placed.nativePose = all; else delete placed.nativePose;
+      if (!placed.nativePose) delete placed.nativePoseFit; else if (fit) placed.nativePoseFit = fit;
+    });
+  }, [mutate]);
   const stepOutOfSymbol = useCallback(() => {
     setSymbolView((state) => (!state || state.levels.length <= 1 ? null : { ...state, playing: false, hidden: new Set(), levels: state.levels.slice(0, -1) }));
   }, []);
@@ -3853,7 +3883,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     setPartSelection(now.includes(prop) ? now.filter((item) => item !== prop) : [...now, prop]);
   }, [setPartSelection]);
   const poseScopeNow = selectedProps.length && symbolLevelNow ? `@${symbolLevelNow.js}/${selectedProps.join("+")}` : null;
-  const poseOwnerNow = selectedProps.length && symbolView ? symbolView.objectId : null;
+  // Inside a pose the colour tools work on its character: on the picked parts in the older pose timeline, on the whole character in the native editor.
+  const poseOwnerNow = symbolView && (selectedProps.length || (nativeInPlace && nativeInPlace !== "checking")) ? symbolView.objectId : null;
   useEffect(() => { setPoseColourScope(poseScopeNow); setPoseOwnerId(poseOwnerNow); }, [poseScopeNow, poseOwnerNow]);
   const partVersion = JSON.stringify([symbolLevelNow?.frame, symbolLevelNow?.js, symbolObjectNow?.symbolValues, symbolObjectNow?.symbolKeys, symbolObjectNow?.symbolEases]);
   useEffect(() => {
@@ -6402,9 +6433,33 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onFitScaleChange={setCanvasFitScale}
               viewResetRevision={canvasViewResetRevision}
             />
+            {symbolView && nativeInPlace && <div ref={setNativeStageHost} className="cb-native-stage-host" data-testid="native-stage-host" style={{ position: "absolute", inset: 0, zIndex: 40 }} />}
           </div>
 
-          {symbolView ? (() => {
+          {symbolView && nativeInPlace ? (() => {
+            const object = draft.objects.find((item) => item.id === symbolView.objectId);
+            if (nativeInPlace === "checking") return <div className="cb-native-timeline-host" data-testid="native-checking" style={{ display: "grid", placeItems: "center", color: "#888", font: "12px system-ui" }}>Opening the pose…</div>;
+            const target = nativeInPlace;
+            return (
+              <div ref={setNativeTimelineHost} className="cb-native-timeline-host" data-testid="native-timeline-host" style={{ minHeight: 0, overflow: "hidden" }}>
+                {nativeStageHost && nativeTimelineHost && object && (
+                  <NativePoseInPlace key={`${target.objectId}|${target.js}`}
+                    flaUrl={target.flaUrl} item={target.item} poseName={target.poseName} js={target.js}
+                    initial={object.nativePose?.[target.js]} colours={object.colorReplacements}
+                    history={{ turn: historyTurn, undo, redo }}
+                    legacy={object.symbolKeys || object.symbolEases || object.symbolValues || object.symbolLayers ? { keys: object.symbolKeys, eases: object.symbolEases, values: object.symbolValues, layers: object.symbolLayers } : undefined}
+                    uploadPicture={project ? async (file) => (await api.uploadAsset(project.id, "background", file)).url : undefined}
+                    hosts={{ stage: nativeStageHost, timeline: nativeTimelineHost }}
+                    crumbs={[scene.name || "Scene", object.name || "Character"]}
+                    onStepOut={() => setSymbolView(null)}
+                    onSave={(edits) => saveNativePose(target, edits)}
+                    colourPick={stageColourTool || frPicking || boxPicking ? handleStageColorPress : null}
+                    onColourFrame={(frame) => { nativeColourRef.current = frame ? { objectId: target.objectId, frame } : null; }}
+                  />
+                )}
+              </div>
+            );
+          })() : symbolView ? (() => {
             const object = draft.objects.find((item) => item.id === symbolView.objectId);
             const current = symbolView.levels[symbolView.levels.length - 1];
             const crumbs = [scene.name || "Scene", object?.name || "Character", object?.actionName || current.data.name,
@@ -6457,31 +6512,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 // Scene and the character's name step all the way out; a symbol steps back to it.
                 onCrumb={(index) => setSymbolView((state) => (!state || index < 2 ? null : { ...state, playing: false, hidden: new Set(), levels: state.levels.slice(0, index - 1) }))}
                 onStepInto={(layerIndex, frame, js) => void stepIntoSymbol(layerIndex, frame, js)}
-                onNative={() => void openNativeEditor()}
               />
-              {nativeEdit && nativeEdit.objectId === symbolView.objectId && (
-                <NativePoseDialog
-                  flaUrl={nativeEdit.flaUrl} item={nativeEdit.item} title={nativeEdit.title} js={nativeEdit.js}
-                  initial={object?.nativePose?.[nativeEdit.js]} colours={object?.colorReplacements}
-                  uploadPicture={project ? async (file) => (await api.uploadAsset(project.id, "background", file)).url : undefined}
-                  legacy={object && (object.symbolKeys || object.symbolEases || object.symbolValues || object.symbolLayers) ? { keys: object.symbolKeys, eases: object.symbolEases, values: object.symbolValues, layers: object.symbolLayers } : undefined}
-                  onCancel={() => setNativeEdit(null)}
-                  onDone={(edits) => {
-                    const target = nativeEdit;
-                    setNativeEdit(null);
-                    const fit = playerFitOf(frameAccessRef.current?.(target.objectId));
-                    mutate((data) => {
-                      const placed = data.objects.find((item) => item.id === target.objectId);
-                      if (!placed) return;
-                      const all = { ...(placed.nativePose || {}) };
-                      if (edits) all[target.js] = edits; else delete all[target.js];
-                      if (Object.keys(all).length) placed.nativePose = all; else delete placed.nativePose;
-                      if (!placed.nativePose) delete placed.nativePoseFit; else if (fit) placed.nativePoseFit = fit;
-                    });
-                    showNotice(edits ? "Native edits saved on this character. The scene preview does not show them yet." : "No native edits on this pose.");
-                  }}
-                />
-              )}
               </>
             );
           })() : (

@@ -13,10 +13,13 @@ export type AutoNames = Map<string, Row[]>;
 
 const nameOf = (count: number) => (count === 0 ? "instance" : `instance_${count}`);
 /** Layers are found by name and, for repeated names, by which one of them it is. */
+/** A layer's name as the file has it: a renamed layer keeps its file name here; a layer the file does not have has "" (it matches nothing). */
+const fileNameOf = (layer: Layer) => layer.fileName ?? layer.name;
 export const layerKey = (layers: Layer[], index: number) => {
+  const name = fileNameOf(layers[index]);
   let nth = 0;
-  for (let i = 0; i < index; i += 1) if (layers[i].name === layers[index].name) nth += 1;
-  return `${layers[index].name}\u0000${nth}`;
+  for (let i = 0; i < index; i += 1) if (fileNameOf(layers[i]) === name) nth += 1;
+  return `${name}\u0000${nth}`;
 };
 
 export function autoNames(timeline: Timeline): AutoNames {

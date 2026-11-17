@@ -27,6 +27,9 @@ export type ShapeElement = {
 export type InstanceElement = {
   k: "instance"; item: string; symbolType: string; m: Matrix; pivot: [number, number];
   loop: string; first: number; alpha?: number; name?: string;
+  /** A movie clip carried on from the keyframe before (an F6 in the middle of its span): the frame of its own timeline it had reached.
+   *  Animate files can hold a firstFrame on movie clips too, which the player ignores, so this is kept apart from `first`. */
+  carried?: number;
 };
 export type BitmapElement = { k: "bitmap"; item: string; m: Matrix; /** Set on pictures the old editor placed as layers: what its saved values call them. */ name?: string; /** A picture placed as a layer sits centred in a container the old editor's values move: this is the picture's place inside it (m = container · local). */ local?: Matrix };
 export type FlaElement = ShapeElement | InstanceElement | BitmapElement;
@@ -39,7 +42,14 @@ export type Keyframe = {
   morph?: MorphSegment[]; label?: string;
 };
 /** off: switched off in the editor (not drawn, not picked); `hidden` is the file's own visibility flag, which the Animate publish ignores. */
-export type Layer = { name: string; type: string; parent: number | null; hidden: boolean; off?: boolean; frames: Keyframe[] };
+export type Layer = {
+  name: string; type: string; parent: number | null; hidden: boolean; off?: boolean; frames: Keyframe[];
+  /** Locked in the editor: its parts cannot be picked or changed on the stage (Animate's padlock). */
+  locked?: boolean;
+  /** The layer's name in the Animate file, kept when it is renamed (the player's instance names are worked out by it); "" for a layer the
+   *  file does not have (pasted, added from the library, duplicated). Unset: `name` is the file's name. */
+  fileName?: string;
+};
 export type Timeline = { name: string; layers: Layer[]; length: number };
 /** warnings: what this symbol's own timeline uses that is not imported (see FlaDocument). */
 export type LibrarySymbol = { name: string; type: string; timeline: Timeline; warnings: string[] };

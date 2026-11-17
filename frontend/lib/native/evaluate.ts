@@ -96,7 +96,9 @@ export function innerFrame(el: InstanceElement, offset: number, length: number):
       default: return (f + offset) % length;
     }
   }
-  return offset % length; // movie clips run their own timeline
+  // Movie clips run their own timeline (a firstFrame the file may hold is ignored, as the player does); one carried on from a keyframe
+  // before (ops.ts carriedOn) starts where it had got to.
+  return ((el.carried || 0) + offset) % length;
 }
 
 // ---------- classic tween
