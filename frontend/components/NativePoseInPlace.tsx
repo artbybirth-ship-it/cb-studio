@@ -16,7 +16,7 @@ import { convertLegacy, type LegacyFields } from "../lib/native/legacy";
 import { buildClones } from "../lib/native/legacyClones";
 import type { ColourRule } from "../lib/native/colour";
 
-export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial, legacy, colours, uploadPicture, hosts, crumbs, onStepOut, onSave, colourPick, onColourFrame, onScope, pointTool, onPointTool, history }: {
+export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial, legacy, colours, uploadPicture, hosts, crumbs, onStepOut, onSave, colourPick, onColourFrame, onScope, pointTool, onPointTool, onNotice, history, zoom, onZoom, onFitScale, viewReset, zoomTool, playToggle }: {
   flaUrl: string; item: string; poseName: string;
   /** The pose's class in the player (what old edits and colour rules call it). */
   js: string;
@@ -40,8 +40,18 @@ export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial,
   /** Point editing follows the scene's Direct select tool, and tells it when it is turned on or off here. */
   pointTool?: boolean;
   onPointTool?: (on: boolean) => void;
+  /** Messages for the scene's notice (the timeline panel has no line of its own). */
+  onNotice?: (text: string) => void;
   /** The scene's one Undo / Redo (each change here is one step of it); `turn` changes after each, and the editor takes the edits again. */
   history: { turn: number; undo: () => void; redo: () => void };
+  /** The scene editor's view of the pose (⌘+ / ⌘− / ⌘0 / ⌘1, the zoom box, the Zoom tool): see NativePoseEditor. */
+  zoom?: number;
+  onZoom?: (zoom: number) => void;
+  onFitScale?: (scale: number) => void;
+  viewReset?: number;
+  zoomTool?: boolean;
+  /** Enter / Return in the scene editor: plays or pauses the pose. */
+  playToggle?: number;
 }) {
   const [loaded, setLoaded] = useState<NativeLoaded | null>(null);
   const [error, setError] = useState("");
@@ -105,7 +115,8 @@ export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial,
   }
   return (
     <NativePoseEditor flaUrl={flaUrl} doc={loaded.doc} renderer={loaded.renderer} poses={[{ item, name: poseName }]} initialEdits={opening.current ?? seed} onChange={onChange}
-      uploadPicture={uploadPicture} embedded={hosts} crumbs={crumbs} onStepOut={onStepOut} colourPick={colourPick} onColourFrame={onColourFrame} onScope={onScope} pointTool={pointTool} onPointTool={onPointTool} redrawKey={coloursKey} note={converted}
+      uploadPicture={uploadPicture} embedded={hosts} crumbs={crumbs} onStepOut={onStepOut} colourPick={colourPick} onColourFrame={onColourFrame} onScope={onScope} pointTool={pointTool} onPointTool={onPointTool} onNotice={onNotice} redrawKey={coloursKey} note={converted}
+      zoom={zoom} onZoom={onZoom} onFitScale={onFitScale} viewReset={viewReset} zoomTool={zoomTool} playToggle={playToggle}
       sceneHistory={{ turn: history.turn, edits: initial ?? seed, undo: history.undo, redo: history.redo }} />
   );
 }

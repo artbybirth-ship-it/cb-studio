@@ -1,5 +1,6 @@
 "use client";
 
+import PartMenu from "./PartMenu";
 import { createPortal } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, MutableRefObject, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
@@ -3809,42 +3810,8 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       )}
       </div>
       {partMenu && symbolView && (
-        <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: partMenu.x, top: partMenu.y, maxHeight: "calc(100vh - 16px)", overflowY: "auto" }} onPointerDown={(event) => event.stopPropagation()}
-          ref={(element) => {
-            // A long menu opened low on the screen slides up so that all of it can be reached.
-            if (!element) return;
-            const box = element.getBoundingClientRect();
-            if (box.bottom > window.innerHeight - 8) element.style.top = `${Math.max(8, window.innerHeight - 8 - box.height)}px`;
-            if (box.right > window.innerWidth - 8) element.style.left = `${Math.max(8, window.innerWidth - 8 - box.width)}px`;
-          }}>
-          {partMenu.hasPart ? <>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("cut"); }}>Cut<kbd>⌘X</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("copy"); }}>Copy<kbd>⌘C</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("paste"); }}>Paste<kbd>⌘V</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pasteFront"); }}>Paste in Front<kbd>⌘F</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pasteBack"); }}>Paste in Back<kbd>⌘B</kbd></button>
-            <span className="cb-frame-menu-sep" aria-hidden="true" />
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("toFront"); }}>Bring to Front<kbd>⇧⌘↑</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("forward"); }}>Bring Forward<kbd>⌘↑</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("backward"); }}>Send Backward<kbd>⌘↓</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("toBack"); }}>Send to Back<kbd>⇧⌘↓</kbd></button>
-            <span className="cb-frame-menu-sep" aria-hidden="true" />
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("duplicate"); }}>Duplicate Layer<kbd>⌘D</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("flipH"); }}>Flip Horizontal<kbd>H</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("flipV"); }}>Flip Vertical<kbd>⇧H</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pivot"); }}>Reset Registration Point</button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("group"); }}>Group in Folder<kbd>⌘G</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("ungroup"); }}>Ungroup<kbd>⇧⌘G</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("hide"); }}>Hide Layer</button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("lock"); }}>Lock Layer</button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("delete"); }}>Delete Layer<kbd>⌫</kbd></button>
-          </> : <>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("paste"); }}>Paste<kbd>⌘V</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pasteFront"); }}>Paste in Front<kbd>⌘F</kbd></button>
-            <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolContext?.("pasteBack"); }}>Paste in Back<kbd>⌘B</kbd></button>
-          </>}
-          <button type="button" role="menuitem" onClick={() => { setPartMenu(null); onSymbolDoubleClick?.(null); }}>Back to Scene<kbd>Esc</kbd></button>
-        </div>
+        <PartMenu x={partMenu.x} y={partMenu.y} hasPart={partMenu.hasPart}
+          onAction={(action) => { setPartMenu(null); if (action === "back") onSymbolDoubleClick?.(null); else if (action !== "swap") onSymbolContext?.(action); }} />
       )}
       {symbolMenu && (
         <div className="cb-frame-menu cb-symbol-menu" role="menu" style={{ left: symbolMenu.x, top: symbolMenu.y }} onPointerDown={(event) => event.stopPropagation()}>

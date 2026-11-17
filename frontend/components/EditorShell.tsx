@@ -428,8 +428,28 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // While either transform dialog is open, the editor's keyboard shortcuts stay off.
   scaleRotateOpenRef.current = scaleRotateOpen || reflectOpen;
   const [canvasFitScale, setCanvasFitScale] = useState(1);
+  // A native pose open in place has its own view over the canvas area: its zoom (1 = the pose fitted to the area), what that is on
+  // screen (CSS pixels per pose unit), and a count that brings it back to the middle. ⌘+ / ⌘− / ⌘0 / ⌘1 and the zoom box act on it then.
+  const [poseZoom, setPoseZoom] = useState(1);
+  const [poseFitScale, setPoseFitScale] = useState(1);
+  const [poseViewReset, setPoseViewReset] = useState(0);
+  /** Enter / Return inside a native pose open in place: each press plays or pauses it. */
+  const [nativePlayToggle, setNativePlayToggle] = useState(0);
+  const viewFitScale = () => (nativePoseOpenRef.current ? poseFitScale : canvasFitScale);
+  const setViewZoom = (next: number | ((value: number) => number)) => {
+    const set = nativePoseOpenRef.current ? setPoseZoom : setCanvasZoom;
+    set((value) => clampCanvasZoom(typeof next === "function" ? next(value) : next));
+  };
+  const fitView = () => {
+    if (nativePoseOpenRef.current) { setPoseZoom(1); setPoseViewReset((count) => count + 1); }
+    else resetCanvasView();
+  };
   // Actual Size (100%): Cmd/Ctrl+1 or a double-click on the Zoom tool, as in Illustrator.
-  const zoomToActualSize = () => setCanvasZoom(clampCanvasZoom(1 / Math.max(0.01, canvasFitScale)));
+  const zoomToActualSize = () => setViewZoom(1 / Math.max(0.01, viewFitScale()));
+  const zoomViewByRef = useRef((factor: number) => setViewZoom((value) => value * factor));
+  zoomViewByRef.current = (factor: number) => setViewZoom((value) => value * factor);
+  const fitViewRef = useRef(fitView);
+  fitViewRef.current = fitView;
   const zoomToActualSizeRef = useRef(zoomToActualSize);
   zoomToActualSizeRef.current = zoomToActualSize;
   const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
@@ -557,6 +577,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // Picking a colour on the canvas: Esc cancels the pick before it closes the panel that asked for it.
   useEscClose(Boolean(frPicking), () => setFrPicking(null));
   useEscClose(boxPicking, () => { setBoxPicking(false); setActiveTool("select"); });
+  /** A native pose is open in place (its editor takes the part shortcuts); kept for the key handlers. */
+  const nativePoseOpenRef = useRef(false);
   const [activeTool, setActiveTool] = useState<"select" | "direct" | "transform" | "scale" | "reflect" | "zoom" | "import" | "text" | "eyedropper" | "bone" | "tone" | null>("select");
   const activeToolRef = useRef(activeTool);
   activeToolRef.current = activeTool;
@@ -2155,6 +2177,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
 
       // Frames are selected in the pose timeline: ⌘C / ⌘V / ⌘⇧V are theirs (keyframes), not the parts' or the scene's.
       if (!event.altKey && (event.code === "KeyC" || event.code === "KeyV") && document.querySelector(".cb-symbol-sel")) return;
+      // A native pose open in place: the part shortcuts are its editor's (⌘C / ⌘X / ⌘V, ⌘F / ⌘B paste in front / back, ⌘↑ / ⌘↓ arrange,
+      // ⌘D duplicate, ⌘G group), as they were the older pose view's: the scene's own (its layers, the character) never run then.
+      if (nativePoseOpenRef.current && !event.altKey && ["KeyC", "KeyX", "KeyV", "KeyF", "KeyB", "KeyD", "KeyG", "ArrowUp", "ArrowDown"].includes(event.code)) return;
       if (symbolPoseKeyRef.current?.(event)) { event.preventDefault(); event.stopImmediatePropagation(); return; }
       const key = event.key.toLowerCase();
       // Copy / Cut / Paste layers (in text boxes these stay normal text copy and paste, above).
@@ -2202,19 +2227,19 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       if (event.key === "+" || event.key === "=" || event.code === "NumpadAdd") {
         event.preventDefault();
         event.stopImmediatePropagation();
-        setCanvasZoom((value) => clampCanvasZoom(value * 1.25));
+        zoomViewByRef.current(1.25);
         return;
       }
       if (event.key === "-" || event.code === "NumpadSubtract") {
         event.preventDefault();
         event.stopImmediatePropagation();
-        setCanvasZoom((value) => clampCanvasZoom(value / 1.25));
+        zoomViewByRef.current(1 / 1.25);
         return;
       }
       if (event.key === "0") {
         event.preventDefault();
         event.stopImmediatePropagation();
-        resetCanvasView();
+        fitViewRef.current();
         return;
       }
       if (event.key === "1" && !event.shiftKey && !event.altKey) {
@@ -4224,7 +4249,15 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     const ids = selectedPropsRef.current.map((prop) => level.data.layers.findIndex((layer) => (layer.props || []).includes(prop))).filter((index) => index >= 0);
     return [...new Set(ids)];
   };
+  // The older pose view's part shortcuts (copy / paste parts, flip, nudge, group, delete…) leave a native pose to its own editor.
+  const nativePoseOpen = Boolean(nativeInPlace && nativeInPlace !== "checking");
+  nativePoseOpenRef.current = nativePoseOpen;
+  // The zoom box shows the open pose's view while one is open in place; each visit starts fitted.
+  const shownZoom = nativePoseOpen ? poseZoom : canvasZoom;
+  const shownFitScale = nativePoseOpen ? poseFitScale : canvasFitScale;
+  useEffect(() => { setPoseZoom(1); setPoseViewReset((count) => count + 1); }, [nativePoseOpen]);
   symbolDuplicateRef.current = () => {
+    if (nativePoseOpen) return false; // a native pose open in place: its editor takes these keys
     if (!symbolView || !symbolLevelNow) return false;
     const ids = pickedLayerIds();
     if (!ids.length) return false;
@@ -4235,6 +4268,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const partInfoRef = useRef(partInfo);
   partInfoRef.current = partInfo;
   symbolNudgeRef.current = (dx, dy) => {
+    if (nativePoseOpen) return false; // a native pose open in place: its editor takes these keys
     if (multiProps.length > 1) {
       const infos = groupInfosRef.current, plans = groupPlans(infos.map((info) => info.prop));
       if (!infos.length) return true;
@@ -4262,6 +4296,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // Flip (H left–right, Shift+H top–bottom) turns the picked part over about the middle of its box, as it looks on the stage.
   symbolFlipRef.current = (axis) => {
+    if (nativePoseOpen) return false; // a native pose open in place: its editor takes these keys
     if (multiProps.length > 1) {
       const infos = groupInfosRef.current, plans = groupPlans(infos.map((info) => info.prop));
       if (!infos.length || !plans) return true;
@@ -4286,6 +4321,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // The registration point goes back to the middle of the part's box (the artwork stays).
   symbolPivotResetRef.current = () => {
+    if (nativePoseOpen) return false; // a native pose open in place: its editor takes these keys
     const info = partInfoRef.current;
     if (!pickedProp || !info || !canTransform(info)) return false;
     const plan = planPartEdit(pickedProp);
@@ -4301,6 +4337,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // Cmd+G puts the picked part's layer in a new folder; Cmd+Shift+G takes it out of its folder (the folder goes).
   symbolGroupRef.current = (ungroup) => {
+    if (nativePoseOpen) return false; // a native pose open in place: its editor takes these keys
     const level = symbolLevelNow;
     if (!symbolView || !level) return false;
     const layers = level.data.layers, ids = pickedLayerIds();
@@ -4319,6 +4356,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
     return true;
   };
   symbolDeleteRef.current = () => {
+    if (nativePoseOpen) return false; // a native pose open in place: its editor takes these keys
     const level = symbolLevelNow;
     if (!symbolView || !level || frameSelectionRef.current) return false;
     const ids = pickedLayerIds();
@@ -4473,6 +4511,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // Duplicate Layer keeps what was edited on the layer too.
   symbolPoseKeyRef.current = (event) => {
+    if (nativePoseOpen) return false; // a native pose open in place: its editor takes these keys
     if (!symbolView || (event.metaKey === false && event.ctrlKey === false) || event.altKey) return false;
     if (event.code === "KeyC" && !event.shiftKey) return pickedLayerIds().length ? copyPoseLayers() : false;
     if (event.code === "KeyX" && !event.shiftKey) return pickedLayerIds().length ? cutPoseLayers() : false;
@@ -5025,6 +5064,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         return;
       }
       if (symbolDeleteRef.current?.()) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+      // A native pose open in place: Delete is its editor's (the picked parts' layers, or points). Never the character in the scene.
+      if (nativePoseOpenRef.current) return;
       if (selectedObjectIds.length === 0) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -5201,8 +5242,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
         return;
       }
       if (event.key === "Enter" && symbolViewRef.current) {
-        // Inside a pose Return plays and pauses the pose's own timeline (as its play button does).
+        // Inside a pose Return plays and pauses the pose's own timeline (as its play button does): a native pose open in place plays in
+        // its editor, the older pose view by its own state.
         event.preventDefault();
+        if (nativePoseOpenRef.current) { setNativePlayToggle((count) => count + 1); return; }
         setSymbolView((state) => (state ? { ...state, playing: !state.playing } : state));
         return;
       }
@@ -5215,6 +5258,9 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
 
       const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      // A native pose open in place: arrows nudge its parts, H flips them, ⌘D / ⌘G duplicate / group them, all in its editor. The scene's
+      // nudge, flip, duplicate and group of the selected character must not run as well.
+      if (nativePoseOpenRef.current && (arrows[event.key] || event.code === "KeyH" || ((event.metaKey || event.ctrlKey) && (event.code === "KeyD" || event.code === "KeyG")))) return;
       if ((event.metaKey || event.ctrlKey) && !event.altKey && event.code === "KeyG" && symbolGroupRef.current?.(event.shiftKey)) { event.preventDefault(); return; }
       if (!event.metaKey && !event.ctrlKey && !event.altKey && event.code === "KeyH" && !/^(input|textarea|select)$/i.test((event.target as HTMLElement | null)?.tagName || "") && symbolFlipRef.current?.(event.shiftKey ? "v" : "h")) { event.preventDefault(); return; }
       if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "d" && symbolDuplicateRef.current?.()) { event.preventDefault(); return; }
@@ -6253,22 +6299,22 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             <div className="cb-canvas-zoom-toolbar" ref={zoomToolbarRef} title="Editor viewport zoom. Hold Space + drag to pan.">
               {/* option 2: one up/down stepper instead of − and ＋; "Fit" lives in the menu */}
               <span className="cb-zoom-stepper" role="group" aria-label="Canvas zoom steps">
-                <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => setCanvasZoom((value) => clampCanvasZoom(value * 1.25))}>
+                <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => setViewZoom((value) => value * 1.25)}>
                   <svg viewBox="0 0 14 8" aria-hidden="true"><path d="M1 7l6-6 6 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
                 </button>
-                <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => setCanvasZoom((value) => clampCanvasZoom(value / 1.25))}>
+                <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => setViewZoom((value) => value / 1.25)}>
                   <svg viewBox="0 0 14 8" aria-hidden="true"><path d="M1 1l6 6 6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
                 </button>
               </span>
               <button type="button" ref={zoomValueRef} className="cb-canvas-zoom-value" aria-haspopup="menu" aria-expanded={zoomMenuOpen} onClick={() => setZoomMenuOpen((open) => !open)}>
-                Canvas {Math.round(canvasFitScale * canvasZoom * 100)}%
+                Canvas {Math.round(shownFitScale * shownZoom * 100)}%
                 <svg className="cb-zoom-chevron" viewBox="0 0 14 8" aria-hidden="true"><path d="M1 1l6 6 6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </button>
               <Popover open={zoomMenuOpen} anchorRef={zoomValueRef} onClose={() => setZoomMenuOpen(false)} align="end" offset={14} className="cb-canvas-zoom-menu cb-zoom-menu-v2" aria-label="Canvas zoom">
-                <button type="button" role="menuitem" className={canvasZoom === 1 ? "current" : ""} onClick={() => { setCanvasZoom(1); resetCanvasView(); setZoomMenuOpen(false); }}>Fit in Window</button>
+                <button type="button" role="menuitem" className={shownZoom === 1 ? "current" : ""} onClick={() => { fitView(); setZoomMenuOpen(false); }}>Fit in Window</button>
                 {[25, 50, 75, 100, 200, 500, 1000, 1500, 2000].map((percent) => (
-                  <button key={percent} type="button" role="menuitem" className={canvasZoom !== 1 && Math.round(canvasFitScale * canvasZoom * 100) === percent ? "current" : ""}
-                    onClick={() => { setCanvasZoom(clampCanvasZoom((percent / 100) / Math.max(0.01, canvasFitScale))); setZoomMenuOpen(false); }}>
+                  <button key={percent} type="button" role="menuitem" className={shownZoom !== 1 && Math.round(shownFitScale * shownZoom * 100) === percent ? "current" : ""}
+                    onClick={() => { setViewZoom((percent / 100) / Math.max(0.01, shownFitScale)); setZoomMenuOpen(false); }}>
                     {percent}%
                   </button>
                 ))}
@@ -6464,6 +6510,13 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                     onScope={setNativeScope}
                     pointTool={activeTool === "direct"}
                     onPointTool={(on) => setActiveTool(on ? "direct" : "select")}
+                    onNotice={showNotice}
+                    zoom={poseZoom}
+                    onZoom={(value) => setPoseZoom(clampCanvasZoom(value))}
+                    onFitScale={setPoseFitScale}
+                    viewReset={poseViewReset}
+                    zoomTool={activeTool === "zoom"}
+                    playToggle={nativePlayToggle}
                   />
                 )}
               </div>

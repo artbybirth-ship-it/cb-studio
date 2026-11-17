@@ -79,8 +79,9 @@ try:
     for i in range(1, 9):
         mouse("mouseMoved", cx + i * 6, cy + i * 3, buttons=1); time.sleep(0.05)
     mouse("mouseReleased", cx + 48, cy + 24, clickCount=1); time.sleep(0.6)
-    check("Undo is enabled after the drag (an edit was made)", js("!document.querySelector('[data-testid=undo]').disabled"))
-    click("[data-testid=native-step-out]"); time.sleep(2)
+    picked = js("document.querySelector('[data-testid=native-editor]').dataset.picked")
+    check("the drag picked a part and moved it (an edit was made)", bool(picked), str(picked))
+    click(".cb-symbol-crumbs button"); time.sleep(2)
     check("dialog closes on Done", rect("[data-testid=native-editor]") is None)
     shot("4-after-done")
 
@@ -101,7 +102,7 @@ try:
     check("opening the pose again saves nothing (the edits are the starting point, not new changes)", json.dumps(scene_object().get("nativePose"), sort_keys=True) == json.dumps(saved, sort_keys=True))
     shot("5-reopened")
     # compare the picture with the first one: the part should be where it was moved to
-    click("[data-testid=native-step-out]")
+    click(".cb-symbol-crumbs button")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

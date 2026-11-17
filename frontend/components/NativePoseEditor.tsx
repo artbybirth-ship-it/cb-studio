@@ -14,7 +14,7 @@ import { createPortal } from "react-dom";
 import { colourAtPoint, paletteOf, relativesOf } from "../lib/native/character";
 import type { Ease, FlaDocument, FlaElement, Keyframe, Layer, Matrix, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
-import { clearKeyframe, commit, copyFrames, cutFrames, deleteLayers, duplicateLayers, pasteFrames, type FrameClip, history, insertBlankKeyframe, insertLayer, renameLayer, setLayerLocked, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setEase, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
+import { blankKeyframes, clearKeyframe, commit, copyFrames, moveFrames, reverseFrames, setTween, cutFrames, deleteLayers, duplicateLayers, pasteFrames, type FrameClip, history, insertBlankKeyframe, insertLayer, renameLayer, setLayerLocked, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setEase, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
 import { addAnchor, convertAnchor, deleteAnchors, edgeAt, moveAnchors, movePoint, samePoint, shapePoints, type PointRef, type Pt } from "../lib/native/points";
 import { innerFrame, layerStateAt } from "../lib/native/evaluate";
 import { applyEdits, editsOf, parseEdits, serializeEdits, type NativeEdits } from "../lib/native/store";
@@ -22,7 +22,15 @@ import { IDENTITY, addPicture, importElements, invert, mul, poseScale, registerL
 import { copyClip, readClip } from "../lib/native/clipboard";
 import { loadNativeDoc } from "../lib/native/loadDoc";
 import { EaseControl } from "./Timeline";
-import { PoseLibraryPictures } from "./SymbolTimeline";
+import SymbolTimeline, { PoseLibraryPictures, type FlaFrame, type FrameOp } from "./SymbolTimeline";
+import { arrangeNative, arrangedPositions, arrangementOf, asTheFileHasThem, fileArrangement, flaSymbolOf } from "../lib/native/timelineView";
+import PartMenu, { type PartAction } from "./PartMenu";
+import { arrangeSymbolLayers, groupLayers, ungroupLayer } from "../lib/symbolLayers";
+import { useEscClose } from "../lib/escClose";
+import type { SymbolLayerEdit } from "../types";
+import { createjsValuesOf, withCreatejsValues } from "../lib/native/legacy";
+import { fileAnchors, type Anchor } from "../lib/symbolKeys";
+import { autoNameAt, autoNames, layerKey } from "../lib/native/names";
 import type { MediaLibraryItem } from "../lib/mediaLibrary";
 import { pivotOf, propsOf, withProps, type PartProps } from "../lib/native/props";
 import { apply as applyM, boxAround, cornersOf, handleTransform, invert as invertM, mul as mulM, HANDLE_AT, type Box, type Handle } from "../lib/native/handles";
@@ -99,7 +107,7 @@ function inkBox(draw: (ctx: OffscreenCanvasRenderingContext2D) => void): { x: nu
 /** The colour tools' view of the open level (what the Animate player's colour finder answers), for the scene editor's dropper and the like. */
 export type NativeColourFrame = { getBoundingClientRect: () => DOMRect; contentWindow: { cbColorAt: (x: number, y: number, scope: string) => unknown; cbColorPalette: (scope: string) => unknown; cbColorRelatives: (hex: string, scope: string) => unknown } };
 
-export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl, uploadPicture, embedded, crumbs, onStepOut, colourPick, onColourFrame, onScope, pointTool, onPointTool, redrawKey, note: outsideNote, sceneHistory }: {
+export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl, uploadPicture, embedded, crumbs, onStepOut, colourPick, onColourFrame, onScope, pointTool, onPointTool, onNotice, redrawKey, note: outsideNote, sceneHistory, zoom: zoomProp, onZoom, onFitScale, viewReset, zoomTool, playToggle }: {
   doc: FlaDocument; renderer: NativeRenderer; poses: Pose[];
   /** Where this character's .fla came from: lets a copied part be found again after a reload. */
   flaUrl?: string;
@@ -124,6 +132,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   pointTool?: boolean;
   /** Told when point editing is turned on or off here (A, or the button), so the scene's tool rail follows. */
   onPointTool?: (on: boolean) => void;
+  /** In place: messages go to the scene editor's notice (the timeline panel has no line of its own for them). */
+  onNotice?: (text: string) => void;
   /** Draw again when this changes (the character's colour rules changed). */
   redrawKey?: string;
   /** A message from outside (older edits converted…), shown with the editor's own notes. */
@@ -133,6 +143,18 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
    * timelines are taken again from `edits`, the character's edits as the scene now has them.
    */
   sceneHistory?: { turn: number; edits?: NativeEdits | null; undo: () => void; redo: () => void };
+  /** In place: the view's zoom, set by the scene editor (⌘+ / ⌘− / ⌘0 / ⌘1, its zoom box). 1 = the open level fitted to the stage. */
+  zoom?: number;
+  /** Asked for another zoom from here (the wheel / a pinch, the Zoom tool's click), about the pointer. */
+  onZoom?: (zoom: number) => void;
+  /** Told what zoom 1 is on screen (CSS pixels per unit of the open level), for the scene editor's zoom box and Actual Size. */
+  onFitScale?: (scale: number) => void;
+  /** In place: changes when the view goes back to the middle (⌘0, Fit in Window). */
+  viewReset?: number;
+  /** In place: the scene's Zoom tool is on (a click zooms in there, ⌥-click zooms out). */
+  zoomTool?: boolean;
+  /** In place: changes when the scene editor's Enter / Return plays or pauses the pose (as the timeline's play button does). */
+  playToggle?: number;
 }) {
   const [hist, setHist] = useState<History<Working>>(() => {
     const map = new Map<string, Timeline>();
@@ -174,11 +196,18 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const [allLayers, setAllLayers] = useState(false);
   /** Point editing (A, Animate's Subselection tool): the selected drawn shape shows its anchor points, which can be dragged. */
   const [pointMode, setPointMode] = useState(false);
+  /** In place: the keyframe picked in the timeline panel (its value boxes show it), and the panel's live preview of a keyframe drag. */
+  const [keyPick, setKeyPick] = useState<{ layer: number; frame: number } | null>(null);
+  /** In place: the right-click menu of a part (the older pose view's menu, shared). */
+  const [partMenu, setPartMenu] = useState<{ x: number; y: number; hasPart: boolean } | null>(null);
+  const [panelPreview, setPanelPreview] = useState<Map<number, Layer> | null>(null);
   /** The selected anchors of the shape being point-edited, in its own space (click, Shift-click, a box; drawn filled). */
   const [selPts, setSelPts] = useState<Pt[]>([]);
   const togglePointMode = () => { const on = !pointMode; setPointMode(on); onPointTool?.(on); };
   useEffect(() => { if (pointTool !== undefined) setPointMode(pointTool); }, [pointTool]);
   const [playing, setPlaying] = useState(false);
+  const [playSeen, setPlaySeen] = useState(playToggle);
+  if (playSeen !== playToggle) { setPlaySeen(playToggle); setPlaying((p) => !p); }
   const [drag, setDragState] = useState<Drag | null>(null);
   /** The drag as last set (not as last drawn): a release that comes before the screen has caught up with a slow move still keeps that move. */
   const dragNow = useRef<Drag | null>(null);
@@ -188,6 +217,16 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   /** A Properties number while it is being dragged: shown on the stage, kept as one undo step when the drag ends. */
   const [valuePreview, setValuePreview] = useState<{ layer: number; next: Layer } | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, w: 500, h: 900 });
+  /** In place: how far the view is moved from the middle, in canvas pixels (Space-drag or the middle button). */
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  /** A zoom asked for from here (wheel, Zoom tool): the canvas point, from the stage's middle, that stays under the pointer when it arrives. */
+  const zoomAnchor = useRef<{ zoom: number; at: [number, number] } | null>(null);
+  const [zoomSeen, setZoomSeen] = useState(zoomProp ?? 1);
+  const [resetSeen, setResetSeen] = useState(viewReset);
+  /** Space held (a drag moves the view), and a view move in progress. */
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const panDrag = useRef<{ x: number; y: number; from: { x: number; y: number } } | null>(null);
+  const [panning, setPanning] = useState(false);
   const [note, setNote] = useState("");
   const canvas = useRef<HTMLCanvasElement>(null);
   /** The stage's size on screen (CSS pixels); its canvas has a third more pixels. In place it follows the scene's canvas area. */
@@ -211,10 +250,11 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const shown: Timeline | undefined = useMemo(() => {
     if (!base) return undefined;
     if ((drag?.kind === "part" || drag?.kind === "point" || drag?.kind === "anchors" || drag?.kind === "handle" || drag?.kind === "pivot") && drag.preview) return { ...base, layers: base.layers.map((l, i) => drag.preview!.get(i) ?? l) };
+    if (panelPreview) return { ...base, layers: base.layers.map((l, i) => panelPreview.get(i) ?? l) };
     if (easePreview) return { ...base, layers: base.layers.map((l, i) => (i === easePreview.layer ? setEase(l, easePreview.at, easeOfNumber(easePreview.value)) : l)) };
     if (valuePreview) return { ...base, layers: base.layers.map((l, i) => (i === valuePreview.layer ? valuePreview.next : l)) };
     return base;
-  }, [base, drag, easePreview, valuePreview]);
+  }, [base, drag, easePreview, valuePreview, panelPreview]);
   const length = shown?.length || 1;
   const fps = doc.fps;
 
@@ -343,6 +383,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const doRedo = () => (sceneHistory ? sceneHistory.redo() : stepHistory(redo));
 
   // Keys are taken in the capture phase and stopped, so the scene editor behind a dialog never also acts on them (F6, ⌘Z, ⌘C, ⌘V…).
+  const embeddedRef = useRef(Boolean(embedded));
+  embeddedRef.current = Boolean(embedded);
   const copyRef = useRef<() => void>(() => {});
   const pasteRef = useRef<() => void>(() => {});
   useEffect(() => {
@@ -350,8 +392,20 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       if (isTyping(e.target)) return;
       const mod = e.metaKey || e.ctrlKey;
       const take = () => { e.preventDefault(); e.stopPropagation(); };
+      // In place the timeline panel takes the frame keys on the frames selected in it (F5, F6, F7, ⌥⌘C / X / V, ⌘⇧V, and , / . to step).
+      if (embeddedRef.current && (/^F[567]$/.test(e.key) || (mod && e.altKey && /^Key[CXV]$/.test(e.code)) || (mod && e.shiftKey && e.code === "KeyV") || e.key === "," || e.key === ".")) return;
       // In place, ⌘Z is the scene's (it reaches the scene editor); here it is the editor's own.
       if (mod && e.code === "KeyZ") { if (sceneHistory) return; take(); if (e.shiftKey) doRedo(); else doUndo(); return; }
+      // In place, the part menu's shortcuts (as the older pose view had them): ⌘X cut, ⌘F / ⌘B paste in front / back, ⌘↑ / ⌘↓ arrange
+      // (⇧: all the way), ⌘D duplicate the layer, ⌘G / ⇧⌘G group / ungroup, H / ⇧H flip.
+      if (embeddedRef.current && !e.altKey) {
+        const act: PartAction | null = mod && e.code === "KeyX" ? "cut"
+          : mod && !e.shiftKey && e.code === "KeyF" ? "pasteFront" : mod && !e.shiftKey && e.code === "KeyB" ? "pasteBack"
+          : mod && e.key === "ArrowUp" ? (e.shiftKey ? "toFront" : "forward") : mod && e.key === "ArrowDown" ? (e.shiftKey ? "toBack" : "backward")
+          : mod && !e.shiftKey && e.code === "KeyD" ? "duplicate" : mod && e.code === "KeyG" ? (e.shiftKey ? "ungroup" : "group")
+          : !mod && e.code === "KeyH" ? (e.shiftKey ? "flipV" : "flipH") : null;
+        if (act) { take(); partActionRef.current(act); return; }
+      }
       // Frames: ⌥⌘C / ⌥⌘X / ⌥⌘V always, ⌘⇧V pastes them back where they were copied from; ⌘C / ⌘V act on frames after a press in the timeline.
       if (mod && e.altKey && e.code === "KeyC") { take(); framesRef.current.copy(false); return; }
       if (mod && e.altKey && e.code === "KeyX") { take(); framesRef.current.copy(true); return; }
@@ -398,7 +452,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     copyClip({ flaUrl, docName: doc.name, rootItem: stack[0].item, rootScale: poseScale(doc, stack[0].item), elements, label }, loadedHere);
     setNote(`Copied ${label} from ${doc.name}`);
   }, [shown, elIndex, others, layerIndex, frame, levelToPose, flaUrl, doc, stack, loadedHere]);
-  const pastePart = useCallback(async () => {
+  const pastePart = useCallback(async (place: "above" | "front" | "back" = "front") => {
     const found = readClip();
     if (!found || !base) { setNote("Nothing copied yet: select a part, then copy it (⌘C)"); return; }
     try {
@@ -414,16 +468,18 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       const first = pasted[0];
       const name = pasted.length > 1 ? `Pasted ${pasted.length} parts` : `Pasted ${first.k === "instance" ? short(first.item).replace(/^Pasted from [^/]*\//, "") : first.k}`;
       const layer: Layer = { name, fileName: "", type: "normal", parent: null, hidden: false, frames: [{ i: 0, d: Math.max(1, base.length), elements }] };
-      const layers = [layer, ...base.layers.map((l) => (l.parent != null ? { ...l, parent: l.parent + 1 } : l))];
+      // ⌘V above the picked layer (as the older pose view), ⌘F in front of everything, ⌘B behind everything.
+      const at = place === "front" ? 0 : place === "back" ? base.layers.length : Math.max(0, Math.min(base.layers.length, layerIndex));
+      const layers = insertLayer(base.layers, at, layer);
       const map = new Map(working);
       map.set(symbol, { ...base, layers, length: lengthOf(layers) });
       setHist((h) => commit(h, map));
-      setLayerIndex(0); setElIndex(0); setFrame(0); setRange([0, 0]);
+      setLayerIndex(at); setElIndex(0); setOthers([]); setFrame(0); setRange([0, 0]);
       setNote(`${name} from ${found.clip.docName} as a new layer`);
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Could not paste");
     }
-  }, [base, working, symbol, doc, stack, levelToPose, loadedHere]);
+  }, [base, working, symbol, doc, stack, levelToPose, loadedHere, layerIndex]);
   /** Swap: the selected part's symbol becomes the copied part (same place, same animation) on every keyframe of its layer. */
   const swapPart = useCallback(async () => {
     const found = readClip();
@@ -450,15 +506,15 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     }
   }, [base, working, symbol, doc, stack, elIndex, layerIndex, frame, loadedHere]);
   copyRef.current = copyPart;
-  pasteRef.current = () => void pastePart();
+  pasteRef.current = () => void pastePart(embedded ? "above" : "front");
 
   // ---- new layer from the library: a symbol of this file, a picture of the Backgrounds / FX libraries, or a picture file (Animate: drag from the Library)
   const [libMenu, setLibMenu] = useState<{ x: number; y: number } | null>(null);
   const [libFilter, setLibFilter] = useState("");
   /** The new layer goes above the picked layer, holds the element for the whole timeline, and is selected. One undo step. */
-  const addLayerWith = useCallback((el: FlaElement, name: string) => {
+  const addLayerWith = useCallback((el: FlaElement, name: string, above?: number) => {
     if (!base) return;
-    const at = Math.max(0, Math.min(base.layers.length, layerIndex));
+    const at = Math.max(0, Math.min(base.layers.length, above ?? layerIndex));
     const layer: Layer = { name, fileName: "", type: "normal", parent: null, hidden: false, frames: [{ i: 0, d: Math.max(1, base.length), elements: [el] }] };
     const layers = insertLayer(base.layers, at, layer);
     const map = new Map(working);
@@ -469,7 +525,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   }, [base, working, symbol, layerIndex]);
   /** The middle of what the stage shows, in this level's own space: where a new layer's artwork is centred. */
   const viewCentre = (): [number, number] => [view.x + view.w / 2, view.y + view.h / 2];
-  const addSymbolLayer = useCallback((item: string) => {
+  const addSymbolLayer = useCallback((item: string, above?: number) => {
     const symbolInfo = doc.symbols.get(item);
     if (!symbolInfo) return;
     renderer.overrides.clear();
@@ -479,10 +535,10 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     const [cx, cy] = viewCentre();
     // Centred on the stage, turning about its own middle.
     const el: FlaElement = { k: "instance", item, symbolType: symbolInfo.type, m: [1, 0, 0, 1, cx - middle[0], cy - middle[1]], pivot: middle, loop: "loop", first: 0 };
-    addLayerWith(el, readable(item));
+    addLayerWith(el, readable(item), above);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc, renderer, working, addLayerWith, view]);
-  const addPictureLayer = useCallback(async (picture: { url?: string; file?: File; name: string }) => {
+  const addPictureLayer = useCallback(async (picture: { url?: string; file?: File; name: string }, above?: number) => {
     try {
       setNote("Adding the picture…");
       let url = picture.url, bytes: Uint8Array | undefined;
@@ -494,7 +550,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       // Fitted into 40% of what the stage shows (never enlarged), centred.
       const [cx, cy] = viewCentre();
       const k = Math.min(1, (view.w * 0.4) / Math.max(1, added.width), (view.h * 0.4) / Math.max(1, added.height));
-      addLayerWith({ k: "bitmap", item: added.item, m: [k, 0, 0, k, cx - (added.width * k) / 2, cy - (added.height * k) / 2] }, picture.name.replace(/\.[a-z0-9]+$/i, "") || "Picture");
+      addLayerWith({ k: "bitmap", item: added.item, m: [k, 0, 0, k, cx - (added.width * k) / 2, cy - (added.height * k) / 2] }, picture.name.replace(/\.[a-z0-9]+$/i, "") || "Picture", above);
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Could not add the picture");
     }
@@ -514,6 +570,9 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     const data = ctx.getImageData(0, 0, SIZE, SIZE).data;
     let x0 = SIZE, y0 = SIZE, x1 = -1, y1 = -1;
     for (let y = 0; y < SIZE; y += 1) for (let x = 0; x < SIZE; x += 1) if (data[(y * SIZE + x) * 4 + 3] > 8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    // Each level opens fitted to the stage (stepping in or out frames the new level).
+    setPan({ x: 0, y: 0 });
+    onZoom?.(1);
     if (x1 < 0) { setView({ x: -250, y: -450, w: 500, h: 900 }); return; }
     setView({ x: (x0 - SIZE / 2) / S, y: (y0 - SIZE / 2) / S, w: (x1 - x0) / S, h: (y1 - y0) / S });
     setFrame(0); setRange([0, 0]); setLayerIndex(0); setElIndex(null); setOthers([]);
@@ -528,10 +587,61 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layoutKey, renderer]);
 
+  // The view: the open level fitted to the stage, then zoomed about the stage's middle and moved by `pan` (canvas pixels). Drawing, picking,
+  // dragging, the handles and the colour tools all go through fit(), so they follow the zoom.
+  const zoom = embedded ? zoomProp ?? 1 : 1;
+  // A new zoom keeps the point it was asked about where it is (the middle for ⌘+ / ⌘−); ⌘0 brings the view back to the middle.
+  if (zoomSeen !== zoom) {
+    const a = zoomAnchor.current && Math.abs(zoomAnchor.current.zoom - zoom) < 1e-9 ? zoomAnchor.current.at : [0, 0];
+    const r = zoom / zoomSeen;
+    setZoomSeen(zoom);
+    setPan({ x: a[0] - (a[0] - pan.x) * r, y: a[1] - (a[1] - pan.y) * r });
+  }
+  if (resetSeen !== viewReset) { setResetSeen(viewReset); setPan({ x: 0, y: 0 }); }
+  /** Zoom by a factor about a canvas point (from the stage's middle); the scene editor keeps the zoom (same limits as its canvas). */
+  const zoomAt = (factor: number, at: [number, number]) => {
+    if (!onZoom) return;
+    const next = Math.max(0.1, Math.min(200, zoom * factor));
+    zoomAnchor.current = { zoom: next, at };
+    onZoom(next);
+  };
+  const wheelRef = useRef<(e: WheelEvent) => void>(() => {});
+  wheelRef.current = (e) => {
+    const el = canvas.current;
+    if (!embedded || !onZoom || !el) return;
+    // The wheel and a trackpad pinch zoom about the pointer, as on the scene's canvas (and never zoom the page).
+    e.preventDefault();
+    const r = el.getBoundingClientRect();
+    zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, [(e.clientX - r.left) * (el.width / r.width) - el.width / 2, (e.clientY - r.top) * (el.height / r.height) - el.height / 2]);
+  };
+  useEffect(() => {
+    const el = canvas.current;
+    if (!el) return;
+    const on = (e: WheelEvent) => wheelRef.current(e);
+    el.addEventListener("wheel", on, { passive: false });
+    return () => el.removeEventListener("wheel", on);
+  }, []);
+  const inPlace = Boolean(embedded);
+  useEffect(() => {
+    if (!inPlace) return;
+    const down = (e: KeyboardEvent) => { if (e.code === "Space" && !isTyping(e.target)) setSpaceHeld(true); };
+    const up = (e: KeyboardEvent) => { if (e.code === "Space") setSpaceHeld(false); };
+    const away = () => setSpaceHeld(false);
+    window.addEventListener("keydown", down, true);
+    window.addEventListener("keyup", up, true);
+    window.addEventListener("blur", away);
+    return () => { window.removeEventListener("keydown", down, true); window.removeEventListener("keyup", up, true); window.removeEventListener("blur", away); };
+  }, [inPlace]);
   const fit = useCallback((w: number, h: number) => {
-    const s = Math.min(w / (view.w * 1.15), h / (view.h * 1.15));
-    return { s, tx: w / 2 - (view.x + view.w / 2) * s, ty: h / 2 - (view.y + view.h / 2) * s };
-  }, [view]);
+    const s0 = Math.min(w / (view.w * 1.15), h / (view.h * 1.15));
+    const tx0 = w / 2 - (view.x + view.w / 2) * s0, ty0 = h / 2 - (view.y + view.h / 2) * s0;
+    return { s: s0 * zoom, tx: w / 2 + (tx0 - w / 2) * zoom + pan.x, ty: h / 2 + (ty0 - h / 2) * zoom + pan.y };
+  }, [view, zoom, pan]);
+  // What zoom 1 is on screen, for the scene editor's zoom box (CSS pixels per unit).
+  useEffect(() => {
+    if (!onFitScale) return;
+    onFitScale(Math.min(canvasW / (view.w * 1.15), canvasH / (view.h * 1.15)) * (stageCss.w / canvasW));
+  }, [onFitScale, view, canvasW, canvasH, stageCss.w]);
 
   // The colour tools' view of what the stage shows (the open level at this frame, with the edits): registered once, reading the latest state.
   const colourState = useRef({ symbol, frame, working, fit });
@@ -647,7 +757,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
 
   /** Double-click: step into the symbol under the pointer (and select what lies under it there); on empty stage, step back out. */
   const onStageDouble = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!shown || !canvas.current) return;
+    if (!shown || !canvas.current || (embedded && (zoomTool || spaceHeld))) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const cx = (e.clientX - rect.left) * (e.currentTarget.width / rect.width), cy = (e.clientY - rect.top) * (e.currentTarget.height / rect.height);
     // Point editing a shape: a double-click on one of its edges adds an anchor there (the outline keeps its shape).
@@ -769,7 +879,31 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     return best ? { ref: best.ref, layer: layerIndex, el: elIndex } : null;
   }
 
+  /** In place, a right-click on the stage: the part under the pointer is picked (unless it is picked already) and its menu opens. */
+  const onStageContext = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!embedded) return;
+    e.preventDefault();
+    focusRef.current = "stage";
+    const rect = e.currentTarget.getBoundingClientRect();
+    const hit = pick((e.clientX - rect.left) * (e.currentTarget.width / rect.width), (e.clientY - rect.top) * (e.currentTarget.height / rect.height));
+    if (hit && !selected().some((o) => same(o, hit))) { setLayerIndex(hit.layer); setElIndex(hit.el); setOthers([]); }
+    setPartMenu({ x: e.clientX, y: e.clientY, hasPart: Boolean(hit) });
+  };
   const onStageDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.button === 2) return; // the right button opens the part menu (onStageContext)
+    // In place: Space-drag or the middle button moves the view; the Zoom tool's click zooms in there (⌥: out).
+    if (embedded && (e.button === 1 || (e.button === 0 && spaceHeld))) {
+      e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      panDrag.current = { x: e.clientX, y: e.clientY, from: pan };
+      setPanning(true);
+      return;
+    }
+    if (embedded && zoomTool && e.button === 0) {
+      const [cx, cy] = toCanvas(e);
+      zoomAt(e.altKey ? 1 / 1.25 : 1.25, [cx - e.currentTarget.width / 2, cy - e.currentTarget.height / 2]);
+      return;
+    }
     focusRef.current = "stage";
     if (colourPick) { colourPick(e.clientX, e.clientY, { altKey: e.altKey, shiftKey: e.shiftKey }); return; }
     const [cx, cy] = toCanvas(e);
@@ -823,6 +957,12 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     setDrag({ kind: "part", start: [cx, cy], held });
   };
   const onStageMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const moving = panDrag.current;
+    if (moving) {
+      const k = e.currentTarget.width / e.currentTarget.getBoundingClientRect().width;
+      setPan({ x: moving.from.x + (e.clientX - moving.x) * k, y: moving.from.y + (e.clientY - moving.y) * k });
+      return;
+    }
     if (!drag || !shown || !canvas.current) return;
     const [cx, cy] = toCanvas(e);
     if (drag.kind === "box") { setDrag({ ...drag, to: [cx, cy] }); return; }
@@ -855,6 +995,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     setDrag({ ...drag, preview });
   };
   const onStageUp = () => {
+    if (panDrag.current) { panDrag.current = null; setPanning(false); return; }
     const drag = dragNow.current;
     if (drag?.kind === "anchors" && drag.to) setSelPts(drag.to);
     if (drag?.kind === "box" && drag.points) {
@@ -1144,8 +1285,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   );
   const stageEl = (
         <div style={{ position: "relative", width: stageCss.w + 2, height: stageCss.h + 2, flex: "none" }}>
-        <canvas data-testid="stage" ref={canvas} width={canvasW} height={canvasH} style={{ border: "1px solid #ccc", width: stageCss.w, height: stageCss.h, touchAction: "none", cursor: colourPick ? "crosshair" : drag?.kind === "part" || drag?.kind === "point" ? "grabbing" : drag?.kind === "box" ? "crosshair" : "default" }}
-          onPointerDown={onStageDown} onPointerMove={onStageMove} onPointerUp={onStageUp} onDoubleClick={onStageDouble} />
+        <canvas data-testid="stage" ref={canvas} width={canvasW} height={canvasH} style={{ border: "1px solid #ccc", width: stageCss.w, height: stageCss.h, touchAction: "none", cursor: panning ? "grabbing" : embedded && spaceHeld ? "grab" : embedded && zoomTool ? "zoom-in" : colourPick ? "crosshair" : drag?.kind === "part" || drag?.kind === "point" ? "grabbing" : drag?.kind === "box" ? "crosshair" : "default" }}
+          onPointerDown={onStageDown} onPointerMove={onStageMove} onPointerUp={onStageUp} onDoubleClick={onStageDouble} onContextMenu={onStageContext} />
         {handleModel && canvas.current && (() => {
           // The box follows a drag in progress (the preview), the handles sit on it.
           const el = canvas.current, { s, tx, ty } = fit(el.width, el.height), k = stageCss.w / el.width;
@@ -1288,29 +1429,291 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         </div>
       )
   );
+  // ---- In place: the scene editor's own timeline panel (components/SymbolTimeline.tsx), the one timeline UI of every pose. It shows this
+  // native timeline as it is (nothing laid over it) and its commands run on the native timeline here.
+  const original = doc.symbols.get(symbol)?.timeline;
+  const panelSymbol = useMemo(() => (shown ? flaSymbolOf(shown, { name: symbol, js: renderer.classOfItem(symbol), fps, original, classOf: (item) => renderer.classOfItem(item) }) : null),
+    [shown, symbol, renderer, fps, original]);
+  const say = useCallback((text: string) => { setNote(text); onNotice?.(text); }, [onNotice]);
+  const commitLayers = (layers: Layer[]) => {
+    if (!base) return;
+    const map = new Map(working);
+    map.set(symbol, { ...base, layers, length: lengthOf(layers) });
+    setHist((h) => commit(h, map));
+  };
+  /** The name the player knows a part by (its own, else the one it gives an unnamed one): the panel lights the rows of the parts picked on the stage. */
+  const partName = (sel: Sel): string => {
+    const layer = shown?.layers[sel.layer], state = layer && layerStateAt(layer, frame);
+    const el = state?.key.elements[sel.el];
+    if (!layer || !state || !el || (el.k !== "instance" && el.k !== "bitmap")) return "";
+    return el.name || autoNameAt(original ? autoNames(original) : undefined, layerKey(shown!.layers, sel.layer), state.key.i, sel.el);
+  };
+  const pickedNames = selected().map(partName).filter(Boolean);
+  /** The part of a layer the value boxes and edits go to: the one picked on the stage when it is on that layer, else the layer's first. */
+  const partOn = (layer: number, at: number): number => (elIndex != null && layerIndex === layer ? elIndex : (() => {
+    const key = base?.layers[layer] && layerStateAt(base.layers[layer], at)?.key;
+    const i = key ? key.elements.findIndex((el) => el.k === "instance" || el.k === "bitmap") : -1;
+    return i >= 0 ? i : 0;
+  })());
+  const keyValues = (() => {
+    if (!keyPick || !base?.layers[keyPick.layer]) return null;
+    const el = layerStateAt(base.layers[keyPick.layer], keyPick.frame)?.key.elements[partOn(keyPick.layer, keyPick.frame)];
+    return { layer: keyPick.layer, frame: keyPick.frame, values: el ? (createjsValuesOf(el) as unknown as Record<string, number>) : null };
+  })();
+  /** The panel's keyframes of a layer after a drag or an add (as "anchors": where each keyframe was → where it is now) applied natively. */
+  const keysApplied = (index: number, anchors: Anchor[]): Layer | null => {
+    const layer = base?.layers[index], fla = panelSymbol?.layers[index];
+    if (!layer || !fla) return null;
+    const now = fileAnchors(fla);
+    let out = layer;
+    if (anchors.length === now.length + 1) {
+      const added = anchors.find((a) => !now.some((b) => b[0] === a[0]));
+      if (added) out = insertKeyframe(out, Math.round(added[1]));
+    } else if (anchors.length === now.length) {
+      anchors.forEach((a, k) => { if (k < anchors.length - 1 && a[1] !== now[k][1]) out = moveKeyframe(out, now[k][0], Math.round(a[1])); });
+    }
+    return out === layer ? null : out;
+  };
+  /** One frame operation of the panel on the frames selected in it (layers, from … to). One undo step. */
+  const runPanelOp = (op: FrameOp, sel: { layers: number[]; from: number; to: number }, by = 0) => {
+    if (!base) return;
+    const clip = frameClipboard;
+    if (op === "paste-place") {
+      if (!clip || clip.symbol !== symbol) { say("Nothing to paste in place: copy keyframes first (⌘C)."); return; }
+      sel = { layers: [clip.layer], from: clip.from, to: clip.from };
+      op = "paste";
+    }
+    const ids = sel.layers.filter((i) => base.layers[i] && base.layers[i].type !== "folder" && !base.layers[i].locked);
+    if (!ids.length) { say("These layers can't be changed here (locked layers and folders)."); return; }
+    const count = sel.to - sel.from + 1;
+    const per = (change: (l: Layer) => Layer): boolean => {
+      let changed = false;
+      const layers = base.layers.map((l, i) => { if (!ids.includes(i)) return l; const next = change(l); if (next !== l) changed = true; return next; });
+      if (changed) commitLayers(layers);
+      return changed;
+    };
+    const startsTouched = (l: Layer) => [...new Set(Array.from({ length: count }, (_, n) => layerStateAt(l, sel.from + n)?.key.i).filter((i): i is number => i != null))];
+    switch (op) {
+      case "insert-frame": per((l) => insertFrames(l, sel.from, count)); return;
+      case "remove-frames": if (!per((l) => removeFrames(l, sel.from, sel.to))) say("The first frame of a layer can't be removed."); else setFrame((f) => Math.min(f, sel.from)); return;
+      case "insert-keyframe": per((l) => { let out = l; for (let f = sel.from; f <= sel.to; f += 1) if (!out.frames.some((k) => k.i === f)) out = insertKeyframe(out, f); return out; }); return;
+      case "blank-keyframe": if (!per((l) => insertBlankKeyframe(l, sel.from))) say("There is no frame to put a blank keyframe on there."); return;
+      case "clear-keyframe": per((l) => { let out = l; for (const k of l.frames) if (k.i > 0 && k.i >= sel.from && k.i <= sel.to) out = clearKeyframe(out, k.i); return out; }); return;
+      case "delete-drawing": if (!per((l) => blankKeyframes(l, sel.from, sel.to))) say("Select a keyframe to delete its drawing (it becomes a blank keyframe)."); return;
+      case "create-tween": case "remove-tween": {
+        const done = per((l) => {
+          let out = l;
+          for (const i of startsTouched(l)) {
+            const k = out.frames.find((x) => x.i === i), next = out.frames.find((x) => x.i === (k ? k.i + k.d : -1));
+            if (!k) continue;
+            if (op === "create-tween" && !k.tween && next && k.elements.some((el) => el.k === "instance")) out = setTween(out, i, "motion");
+            if (op === "remove-tween" && k.tween) out = setTween(out, i, null);
+          }
+          return out;
+        });
+        if (!done) say(op === "create-tween" ? "Add a keyframe where the tween should end first (F6), then create the tween: a classic tween needs a symbol on the keyframe." : "No tween in these frames.");
+        return;
+      }
+      case "copy": case "cut": {
+        frameClipboard = { clips: ids.map((i) => ({ offset: i - ids[0], clip: copyFrames(base.layers[i], sel.from, sel.to) })), from: sel.from, layer: ids[0], symbol };
+        setHasFrames(true);
+        if (op === "cut") per((l) => cutFrames(l, sel.from, sel.to).layer);
+        return;
+      }
+      case "paste": {
+        if (!clip) { say("Nothing to paste: copy frames first."); return; }
+        const layers = base.layers.slice();
+        let skipped = 0;
+        for (const { offset, clip: c } of clip.clips) {
+          const i = sel.layers[0] + offset, layer = layers[i];
+          if (!layer || layer.type === "folder" || layer.locked) { skipped += 1; continue; }
+          layers[i] = pasteFrames(layer, sel.from, c);
+        }
+        commitLayers(layers);
+        if (skipped) say(`${skipped} layer${skipped > 1 ? "s" : ""} of the copy had nowhere to go (locked, a folder, or past the last layer).`);
+        return;
+      }
+      case "move": if (!per((l) => moveFrames(l, sel.from, sel.to, by))) say("No keyframes moved: select frames that hold keyframes (the first keyframe of a layer stays)."); return;
+      case "reverse": if (!per((l) => reverseFrames(l, sel.from, sel.to))) say("Select frames that hold at least two keyframes, then choose Reverse Frames."); return;
+    }
+  };
+  const fileEaseAt = (layer: number, at: number) => {
+    const fileLayer = original?.layers.find((_, i) => base && layerKey(original.layers, i) === layerKey(base.layers, layer));
+    return fileLayer?.frames.find((k) => k.i === at)?.ease;
+  };
+  const setPanelEase = (layer: number, at: number, value: number | null) => edit((l) => setEase(l, at, value == null ? (fileEaseAt(layer, at) ?? {}) : easeOfNumber(value)), layer);
+  const panelEl = embedded && panelSymbol ? (
+    <SymbolTimeline
+      key={`${stack.length}:${symbol}`}
+      crumbs={[...(crumbs || []), ...stack.map((l, i) => (i === 0 ? (poses.find((p) => p.item === l.item)?.name || readable(l.item)) : readable(l.item)))]}
+      symbol={panelSymbol}
+      frame={frame}
+      playing={playing}
+      // Like a character's older edits: no arrangement edit while the layers are as the file has them (the panel then offers no "reset layers").
+      layerEdit={base && !asTheFileHasThem(base, original) ? arrangementOf(base) : undefined}
+      onLayerEdit={(change) => {
+        if (!base || !panelSymbol) return;
+        const next = change(arrangementOf(base));
+        const layers = next ? arrangeNative(base, panelSymbol.layers, next) : fileArrangement(base, original ?? base);
+        commitLayers(layers);
+        if (layers.length !== base.layers.length) { setElIndex(null); setOthers([]); setLayerIndex(0); }
+      }}
+      onDuplicateLayers={(ids) => {
+        if (!base) return;
+        const made = duplicateLayers(base.layers, ids);
+        if (!made.copies.length) { say("Folders and mask layers are not duplicated: pick a plain layer"); return; }
+        commitLayers(made.layers);
+        setLayerIndex(made.copies[0]); setElIndex(null); setOthers([]);
+      }}
+      onListLibrary={async () => libraryNames}
+      onAddSymbol={(name, above) => addSymbolLayer(name, above ?? 0)}
+      onAddPicture={(item, above) => void addPictureLayer({ url: item.url, name: item.name }, above ?? 0)}
+      onUploadPicture={(file, above) => void addPictureLayer({ file, name: file.name }, above ?? 0)}
+      onNotice={say}
+      editable={base ? Object.fromEntries(base.layers.map((l, i) => [i, l.type !== "folder"])) : undefined}
+      keyValues={keyValues}
+      pickedProp={pickedNames[0] ?? null}
+      pickedProps={pickedNames}
+      onPickLayers={(ids) => {
+        const picks = ids.flatMap((i) => { const key = shown?.layers[i] && layerStateAt(shown.layers[i], frame)?.key; return key?.elements.length ? [{ layer: i, el: 0 }] : []; });
+        if (!picks.length) return;
+        setLayerIndex(picks[0].layer); setElIndex(picks[0].el); setOthers(picks.slice(1));
+      }}
+      onFrameOp={runPanelOp}
+      canPaste={hasFrames}
+      onSelectLayer={(index) => {
+        focusRef.current = "timeline";
+        if (index == null) { setElIndex(null); setOthers([]); return; }
+        const key = shown?.layers[index] && layerStateAt(shown.layers[index], frame)?.key;
+        setLayerIndex(index); setElIndex(key?.elements.length ? 0 : null); setOthers([]);
+      }}
+      onSelectKey={(layer, at) => setKeyPick(at == null ? null : { layer, frame: at })}
+      onSetValue={(layer, at, patch) => {
+        const el = partOn(layer, at);
+        if (!patch) {
+          // Back to the file's values: the same part of the file's own keyframe there.
+          const fileLayer = original?.layers.find((_, i) => base && layerKey(original.layers, i) === layerKey(base.layers, layer));
+          const fileEl = fileLayer && layerStateAt(fileLayer, at)?.key.elements[el];
+          if (fileEl) edit((l) => setElement(l, at, el, (x) => ({ ...x, m: fileEl.m, ...(fileEl.k === "instance" && x.k === "instance" ? { pivot: fileEl.pivot, alpha: fileEl.alpha } : {}) }) as FlaElement), layer);
+          return;
+        }
+        edit((l) => setElement(l, at, el, (x) => withCreatejsValues(x, patch)), layer);
+      }}
+      onSeek={(f) => setFrame(Math.max(0, Math.min(length - 1, f)))}
+      onPlay={() => setPlaying((p) => !p)}
+      onCrumb={(index) => {
+        const outer = (crumbs || []).length;
+        if (index < outer) { onStepOut?.(); return; }
+        setStack((st) => st.slice(0, index - outer + 1));
+      }}
+      onStepInto={(layerIndex2, at, js) => {
+        const key = shown?.layers[layerIndex2] && layerStateAt(shown.layers[layerIndex2], at)?.key;
+        const part = key?.elements.find((el) => el.k === "instance" && renderer.classOfItem(el.item) === js);
+        if (!part || part.k !== "instance" || !doc.symbols.has(part.item)) { say("Nothing to step into here: this is plain artwork"); return; }
+        arriving.current = null;
+        setStack((st) => [...st, { item: part.item, m: [...part.m] as Matrix }]);
+      }}
+      onSetEase={(layer, key: FlaFrame, value) => setPanelEase(layer, key.i, value)}
+      onPreviewEase={(layer, key: FlaFrame, value) => setEasePreview(value == null ? null : { layer, at: key.i, value })}
+      onSetTweenEase={(layer, at, value) => setPanelEase(layer, at, value)}
+      onPreviewTweenEase={(layer, at, value) => setEasePreview(value == null ? null : { layer, at, value })}
+      onSetKeys={(index, anchors) => { setPanelPreview(null); const next = anchors && keysApplied(index, anchors); if (next) edit(() => next, index); }}
+      onPreviewKeys={(index, anchors) => { const next = anchors && keysApplied(index, anchors); setPanelPreview(next ? new Map([[index, next]]) : null); }}
+      onCopyKey={(fromLayer, fromAt, toLayer, toAt) => {
+        if (!base) return;
+        const target = base.layers[toLayer], key = base.layers[fromLayer]?.frames.find((k) => k.i === fromAt);
+        if (!key) return;
+        if (!target || target.type === "folder" || target.locked) { say("That layer can't take the keyframe (locked or a folder)"); return; }
+        const copied = copyFrames(base.layers[fromLayer], key.i, key.i + key.d - 1);
+        edit((l) => pasteFrames(l, toAt, copied), toLayer);
+      }}
+    />
+  ) : null;
+  // ---- In place: the part menu's actions (and their shortcuts), on the parts picked on the stage, as the older pose view had them.
+  const pickedLayers = (): number[] => [...new Set(selected().map((o) => o.layer))];
+  /** A change of the layer arrangement made by the older pose view's own helpers (arrange, group), applied natively; the picked parts stay picked. */
+  const arrangeWith = (make: (fla: NonNullable<typeof panelSymbol>["layers"], current: SymbolLayerEdit) => SymbolLayerEdit | null, nothing: string) => {
+    if (!base || !panelSymbol) return;
+    const next = make(panelSymbol.layers, arrangementOf(base));
+    if (!next) { say(nothing); return; }
+    const moved = arrangedPositions(panelSymbol.layers, next);
+    commitLayers(arrangeNative(base, panelSymbol.layers, next));
+    const sel = selected().flatMap((o) => (moved.has(o.layer) ? [{ layer: moved.get(o.layer)!, el: o.el }] : []));
+    if (sel.length) { setLayerIndex(sel[0].layer); setElIndex(sel[0].el); setOthers(sel.slice(1)); }
+  };
+  /** Flip the picked parts about their transformation point (several: about the middle of their box), on this frame. */
+  const flipSelected = (axis: "h" | "v") => {
+    if (!base || !handleModel) { say("Pick a part first to flip it."); return; }
+    const [cx, cy] = handleModel.pivot, sx = axis === "h" ? -1 : 1, sy = axis === "v" ? -1 : 1;
+    const flip: Matrix = [sx, 0, 0, sy, cx - sx * cx, cy - sy * cy];
+    let layers = base.layers.slice();
+    for (const p of handleModel.parts) layers[p.layer] = setMatrix(layers[p.layer], frame, p.el, mulM(flip, p.part.m));
+    commitLayers(layers);
+    layers = [];
+  };
+  const partAction = (action: PartAction) => {
+    setPartMenu(null);
+    const ids = pickedLayers();
+    const needPart = (what: string) => { if (ids.length) return true; say(`Pick a part first to ${what}.`); return false; };
+    switch (action) {
+      case "cut": if (needPart("cut it")) { copyPart(); deleteSelected(); } return;
+      case "copy": copyPart(); return;
+      case "paste": void pastePart("above"); return;
+      case "pasteFront": void pastePart("front"); return;
+      case "pasteBack": void pastePart("back"); return;
+      case "swap": void swapPart(); return;
+      case "toFront": case "forward": case "backward": case "toBack":
+        if (needPart("arrange it")) arrangeWith((fla, current) => arrangeSymbolLayers(fla, current, ids, action === "toFront" ? "front" : action === "toBack" ? "back" : action), "It can't go further that way.");
+        return;
+      case "duplicate": if (needPart("duplicate its layer")) duplicateSelected(); return;
+      case "flipH": case "flipV": flipSelected(action === "flipH" ? "h" : "v"); return;
+      case "pivot": if (handleModel?.single) resetPivot(); else say("Pick one part (a symbol) to reset its registration point."); return;
+      case "group": if (needPart("group it")) arrangeWith((fla, current) => groupLayers(fla, current, ids), "These layers can't go in a folder together."); return;
+      case "ungroup": {
+        if (!needPart("ungroup it") || !base) return;
+        const folder = base.layers[ids[0]]?.parent;
+        if (folder == null || base.layers[folder]?.type !== "folder") { say("This layer is not in a folder."); return; }
+        arrangeWith((fla, current) => ungroupLayer(fla, current, folder), "Nothing to ungroup.");
+        return;
+      }
+      case "hide": case "lock":
+        if (!needPart(action === "hide" ? "hide its layer" : "lock its layer") || !base) return;
+        commitLayers(base.layers.map((l, i) => (ids.includes(i) ? (action === "hide" ? setLayerOff(l, true) : setLayerLocked(l, true)) : l)));
+        setElIndex(null); setOthers([]);
+        return;
+      case "delete": if (needPart("delete its layer")) deleteSelected(); return;
+      case "back": if (stack.length > 1) setStack((st) => st.slice(0, -1)); else onStepOut?.(); return;
+    }
+  };
+  const partActionRef = useRef(partAction);
+  partActionRef.current = partAction;
+  useEscClose(Boolean(partMenu), () => setPartMenu(null));
+  useEffect(() => {
+    if (!partMenu) return;
+    const close = (e: PointerEvent) => { if (!(e.target as HTMLElement | null)?.closest?.(".cb-symbol-menu")) setPartMenu(null); };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [partMenu]);
+
+  // Messages from outside (older edits converted…) go to the scene's notice once.
+  const toldOutside = useRef("");
+  useEffect(() => { if (embedded && outsideNote && toldOutside.current !== outsideNote) { toldOutside.current = outsideNote; onNotice?.(outsideNote); } }, [embedded, outsideNote, onNotice]);
+
   if (embedded) {
-    // In place: the stage (with the part panel floating on its right) over the scene's canvas area, the toolbar and timeline in its timeline row.
-    const levelCrumbs = stack.map((l, i) => ({ name: i === 0 ? (poses.find((p) => p.item === l.item)?.name || short(l.item)) : short(l.item), depth: i }));
+    // In place: the stage over the scene's canvas area; the scene's own timeline panel in its timeline row.
     return (
       <>
         {createPortal(
-          <div data-testid="native-editor" className="cb-native-inplace-stage" style={{ position: "absolute", inset: 0, background: "#e7e7e7", overflow: "hidden" }}>
+          <div data-testid="native-editor" className="cb-native-inplace-stage" style={{ position: "absolute", inset: 0, background: "#e7e7e7", overflow: "hidden" }}
+            // For the headless tests: the last message, the picked part (layer, part, its X / Y) and point editing, which no panel shows here.
+            data-note={note || outsideNote || ""} data-point-mode={pointMode ? "on" : "off"}
+            // ...and the view: scale and offset of the open level on the canvas, and canvas pixels per CSS pixel.
+            data-view={(() => { const v = fit(canvasW, canvasH); return JSON.stringify({ s: v.s, tx: v.tx, ty: v.ty, k: canvasW / stageCss.w, zoom }); })()}
+            data-picked={(() => { const el = elIndex != null && shown?.layers[layerIndex] ? resolveElements(shown.layers[layerIndex], frame)[elIndex] : undefined; return el ? JSON.stringify({ layer: layerIndex, el: elIndex, x: Math.round(el.m[4] * 100) / 100, y: Math.round(el.m[5] * 100) / 100, count: selected().length }) : ""; })()}>
             {stageEl}
-            <nav data-testid="native-crumbs" aria-label="Where you are" style={{ position: "absolute", left: 8, top: 8, display: "flex", gap: 4, alignItems: "center", font: "12px system-ui", background: "rgba(255,255,255,.92)", color: "#222", borderRadius: 6, padding: "3px 8px", boxShadow: "0 1px 4px rgba(0,0,0,.2)" }}>
-              <button data-testid="native-step-out" type="button" onClick={() => onStepOut?.()} title="Back to the scene (Esc, or double-click empty stage)" style={{ ...btn, padding: "1px 6px" }}>←</button>
-              {(crumbs || []).map((c, i) => <span key={`c${i}`}><button type="button" onClick={() => onStepOut?.()} style={{ border: 0, background: "none", padding: 0, cursor: "pointer", color: "#1a5fd0" }}>{c}</button> ›</span>)}
-              {levelCrumbs.map((c, i) => <span key={`l${i}`}>{i > 0 && " › "}<button type="button" disabled={i === levelCrumbs.length - 1} onClick={() => setStack((st) => st.slice(0, i + 1))} style={{ border: 0, background: "none", padding: 0, cursor: i === levelCrumbs.length - 1 ? "default" : "pointer", color: i === levelCrumbs.length - 1 ? "#111" : "#1a5fd0", fontWeight: i === levelCrumbs.length - 1 ? 600 : 400 }}>{c.name}</button></span>)}
-            </nav>
-            <div data-testid="native-side" style={{ position: "absolute", right: 8, top: 8, width: 268, maxHeight: "calc(100% - 16px)", overflow: "auto", background: "rgba(255,255,255,.95)", color: "#111", borderRadius: 6, padding: 8, boxShadow: "0 1px 6px rgba(0,0,0,.25)" }}>
-              {sideEl}
-            </div>
           </div>, embedded.stage)}
-        {createPortal(
-          <div className="cb-native-inplace-timeline" style={{ height: "100%", overflow: "auto", background: "#f4f4f4", color: "#111", padding: 6, boxSizing: "border-box", display: "grid", gap: 6, alignContent: "start" }}>
-            {toolbarEl}
-            {timelineEl}
-          </div>, embedded.timeline)}
-        {libMenuEl}
+        {panelEl && createPortal(panelEl, embedded.timeline)}
+        {partMenu && createPortal(<PartMenu x={partMenu.x} y={partMenu.y} hasPart={partMenu.hasPart} canSwap onAction={(action) => partActionRef.current(action)} />, document.body)}
       </>
     );
   }

@@ -56,7 +56,7 @@ try:
         return obj().get("colorReplacements") or []
     STAGE = "[data-testid=native-stage-host] [data-testid=stage]"
     IN = f"!!document.querySelector('{STAGE}')"
-    PICKED = "!!document.querySelector('[data-testid=native-props]')"
+    PICKED = "!!document.querySelector('[data-testid=native-editor]')?.dataset.picked"
     def enter():
         js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
         return wait(IN, 60)

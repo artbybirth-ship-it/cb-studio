@@ -246,6 +246,43 @@ export function swapSymbol(layer: Layer, from: string, to: InstanceElement, scal
   return changed ? withFrames(layer, frames) : layer;
 }
 
+/**
+ * Animate's Reverse Frames: the keyframes that start in from…to play in the opposite order. Each one moves to its mirror frame (about the
+ * first and last of them), the span after the last keeps its length, and a tween goes with the span it covered (the span before a keyframe
+ * in the old order tweens in the new one). Fewer than two keyframes there: nothing changes.
+ */
+export function reverseFrames(layer: Layer, from: number, to: number): Layer {
+  const ks = layer.frames.filter((k) => k.i >= from && k.i <= to);
+  if (ks.length < 2) return layer;
+  const first = ks[0].i, last = ks[ks.length - 1].i, lastEnd = end(ks[ks.length - 1]);
+  const mirrored: Keyframe[] = ks.map((k, j) => {
+    const before = j > 0 ? ks[j - 1] : undefined;
+    return { ...k, i: first + last - k.i, tween: before?.tween, ease: before?.ease, rotate: before?.rotate, morph: undefined };
+  }).sort((a, b) => a.i - b.i);
+  mirrored.forEach((k, n) => { k.d = n + 1 < mirrored.length ? mirrored[n + 1].i - k.i : lastEnd - k.i; });
+  return withFrames(layer, [...layer.frames.filter((k) => k.i < from || k.i > to), ...mirrored]);
+}
+
+/** Animate's Delete on selected keyframes: each keyframe that starts in from…to loses its drawing and stays a (blank) keyframe. */
+export function blankKeyframes(layer: Layer, from: number, to: number): Layer {
+  if (!layer.frames.some((k) => k.i >= from && k.i <= to && k.elements.length)) return layer;
+  return withFrames(layer, layer.frames.map((k) => (k.i >= from && k.i <= to ? { ...k, elements: [], tween: undefined, ease: undefined, rotate: undefined, morph: undefined } : k)));
+}
+
+/**
+ * Dragging selected frames: the keyframes that start in from…to slide by `by` frames (the first keyframe of the layer stays). Keyframes outside
+ * the selection where they land are cleared first; one landing on a keyframe replaces it.
+ */
+export function moveFrames(layer: Layer, from: number, to: number, by: number): Layer {
+  if (!by) return layer;
+  const picked = layer.frames.filter((k) => k.i > 0 && k.i >= from && k.i <= to).map((k) => k.i);
+  if (!picked.length) return layer;
+  let out = layer;
+  for (let f = Math.max(1, from + by); f <= to + by; f += 1) if ((f < from || f > to) && out.frames.some((k) => k.i === f)) out = clearKeyframe(out, f);
+  for (const i of by > 0 ? [...picked].sort((a, b) => b - a) : [...picked].sort((a, b) => a - b)) out = moveKeyframe(out, i, Math.max(1, i + by));
+  return out;
+}
+
 // ---------- layers
 /** The eye: a layer that is off is not drawn (and cannot be picked) at any frame. */
 export const setLayerOff = (layer: Layer, off: boolean): Layer => (!!layer.off === off ? layer : { ...layer, off });

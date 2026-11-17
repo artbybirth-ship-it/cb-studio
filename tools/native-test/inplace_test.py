@@ -47,7 +47,9 @@ try:
     def shot(name): open(f"{OUT}/{name}.png", "wb").write(base64.b64decode(cmd("Page.captureScreenshot", format="png")["data"]))
     def scene(): return [p for p in get("http://localhost:3000/api/projects") if p["id"] == PROJECT][0]["scenes"][0]
     def obj(): return scene()["editor_data"]["objects"][0]
-    val = lambda f: js(f"(()=>{{const i=document.querySelector('[data-testid=native-prop-{f}]');return i?parseFloat(i.value):null}})()")
+    # The picked part's position (x / y of its matrix), from the stage's marker; None when nothing is picked.
+    val = lambda f: js(f"(()=>{{const p=document.querySelector('[data-testid=native-editor]')?.dataset.picked;return p?JSON.parse(p).{f}:null}})()")
+    PICKED = "!!document.querySelector('[data-testid=native-editor]')?.dataset.picked"
     IN = "!!document.querySelector('[data-testid=native-stage-host] [data-testid=stage]')"
     def enter():
         js("""(()=>{const e=document.querySelector('[title*="step inside it"]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""")
@@ -71,14 +73,14 @@ try:
 
     # ---- opens in place
     check("a double-click opens the pose in place", enter())
-    check("no older pose timeline, no beta window or button", not js("!!document.querySelector('.cb-symbol-counter,[data-testid=native-dialog],[data-testid=open-native]')"))
-    check("its timeline is in the timeline row", bool(js("!!document.querySelector('[data-testid=native-timeline-host] [data-testid=timeline]')")))
-    crumbs = js("document.querySelector('[data-testid=native-crumbs]').textContent")
+    check("no beta window or button", not js("!!document.querySelector('[data-testid=native-dialog],[data-testid=open-native]')"))
+    check("its timeline is the scene's own timeline panel, in the timeline row", bool(js("!!document.querySelector('[data-testid=native-timeline-host] .cb-symbol-timeline')")))
+    crumbs = js("document.querySelector('.cb-symbol-crumbs').textContent")
     check("the crumbs say where you are", "Scene" in crumbs and (o.get("name") or "") in crumbs, crumbs)
     shot("1-in-place")
 
     # ---- Direct select and point editing follow each other: A turns point editing on and the tool rail shows Direct select; V turns it off
-    POINTS_ON = "document.querySelector('[data-testid=point-mode]')?.getAttribute('aria-pressed')==='true'"
+    POINTS_ON = "document.querySelector('[data-testid=native-editor]')?.dataset.pointMode==='on'"
     RAIL_DIRECT = "!!document.querySelector('[title^=\"Direct select tool (A)\"]')"
     js("document.activeElement && document.activeElement.blur()")
     key("a", "KeyA", 65)
@@ -90,7 +92,7 @@ try:
     # ---- a part nudged: saved at once, the scene's undo
     for dy in (0.5, 0.45, 0.55, 0.4):  # well inside a part, so the same spot still hits it after it moves
         x, y = centre("[data-testid=native-stage-host] [data-testid=stage]", 0.5, dy); click_at(x, y)
-        if js("!!document.querySelector('[data-testid=native-props]')"): break
+        if js(PICKED): break
     x0 = val("x")
     check("a part is picked (its Properties show)", x0 is not None, str(x0))
     js("document.activeElement && document.activeElement.blur()")
@@ -109,7 +111,7 @@ try:
     # ---- Light/Dark inside the pose: the native stage changes colour; ⌘Z undoes the colour only.
     # Nothing picked first (a picked part would scope the colour tools to it; inplace_scope_test.py covers that).
     click_at(*centre("[data-testid=native-stage-host] [data-testid=stage]", 0.05, 0.9))
-    check("a click on empty stage drops the pick", not js("!!document.querySelector('[data-testid=native-props]')"))
+    check("a click on empty stage drops the pick", not js(PICKED))
     spot = js("""(()=>{const c=document.querySelector('[data-testid=native-stage-host] [data-testid=stage]');const r=c.getBoundingClientRect();const g=c.getContext('2d');
       for(let fy=0.5;fy<0.95;fy+=0.03){const d=g.getImageData(Math.round(c.width*0.5),Math.round(c.height*fy),1,1).data;if(d[3]>200&&(d[0]+d[1]+d[2])<600)return [r.left+r.width*0.5,r.top+r.height*fy]}return null})()""")
     check("found a coloured spot on the native stage", bool(spot), str(spot))
@@ -144,7 +146,7 @@ try:
     check("in again", enter())
     for dy in (0.5, 0.45, 0.55, 0.4):
         x, y = centre("[data-testid=native-stage-host] [data-testid=stage]", 0.5, dy); click_at(x, y)
-        if js("!!document.querySelector('[data-testid=native-props]')"): break
+        if js(PICKED): break
     if val("x") is None:
         shot("4-reentered"); print("DEBUG cursor:", js("getComputedStyle(document.querySelector('[data-testid=native-stage-host] [data-testid=stage]')).cursor"), "| light/dark open:", js("!!document.querySelector('.cb-light-dark')"), "| note:", js("document.querySelector('[data-testid=note]')?.textContent"))
     check("the edit is still there", val("x") is not None and abs(val("x") - (x0 + 5)) < 0.11, str(val("x")))

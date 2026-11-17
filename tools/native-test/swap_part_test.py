@@ -49,10 +49,19 @@ try:
         time.sleep(0.5)
     def shot(name): open(f"{OUT}/{name}.png", "wb").write(base64.b64decode(cmd("Page.captureScreenshot", format="png")["data"]))
     stage = lambda: js("document.querySelector('[data-testid=stage]').toDataURL()")
-    layer_count = lambda: js("document.querySelectorAll('[data-testid=timeline] [data-layer]').length")
-    layer_names = lambda: js("[...document.querySelectorAll('[data-testid=timeline] [data-layer]')].map(r=>r.previousElementSibling.querySelector('span').textContent)")
-    note = lambda: js("document.querySelector('[data-testid=note]').textContent")
-    current_layer = lambda: js("(document.querySelector('[data-testid=native-editor] b + *')||{}).textContent")
+    # The layers as the timeline panel lists them; messages and the picked part from the stage's markers.
+    layer_count = lambda: js("document.querySelectorAll('.cb-symbol-timeline [data-symbol-row]').length")
+    layer_names = lambda: js("[...document.querySelectorAll('.cb-symbol-timeline [data-symbol-row] .cb-symbol-layer-name')].map(e=>e.textContent)")
+    note = lambda: js("document.querySelector('[data-testid=native-editor]').dataset.note")
+    def press(k, code, vk, mods=0):
+        js("document.activeElement && document.activeElement.blur()")
+        cmd("Input.dispatchKeyEvent", type="keyDown", key=k, code=code, windowsVirtualKeyCode=vk, modifiers=mods); cmd("Input.dispatchKeyEvent", type="keyUp", key=k, code=code, windowsVirtualKeyCode=vk, modifiers=mods); time.sleep(0.8)
+    def menu_pick(x, y, action):
+        """Right-click at (x, y) on the stage and choose `action` from the part menu."""
+        cmd("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button="right", clickCount=1); cmd("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button="right", clickCount=1); time.sleep(0.5)
+        item = js(f"(()=>{{const b=document.querySelector('.cb-symbol-menu [data-action={action}]');if(!b)return null;const r=b.getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2]}})()")
+        if item: click_at(*item)
+        return bool(item)
     def scene():
         return [p for p in json.load(urllib.request.urlopen("http://localhost:3000/api/projects")) if p["id"] == PROJECT][0]["scenes"][0]
     def patch(sc, ed):
@@ -72,7 +81,9 @@ try:
     before = stage(); shot("1-open")
     spots = [(0.5, 0.45), (0.5, 0.3), (0.5, 0.6), (0.45, 0.5), (0.55, 0.5), (0.5, 0.2), (0.4, 0.4), (0.6, 0.4), (0.5, 0.75)]
     # the layer row the editor highlights is the selected part's layer
-    sel = lambda: js("(()=>{const row=[...document.querySelectorAll('[data-testid=timeline] [data-layer]')].find(r=>getComputedStyle(r.parentElement).backgroundColor==='rgb(244, 248, 255)');return row?row.previousElementSibling.querySelector('span').textContent:null})()")
+    def sel():
+        got = js("document.querySelector('[data-testid=native-editor]').dataset.picked")
+        return layer_names()[json.loads(got)["layer"]] if got else None
     def pick(skip_layer=None):
         for fx, fy in spots:
             click_at(r[0] + r[2] * fx, r[1] + r[3] * fy)
@@ -86,31 +97,31 @@ try:
     # copy one part, then pick a different part to replace
     src_layer, _ = pick()
     check("a part is picked to copy", bool(src_layer), str(src_layer))
-    click("[data-testid=copy-part]")
+    press("c", "KeyC", 67, 4)
     check("it is copied", "Copied" in (note() or ""), note())
     target_layer, spot = pick(skip_layer=src_layer)
     check("a different part is picked to replace", bool(target_layer) and target_layer != src_layer, f"{target_layer}")
     count0 = layer_count()
-    prior = plain(); click_at(r[0] + r[2] * spot[0], r[1] + r[3] * spot[1])
-    click("[data-testid=swap-part]"); time.sleep(1.5)
+    prior = plain()
+    check("the part menu offers Swap with Copied Part", menu_pick(r[0] + r[2] * spot[0], r[1] + r[3] * spot[1], "swap")); time.sleep(1.5)
     check("Swap reports it", "Swapped" in (note() or ""), note())
     shot("2-swapped")
     swapped = plain()
     check("the picture changed", swapped != prior)
     check("the layer count is unchanged", layer_count() == count0)
-    click("[data-testid=undo]")
+    press("z", "KeyZ", 90, 4)
     check("Undo brings the old part back exactly", plain() == prior)
-    click("[data-testid=redo]")
+    press("z", "KeyZ", 90, 4 | 8)
     check("Redo swaps again", plain() == swapped)
     # swapping a part for itself does nothing harmful
-    click("[data-testid=swap-part]"); time.sleep(1)
+    menu_pick(r[0] + r[2] * spot[0], r[1] + r[3] * spot[1], "swap"); time.sleep(1)
     check("swapping again is a no-op or the same picture", plain() == swapped, note())
-    click("[data-testid=native-step-out]"); time.sleep(2)
+    click(".cb-symbol-crumbs button"); time.sleep(2)
     saved = scene()["editor_data"]["objects"][0].get("nativePose") or {}
     check("the swap was saved with the scene", bool(saved))
     check("after a reload the pose reopens", open_pose())
     check("the swap is still there", plain() == swapped)
-    click("[data-testid=native-step-out]")
+    click(".cb-symbol-crumbs button")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

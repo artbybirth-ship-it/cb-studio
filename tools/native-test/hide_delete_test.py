@@ -50,10 +50,16 @@ try:
         time.sleep(0.5)
     def shot(name): open(f"{OUT}/{name}.png", "wb").write(base64.b64decode(cmd("Page.captureScreenshot", format="png")["data"]))
     stage = lambda: js("document.querySelector('[data-testid=stage]').toDataURL()")
-    layer_count = lambda: js("document.querySelectorAll('[data-testid=timeline] [data-layer]').length")
-    layer_names = lambda: js("[...document.querySelectorAll('[data-testid=timeline] [data-layer]')].map(r=>r.previousElementSibling.querySelector('span').textContent)")
-    note = lambda: js("document.querySelector('[data-testid=note]').textContent")
-    current_layer = lambda: js("(document.querySelector('[data-testid=native-editor] b + *')||{}).textContent")
+    # The pose's layers as the timeline panel lists them; messages and the picked part from the stage's markers.
+    layer_count = lambda: js("document.querySelectorAll('.cb-symbol-timeline [data-symbol-row]').length")
+    layer_names = lambda: js("[...document.querySelectorAll('.cb-symbol-timeline [data-symbol-row] .cb-symbol-layer-name')].map(e=>e.textContent)")
+    note = lambda: js("document.querySelector('[data-testid=native-editor]').dataset.note")
+    eye = lambda i: f"[data-symbol-row='{i}'] .cb-symbol-eye"
+    def press_keys(k, code, vk, mods):
+        js("document.activeElement && document.activeElement.blur()")
+        cmd("Input.dispatchKeyEvent", type="keyDown", key=k, code=code, windowsVirtualKeyCode=vk, modifiers=mods); cmd("Input.dispatchKeyEvent", type="keyUp", key=k, code=code, windowsVirtualKeyCode=vk, modifiers=mods); time.sleep(0.8)
+    undo_key = lambda: press_keys("z", "KeyZ", 90, 4)       # the scene's Undo (in place there are no Undo / Redo buttons of the editor's own)
+    redo_key = lambda: press_keys("z", "KeyZ", 90, 4 | 8)
     def scene():
         return [p for p in json.load(urllib.request.urlopen("http://localhost:3000/api/projects")) if p["id"] == PROJECT][0]["scenes"][0]
     def patch(sc, ed):
@@ -70,36 +76,36 @@ try:
     patch(sc, ed)
     check("the pose opens in the native editor", open_pose())
     total = layer_count(); names = layer_names()
-    check("the timeline lists layers with an eye each", total > 3 and js("document.querySelectorAll('[data-testid^=eye-]').length") == total, f"{total} layers")
+    check("the timeline lists layers with an eye each", total > 3 and js("document.querySelectorAll('.cb-symbol-timeline .cb-symbol-eye').length") == total, f"{total} layers")
     before = stage(); shot("1-open")
 
     # ---- the eye: find a layer whose eye changes the picture (some layers are empty at frame 1)
     hid = None
     for i in range(total):
-        click(f"[data-testid=eye-{i}]")
+        click(eye(i))
         if stage() != before: hid = i; break
-        click(f"[data-testid=eye-{i}]")
+        click(eye(i))
     check("hiding a layer with its eye changes the stage", hid is not None, f"layer {hid} {names[hid] if hid is not None else ''}")
     hidden_stage = stage(); shot("2-hidden")
-    check("the eye shows it is off", js("document.querySelector('[data-testid=eye-%d]').getAttribute('aria-pressed')" % hid) == "false")
-    click(f"[data-testid=eye-{hid}]")
+    check("the eye shows it is off", js("document.querySelector(\"%s\").getAttribute('aria-pressed')" % eye(hid)) == "true")
+    click(eye(hid))
     check("showing it again brings the picture back exactly", stage() == before)
-    click(f"[data-testid=eye-{hid}]")
+    click(eye(hid))
     check("hiding is repeatable and undo shows it again", stage() == hidden_stage)
-    click("[data-testid=undo]")
+    undo_key()
     check("Undo brings the layer back", stage() == before)
-    click("[data-testid=redo]")
+    redo_key()
     check("Redo hides it again", stage() == hidden_stage)
     # a click where the hidden layer used to be no longer picks that layer
     r = rect("[data-testid=stage]")
 
     # ---- delete: pick a part by clicking, press Delete
-    click("[data-testid=undo]")  # visible again; the eye state is tested, now delete a clicked part
+    undo_key()  # visible again; the eye state is tested, now delete a clicked part
     picked = None
     for fx, fy in ((0.5, 0.45), (0.5, 0.3), (0.5, 0.6), (0.45, 0.5), (0.55, 0.5), (0.5, 0.2)):
         click_at(r[0] + r[2] * fx, r[1] + r[3] * fy)
-        txt = js("[...document.querySelectorAll('[data-testid=native-editor] div')].map(d=>d.textContent).find(t=>/^frame \\d+ of/.test(t))") or ""
-        if "layer —" not in txt and "layer" in txt: picked = txt.split("layer ")[-1].strip(); break
+        got = js("document.querySelector('[data-testid=native-editor]').dataset.picked")
+        if got: picked = layer_names()[json.loads(got)["layer"]]; break
     check("clicking a part selects its layer", bool(picked), str(picked))
     names0 = layer_names(); count0 = layer_count()
     key("Delete")
@@ -107,17 +113,18 @@ try:
     shot("3-deleted")
     check("the picture changed", stage() != before)
     deleted_stage = stage()
-    click("[data-testid=undo]")
+    undo_key()
     check("Undo brings the layer back where it was", layer_names() == names0 and stage() == before, f"{layer_count()} layers")
-    click("[data-testid=redo]")
+    redo_key()
     check("Redo deletes it again", layer_count() == count0 - 1 and stage() == deleted_stage)
     # the delete button does the same for the selected layer (nothing selected: the layer picked in the timeline)
-    click("[data-testid=delete-layer]")
+    # the panel's Delete layer removes the layer picked in it
+    click(".cb-symbol-timeline [data-symbol-row] .cb-symbol-layer-name")
+    click(".cb-symbol-layer-tools [aria-label='Delete layer']")
     check("the Delete layer button removes another layer", layer_count() == count0 - 2, f"{layer_count()}; {note()}")
     final_names = layer_names(); final_stage = stage()
     # hide one more so the saved file carries both kinds of change
-    eye = js("[...document.querySelectorAll('[data-testid^=eye-]')].length")
-    click("[data-testid=native-step-out]"); time.sleep(2)
+    click(".cb-symbol-crumbs button"); time.sleep(2)
 
     saved = scene()["editor_data"]["objects"][0].get("nativePose") or {}
     tl = next(iter(saved.values()), {}).get("symbols", {}) if saved else {}
@@ -129,7 +136,7 @@ try:
     check("after a reload the pose reopens", open_pose())
     check("the deleted layers are still gone", layer_names() == final_names, f"{layer_count()} layers")
     check("the stage is the same as before the reload", stage() == final_stage)
-    click("[data-testid=native-step-out]")
+    click(".cb-symbol-crumbs button")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

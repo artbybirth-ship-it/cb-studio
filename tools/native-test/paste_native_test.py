@@ -60,27 +60,43 @@ try:
         return p["scenes"][0]["editor_data"]["objects"][0]
 
     def to_scene():
-        if rect("[data-testid=native-step-out]"): click("[data-testid=native-step-out]"); time.sleep(1.5)
         if rect(".cb-symbol-crumbs button"): click(".cb-symbol-crumbs button"); time.sleep(1.5)
+    def crumbs():
+        return js("[...document.querySelectorAll('.cb-symbol-crumbs span')].map(s=>s.textContent.replace('›','').trim())") or []
 
     def enter(name):
-        """Step into the character called `name` in the scene and open its native editor (the dialog's title says which one opened)."""
+        """Step into the character called `name` in the scene; its pose opens in place (the timeline panel's breadcrumb says which one)."""
         first = 1 if name == "Rajkumar" else 0     # Sardar stands on the left, Rajkumar on the right
         for which in (first, 1 - first):
             to_scene()
             js("""(()=>{const els=[...document.querySelectorAll('[title*="step inside it"]')].sort((a,b)=>a.getBoundingClientRect().left-b.getBoundingClientRect().left);const e=els[%d];if(!e)return;const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+r.width/2,clientY:r.top+r.height*0.4,view:window}))})()""" % which)
-            if not wait("[data-testid=native-editor] [data-testid=stage]", 90): shot(f"enter-{name}-{which}-no-button"); continue
-            if not wait("[data-testid=native-editor]", 90): shot(f"enter-{name}-{which}-no-editor"); return False
+            if not wait("[data-testid=native-editor] [data-testid=stage]", 90): shot(f"enter-{name}-{which}-no-stage"); continue
+            if not wait(".cb-symbol-timeline [data-symbol-row]", 30): shot(f"enter-{name}-{which}-no-panel"); return False
             time.sleep(2)
-            title = js("document.querySelector('[data-testid=native-crumbs]').textContent") or ""
-            if f"›{name} ›" in title.replace(" ›", " ›") or f"{name} ›" in title: return True
-            click("[data-testid=native-step-out]"); time.sleep(1)
+            c = crumbs()
+            if len(c) > 1 and c[1].startswith(name): return True
+            to_scene()
         return False
+    PANEL = ".cb-symbol-timeline"
     def layer_names():
-        return js("[...document.querySelectorAll('[data-layer]')].map(e=>e.previousElementSibling.querySelector('span').textContent)")
-    keys = lambda layer: js("[...document.querySelectorAll('[data-key^=\"%d:\"]')].map(e=>e.dataset.key.split(':')[1]*1).sort((a,b)=>a-b)" % layer)
-    span = lambda layer, k: js("parseInt(document.querySelector('[data-key=\"%d:%d\"]').style.width)" % (layer, k))
-    note = lambda: js("document.querySelector('[data-testid=note]').textContent")
+        return js(f"[...document.querySelectorAll('{PANEL} [data-symbol-row] .cb-symbol-layer-name')].map(e=>e.textContent)")
+    def frames_of(row):
+        """A row's keyframes as the panel draws them: {first frame: frames}."""
+        return {a: b for a, b in (js(f"""(()=>{{const c=parseFloat(getComputedStyle(document.querySelector('{PANEL}')).getPropertyValue('--cb-sym-cell'));
+          return [...document.querySelectorAll('[data-symbol-row="{row}"] .cb-symbol-span')].map(s=>[Math.round(parseFloat(s.style.left)/c),Math.round(parseFloat(s.style.width)/c)])}})()""") or [])}
+    keys = lambda row: sorted(frames_of(row))
+    span = lambda row, k: frames_of(row).get(k)
+    note = lambda: js("document.querySelector('[data-testid=native-editor]')?.dataset.note || ''")
+    def press_keys(k, code, vk, mods=0):
+        js("document.activeElement && document.activeElement.blur()")
+        cmd("Input.dispatchKeyEvent", type="keyDown", key=k, code=code, windowsVirtualKeyCode=vk, modifiers=mods); cmd("Input.dispatchKeyEvent", type="keyUp", key=k, code=code, windowsVirtualKeyCode=vk, modifiers=mods); time.sleep(0.8)
+    def frame_xy(row, f):
+        """Frame f of a row on screen, the grid scrolled so that it is clear of the layer names."""
+        return js(f"""(()=>{{const lane=document.querySelector('[data-symbol-row="{row}"] .cb-symbol-lane');const box=document.querySelector('.cb-symbol-grid');
+          const c=parseFloat(getComputedStyle(document.querySelector('{PANEL}')).getPropertyValue('--cb-sym-cell'));lane.scrollIntoView({{block:'nearest'}});
+          const g=box.getBoundingClientRect(), x=lane.getBoundingClientRect().left+({f}+0.5)*c;
+          if(x<g.left+260)box.scrollLeft-=g.left+300-x; else if(x>g.left+box.clientWidth-40)box.scrollLeft+=x-(g.left+box.clientWidth-120);
+          const r=lane.getBoundingClientRect();return [r.left+({f}+0.5)*c,r.top+r.height/2]}})()""")
 
     # a clean scene: no earlier native edits on either character
     projects = json.load(urllib.request.urlopen("http://localhost:3000/api/projects"))
@@ -88,29 +104,29 @@ try:
     ed = scene["editor_data"]
     for o in ed["objects"]: o.pop("nativePose", None)
     urllib.request.urlopen(urllib.request.Request(f"http://localhost:3000/api/scenes/{scene['id']}", method="PATCH", data=json.dumps({"editor_data": ed}).encode(), headers={"Content-Type": "application/json"}))
+    cmd("Page.navigate", url="http://localhost:3000/"); time.sleep(1)
+    js("Object.keys(localStorage).filter(k=>k.startsWith('cb-')).forEach(k=>localStorage.removeItem(k))")
     cmd("Page.navigate", url=f"http://localhost:3000/editor/{PROJECT}"); time.sleep(8)
     shot("1-scene")
 
-    # ---- copy Rajkumar's head
-    check("Rajkumar's pose opens in the native editor", enter("Rajkumar"))
+    # ---- copy Rajkumar's head (⌘C on a part picked on the stage)
+    check("Rajkumar's pose opens in place", enter("Rajkumar"))
     shot("2-rajkumar")
     r = rect("[data-testid=stage]")
     picked = None
     for fy in (0.14, 0.18, 0.22, 0.26, 0.30):
         mouse("mousePressed", r[0] + r[2] * 0.5, r[1] + r[3] * fy, clickCount=1); mouse("mouseReleased", r[0] + r[2] * 0.5, r[1] + r[3] * fy, clickCount=1); time.sleep(0.8)
-        picked = js("[...document.querySelectorAll('button')].map(b=>b.textContent).find(t=>/^#\\d+ /.test(t))")
+        picked = js("document.querySelector('[data-testid=native-editor]').dataset.picked")
         if picked: break
     check("a part near the top of Rajkumar is picked", bool(picked), str(picked))
-    click("[data-testid=copy-part]")
-    check("copy reports what was copied", (note() or "").startswith("Copied"), note())
-    click("[data-testid=native-step-out]"); time.sleep(1)
-    # back out to the scene
+    press_keys("c", "KeyC", 67, 4)
+    check("⌘C reports what was copied", note().startswith("Copied"), note())
     to_scene()
 
-    # ---- paste into Sardar
-    check("Sardar's pose opens in the native editor", enter("Sardar"))
+    # ---- paste into Sardar (⌘V on the stage)
+    check("Sardar's pose opens in place", enter("Sardar"))
     before = layer_names()
-    click("[data-testid=paste-part]")
+    press_keys("v", "KeyV", 86, 4)
     for _ in range(40):
         if len(layer_names() or []) == len(before) + 1: break
         time.sleep(0.5)
@@ -118,40 +134,32 @@ try:
     check("paste adds one layer on top", len(after) == len(before) + 1 and after[1:] == before, f"{before[:2]} -> {after[:2]}")
     check("the new layer is named after the head", (after[0] or "").startswith("Pasted"), after[0])
     shot("3-pasted")
-    check("it has a keyframe covering the timeline", keys(0) == [0] and span(0, 0) >= 1100, f"{keys(0)} {span(0, 0)}px")
-
-    # ---- the commands that failed on the old pasted head layer
-    sel = json.dumps('[data-layer="0"]')
-    rr = js("(()=>{const r=document.querySelector(%s).getBoundingClientRect();return [r.left,r.top,r.height]})()" % sel)
-    fx = lambda f: rr[0] + f * 12 + 6
-    def at_frame(f, shift=False):
-        mouse("mousePressed", fx(f), rr[1] + rr[2] / 2, clickCount=1, modifiers=8 if shift else 0); mouse("mouseReleased", fx(f), rr[1] + rr[2] / 2, clickCount=1, modifiers=8 if shift else 0); time.sleep(0.4)
     full = span(0, 0)
-    at_frame(10); at_shift = None
-    at_frame(12, shift=True)       # frames 11-13 selected
-    click("[data-testid=remove-frames]")
-    check("Remove Frames (Shift+F5) shortens the pasted head layer by the 3 selected frames", span(0, 0) == full - 3 * 12, f"{full} -> {span(0, 0)}")
-    click("[data-testid=undo]")
-    check("Undo restores it", span(0, 0) == full, str(span(0, 0)))
+    check("it has a keyframe covering the timeline", keys(0) == [0] and (full or 0) >= 90, f"{keys(0)} {full} frames")
+
+    # ---- the frame commands on the pasted head layer: frames selected in the panel, then the keys
+    def at_frame(f, shift=False):
+        x, y = frame_xy(0, f); click_at(x, y, mods=8 if shift else 0)
+    at_frame(10); at_frame(12, shift=True)       # frames 11-13 selected
+    press_keys("F5", "F5", 116, 8)
+    check("Remove Frames (⇧F5) shortens the pasted head layer by the 3 selected frames", span(0, 0) == full - 3, f"{full} -> {span(0, 0)}")
+    press_keys("z", "KeyZ", 90, 4)
+    check("Undo (⌘Z) restores it", span(0, 0) == full, str(span(0, 0)))
     at_frame(20)
-    click("[data-testid=insert-keyframe]")
+    press_keys("F6", "F6", 117)
     check("F6 adds a keyframe on the pasted head layer", keys(0) == [0, 20], str(keys(0)))
-    click("[data-testid=insert-frame]")
-    check("F5 lengthens it", span(0, 20) == full - 20 * 12 + 12, f"{span(0, 20)}")
-    click("[data-testid=remove-frames]")
-    check("Remove Frames takes that frame out again", span(0, 20) == full - 20 * 12, f"{span(0, 20)}")
-    click("[data-testid=clear-keyframe]")
-    check("Shift+F6 clears the keyframe", keys(0) == [0], str(keys(0)))
-    # step into the pasted head: it is a real symbol with its own layers
-    at_frame(0)
-    r = rect("[data-testid=stage]")
-    steps = js("[...document.querySelectorAll('button')].filter(b=>b.textContent==='Step into').length")
-    parts = js("[...document.querySelectorAll('button')].map(b=>b.textContent).filter(t=>/^#\\d+ /.test(t))")
-    check("the pasted head is a symbol instance in its layer", bool(parts) and "Pasted" not in (parts[0] or "x") or bool(parts), str(parts))
+    at_frame(20); press_keys("F5", "F5", 116)
+    check("F5 lengthens it", span(0, 20) == full - 20 + 1, f"{span(0, 20)}")
+    at_frame(20); press_keys("F5", "F5", 116, 8)
+    check("Remove Frames takes that frame out again", span(0, 20) == full - 20, f"{span(0, 20)}")
+    at_frame(20); press_keys("F6", "F6", 117, 8)
+    check("⇧F6 clears the keyframe", keys(0) == [0], str(keys(0)))
+    # the pasted head is a symbol: its frames offer to step inside it
+    check("the pasted head is a symbol instance in its layer", bool(js(f"!!document.querySelector('[data-symbol-row=\"0\"] .cb-symbol-span[title*=\"step inside\"]')")))
     shot("4-after-commands")
 
     # ---- save, reload, reopen
-    click("[data-testid=native-step-out]"); time.sleep(2)
+    to_scene(); time.sleep(2)
     saved = None
     for _ in range(30):
         projects = json.load(urllib.request.urlopen("http://localhost:3000/api/projects"))
@@ -169,7 +177,7 @@ try:
     names = layer_names()
     check("the pasted layer is still there", bool(names) and names[0].startswith("Pasted"), str(names[:2]))
     shot("5-reopened")
-    click("[data-testid=native-step-out]")
+    to_scene()
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

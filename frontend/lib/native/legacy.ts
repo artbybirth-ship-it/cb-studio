@@ -92,6 +92,22 @@ function elementOf<T extends InstanceElement | BitmapElement>(el: T, p: ReturnTy
   return out as T;
 }
 
+export type CreatejsValues = ReturnType<typeof propsOf>;
+/** A placed part's values as the timeline's value boxes show them (CreateJS names: x, y, scale, skew in degrees, alpha, registration point). A drawn shape has no registration point of its own. */
+export function createjsValuesOf(el: FlaElement): CreatejsValues {
+  if (el.k === "instance" || el.k === "bitmap") return propsOf(el);
+  const [a, b, c, d, tx, ty] = el.m;
+  return { x: tx, y: ty, scaleX: Math.hypot(a, b), scaleY: Math.hypot(c, d), skewX: Math.atan2(-c, d) / DEG, skewY: Math.atan2(b, a) / DEG, regX: 0, regY: 0, alpha: 1 };
+}
+/** The part with some of those values changed (the rest as they are). */
+export function withCreatejsValues<T extends FlaElement>(el: T, patch: Partial<CreatejsValues>): T {
+  const p = { ...createjsValuesOf(el) };
+  for (const [k, v] of Object.entries(patch)) if (typeof v === "number" && Number.isFinite(v) && k in p) (p as Record<string, number>)[k] = v;
+  if (el.k === "instance" || el.k === "bitmap") return elementOf(el, p) as T;
+  const a = Math.cos(p.skewY * DEG) * p.scaleX, b = Math.sin(p.skewY * DEG) * p.scaleX, c = -Math.sin(p.skewX * DEG) * p.scaleY, d = Math.cos(p.skewX * DEG) * p.scaleY;
+  return { ...el, m: [a, b, c, d, p.x, p.y] as Matrix };
+}
+
 /** Edited values laid on one keyframe: the named objects take them (the others stay as they are). */
 export function applyValues(key: Keyframe, edit: SymbolValueEdit, nameOf?: (index: number) => string): Keyframe {
   const names = new Set(edit.props || []);

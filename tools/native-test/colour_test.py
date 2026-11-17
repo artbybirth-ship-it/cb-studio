@@ -52,7 +52,7 @@ try:
     stage = lambda: js("document.querySelector('[data-testid=stage]').toDataURL()")
     layer_count = lambda: js("document.querySelectorAll('[data-testid=timeline] [data-layer]').length")
     layer_names = lambda: js("[...document.querySelectorAll('[data-testid=timeline] [data-layer]')].map(r=>r.previousElementSibling.querySelector('span').textContent)")
-    note = lambda: js("document.querySelector('[data-testid=note]').textContent")
+    note = lambda: js("document.querySelector('[data-testid=native-editor]').dataset.note")
     current_layer = lambda: js("(document.querySelector('[data-testid=native-editor] b + *')||{}).textContent")
     def scene():
         return [p for p in json.load(urllib.request.urlopen("http://localhost:3000/api/projects")) if p["id"] == PROJECT][0]["scenes"][0]
@@ -122,11 +122,11 @@ try:
     hp = hist("[data-testid=stage]")
     check("the pose editor shows the colour rule", green(hp) > 200, f"green px {green(hp)}")
     shot("3-editor")
-    click("[data-testid=native-step-out]"); time.sleep(1)
+    click(".cb-symbol-crumbs button"); time.sleep(1)
     # and without the rule the editor is back to the file's colours
     patch(scene(), ed)
     check("without the rule the pose editor has the file's colours", open_pose() and green(hist("[data-testid=stage]")) < 50)
-    click("[data-testid=native-step-out]")
+    click(".cb-symbol-crumbs button")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

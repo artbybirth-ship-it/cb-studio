@@ -121,10 +121,13 @@ try:
     check("stepped into the pose", wait("!!document.querySelector('[data-testid=native-editor] [data-testid=stage]')", 90))
     check("native editor opens in the scene", wait("!!document.querySelector('[data-testid=native-editor] [data-testid=stage]')", 90))
     time.sleep(1)
-    click("[data-testid=add-from-library]"); time.sleep(0.4)
-    set_file("[data-testid=native-upload-picture]", PNG)
-    check("the picture file is added", wait("/^New layer/.test(document.querySelector('[data-testid=note]').textContent)", 30), note())
-    click("[data-testid=native-step-out]"); time.sleep(3)
+    # In place: the timeline panel's "New layer from library" menu, its picture file input.
+    rows0 = js("document.querySelectorAll('.cb-symbol-timeline [data-symbol-row]').length")
+    click(".cb-symbol-layer-tools [aria-label='New layer from library']"); time.sleep(0.6)
+    set_file(".cb-symbol-lib-upload input[type=file]", PNG)
+    check("the picture file is added (a new layer in the panel)", wait(f"document.querySelectorAll('.cb-symbol-timeline [data-symbol-row]').length === {rows0} + 1", 30),
+          js("document.querySelector('[data-testid=native-editor]')?.dataset.note"))
+    click(".cb-symbol-crumbs button"); time.sleep(3)
     saved = [p for p in get("http://localhost:3000/api/projects") if p["id"] == PROJECT][0]["scenes"][0]["editor_data"]["objects"][0].get("nativePose") or {}
     bitmaps = [b for e in saved.values() for b in ((e.get("library") or {}).get("bitmaps") or {}).values()]
     print("saved pictures:", [{k: (v if k != "data" else f"{len(v)} chars") for k, v in b.items()} for b in bitmaps])

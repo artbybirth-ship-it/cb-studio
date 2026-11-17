@@ -178,6 +178,8 @@ export class NativeRenderer {
   /** Library items whose Animate class is not their own name (a pose called "Symbol 1" that the player knows as "Sardar_01"). */
   readonly classes = new Map<string, string>();
   private classFor(item: string) { return this.classes.get(item) ?? classOf(item); }
+  /** The player class a library item goes by (stepping into a part from the timeline goes by it). */
+  classOfItem(item: string) { return this.classFor(item); }
   /**
    * The colour scope of parts picked in `item` (the pose or a symbol stepped into): "@<class>/<name>+<name>", the instances by the
    * names the player knows them by, as the old pose view made it. Drawn shapes at that level have no name and are left out; null when
@@ -540,6 +542,10 @@ export class NativeRenderer {
     for (let i = layers.length - 1; i >= 0; i -= 1) {
       const layer = layers[i];
       if (done.has(i) || layer.type === "folder" || layer.type === "guide") continue;
+      // A layer inside a folder that is switched off is not drawn (the folder's eye hides everything in it).
+      let folderOff = false;
+      for (let up = layer.parent, guard = 0; up != null && guard < 30 && !folderOff; up = layers[up]?.parent ?? null, guard += 1) if (layers[up]?.type === "folder" && layers[up]?.off) folderOff = true;
+      if (folderOff) continue;
       const maskIndex = layer.type === "mask" ? i : layer.parent != null && layers[layer.parent]?.type === "mask" ? layer.parent : null;
       if (maskIndex == null) { this.drawLayer(ctx, layer, frame, timeline.length, layerKey(layers, i)); continue; }
       // Masked group: the content layers, then keep only what the mask layer covers.

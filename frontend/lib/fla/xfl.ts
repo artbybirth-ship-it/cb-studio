@@ -40,12 +40,16 @@ export type Keyframe = {
   i: number; d: number; elements: FlaElement[];
   tween?: "motion" | "shape" | "motion object"; ease?: Ease; rotate?: [string, number];
   morph?: MorphSegment[]; label?: string;
+  /** The sound the file plays from this keyframe (its library name): shown on the timeline, not played by the native drawing. */
+  sound?: string;
 };
 /** off: switched off in the editor (not drawn, not picked); `hidden` is the file's own visibility flag, which the Animate publish ignores. */
 export type Layer = {
   name: string; type: string; parent: number | null; hidden: boolean; off?: boolean; frames: Keyframe[];
   /** Locked in the editor: its parts cannot be picked or changed on the stage (Animate's padlock). */
   locked?: boolean;
+  /** The layer's colour in Animate (its outline colour), shown on the timeline. */
+  color?: string;
   /** The layer's name in the Animate file, kept when it is renamed (the player's instance names are worked out by it); "" for a layer the
    *  file does not have (pasted, added from the library, duplicated). Unset: `name` is the file's name. */
   fileName?: string;
@@ -287,6 +291,7 @@ function timelineOf(el: Element_ | null, warnings: Set<string>): Timeline {
     type: layer.getAttribute("layerType") || "normal",
     parent: layer.hasAttribute("parentLayerIndex") ? num(layer.getAttribute("parentLayerIndex")) : null,
     hidden: layer.getAttribute("visible") === "false",
+    ...(layer.getAttribute("color") ? { color: layer.getAttribute("color")! } : {}),
     frames: kids(child(layer, "frames"), "DOMFrame").map((frame) => {
       const out: Keyframe = { i: num(frame.getAttribute("index")), d: num(frame.getAttribute("duration"), 1), elements: elementsOf(child(frame, "elements"), warnings) };
       const tween = frame.getAttribute("tweenType");
@@ -299,7 +304,7 @@ function timelineOf(el: Element_ | null, warnings: Set<string>): Timeline {
         if (tween === "motion object") warnings.add("Motion Tweens (the newer kind) — shown without their motion");
       }
       if (frame.getAttribute("name")) out.label = frame.getAttribute("name")!;
-      if (frame.getAttribute("soundName")) warnings.add("sound");
+      if (frame.getAttribute("soundName")) { warnings.add("sound"); out.sound = frame.getAttribute("soundName")!; }
       return out;
     }),
   }));

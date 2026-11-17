@@ -71,14 +71,15 @@ try:
     check("native dialog opens and loads the .fla", wait("[data-testid=native-editor]", 90))
     time.sleep(2)
     shot("legacy-open")
-    said = js("document.querySelector('[data-testid=note]')?.textContent || ''")
+    said = js("document.querySelector('[data-testid=native-editor]')?.dataset.note || ''")
     check("the dialog says the older edits were converted", said.startswith("Older edits on this character were converted") and "Sardar_01" in said, said)
-    keys = js("[...document.querySelectorAll('[data-key^=\"1:\"]')].map(e=>e.dataset.key.split(':')[1]*1).sort((a,b)=>a-b)")
+    # Layer 1's keyframes as the timeline panel draws them.
+    keys = js("(()=>{const c=parseFloat(getComputedStyle(document.querySelector('.cb-symbol-timeline')).getPropertyValue('--cb-sym-cell'));return [...document.querySelectorAll('[data-symbol-row=\"1\"] .cb-symbol-span')].map(s=>Math.round(parseFloat(s.style.left)/c)).sort((a,b)=>a-b)})()")
     check("layer 1 has the moved keyframes (15 moved to 20)", keys == [0, 9, 20, 27, 69, 79, 85], str(keys))
     # In place, Undo is the scene's: the converted edits are the starting point, so opening the pose saves nothing yet.
     time.sleep(2)
     check("opening saves nothing yet (the converted edits are the starting point)", not scene_object().get("nativePose"))
-    click("[data-testid=native-step-out]")
+    click(".cb-symbol-crumbs button")
 finally:
     chrome.terminate()
 print("FAILED:" if failed else "ALL PASSED", failed)

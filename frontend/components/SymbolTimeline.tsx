@@ -605,7 +605,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
         <div className="cb-symbol-transport">
           <button type="button" onClick={() => onSeek(0)} aria-label="First frame" title="First frame"><TransportIcon kind="first" /></button>
           <button type="button" onClick={() => onSeek(Math.max(0, frame - 1))} aria-label="Previous frame" title="Previous frame"><TransportIcon kind="prev" /></button>
-          <button type="button" className="play" onClick={onPlay} aria-label={playing ? "Pause" : "Play"} title="Play / Stop (this symbol)"><TransportIcon kind={playing ? "pause" : "play"} /></button>
+          <button type="button" className="play" onClick={onPlay} aria-label={playing ? "Pause" : "Play"} title="Play / Stop (Enter)"><TransportIcon kind={playing ? "pause" : "play"} /></button>
           <button type="button" onClick={() => onSeek(Math.min(last, frame + 1))} aria-label="Next frame" title="Next frame"><TransportIcon kind="next" /></button>
           <button type="button" onClick={() => onSeek(last)} aria-label="Last frame" title="Last frame"><TransportIcon kind="last" /></button>
           <span className="cb-symbol-counter">{frame + 1} / {symbol.frames}</span>

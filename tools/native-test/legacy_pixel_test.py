@@ -102,21 +102,21 @@ try:
     # open the pose, let the converter run, press Done: this is what writes the native edits
     open_native()
     check("native dialog opens", wait("[data-testid=native-editor]", 90)); time.sleep(2)
-    said = js("document.querySelector('[data-testid=note]')?.textContent || ''")
+    said = js("document.querySelector('[data-testid=native-editor]')?.dataset.note || ''")
     check("older edits were converted", said.startswith("Older edits on this character were converted"), said)
     # In place the converted edits are kept with the first change: hide a layer and show it again (the picture is the same).
     # Each click is checked on the editor before the next (on a busy machine a click measured before a redraw can land elsewhere).
-    SHOWN = "document.querySelector('[data-testid=eye-1]')?.getAttribute('aria-pressed')"
+    SHOWN = "(document.querySelector(\"[data-symbol-row='1'] .cb-symbol-eye\")?.getAttribute('aria-pressed') === 'true' ? 'false' : 'true')"  # the panel's eye is pressed while the layer is hidden
     def eye_to(state):
         for attempt in range(3):
-            click("[data-testid=eye-1]")
+            click("[data-symbol-row='1'] .cb-symbol-eye")
             for _ in range(20):
                 if js(SHOWN) == state: return True
                 time.sleep(0.25)
         return False
     check("layer 1 hidden", eye_to("false"))
     check("...and shown again", eye_to("true")); time.sleep(1.5)
-    click("[data-testid=native-step-out]"); time.sleep(2)
+    click(".cb-symbol-crumbs button"); time.sleep(2)
     cmd("Page.navigate", url=f"http://localhost:3000/editor/{PROJECT}"); time.sleep(14)
     after = snap(); after.save(f"{OUT}/after.png")
     x0, y0, x1, y1 = [int(v) for v in box]
