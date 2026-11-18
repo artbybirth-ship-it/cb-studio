@@ -145,7 +145,7 @@ export type LegacySymbolEdits = {
 };
 
 /** A symbol's timeline with the old keyframe and ease edits applied; the same timeline when there is nothing to apply. */
-export function convertTimeline(timeline: Timeline, edits: LegacySymbolEdits): Timeline {
+export function convertTimeline(timeline: Timeline, edits: LegacySymbolEdits, applied?: Set<string>): Timeline {
   let changed = false;
   const auto = edits.values ? autoNames(timeline) : undefined;
   const layers = timeline.layers.map((layer, index) => {
@@ -156,7 +156,16 @@ export function convertTimeline(timeline: Timeline, edits: LegacySymbolEdits): T
     if (edits.values) {
       // Values are keyed by the file's frame; a keyframe the editor added (or moved) is still known by the frame it came from.
       const lkey = layerKey(timeline.layers, index);
-      const frames = out.frames.map((k, n) => { const v = edits.values![`${index}:${files[n]}`]; return v ? applyValues(k, v, (e) => autoNameAt(auto, lkey, files[n], e)) : k; });
+      const frames = out.frames.map((k, n) => {
+        const id = `${index}:${files[n]}`, v = edits.values![id];
+        if (!v) return k;
+        const next = applyValues(k, v, (e) => autoNameAt(auto, lkey, files[n], e));
+        // On a blank keyframe there is nothing the values could move: nothing is lost.
+        if (next !== k || !k.elements.length) applied?.add(id);
+        return next;
+      });
+      // Keyframes the old editor squeezed away (moved onto the end of the layer, or cut off) no longer show: their values move nothing either.
+      if (keys) for (const a of keys.anchors) if (!files.includes(a[0]) && edits.values[`${index}:${a[0]}`]) applied?.add(`${index}:${a[0]}`);
       if (frames.some((k, n) => k !== out.frames[n])) out = { ...out, frames };
     }
     if (edits.eases) out = convertEases(out, edits.eases, index);
@@ -172,6 +181,8 @@ export function convertTimeline(timeline: Timeline, edits: LegacySymbolEdits): T
 const EXTRA_BASE = 1000;
 /** How the old editor saved a symbol's layer arrangement (types/index.ts SymbolLayerEdit), without what only the player needed (spec). */
 export type SymbolLayerEdit = {
+  /** Drawn pieces taken out of a layer one by one (not converted: such a character keeps its old edits). */
+  deletedProps?: string[];
   order?: number[]; names?: Record<string, string>; hidden?: number[]; deleted?: number[]; parents?: Record<string, number | null>;
   extras?: Array<{ id: number; name: string; type: "normal" | "folder" }>;
   clones?: Array<{ of: number; prop: string; symbol?: string; image?: unknown; foreign?: unknown; end?: number; name?: string }>;
@@ -224,9 +235,16 @@ export type LegacySymbol = { keys?: Record<string, SymbolKeyEdit>; eases?: Recor
 /** Everything the old editor saved for one symbol, applied to its timeline. `unsupported` lists what could not be converted (then `timeline` is null and the old edit stays in charge). */
 export function convertSymbol(timeline: Timeline, edits: LegacySymbol, prepared?: Array<Layer | undefined>): { timeline: Timeline | null; unsupported: string[] } {
   const unsupported = edits.layers ? unsupportedLayers(edits.layers, prepared) : [];
+  // Single drawn pieces taken out of a layer one by one (Delete on part of it) are not converted yet.
+  const pieces = edits.layers?.deletedProps?.length || 0;
+  if (pieces) unsupported.push(`${pieces} drawn piece${pieces > 1 ? "s" : ""} removed one by one`);
   if (unsupported.length) return { timeline: null, unsupported };
   let out = edits.layers ? addDuplicates(timeline, edits.layers, prepared) : timeline;
-  out = convertTimeline(out, { keys: edits.keys, eases: edits.eases, values: edits.values });
+  const applied = new Set<string>();
+  out = convertTimeline(out, { keys: edits.keys, eases: edits.eases, values: edits.values }, applied);
+  // A value edit that landed on nothing (a drawn piece moved on its own, keyed "<layer>:<frame>:<piece>", or a part the file no longer has) would be lost: the old edit stays in charge.
+  const lost = Object.keys(edits.values || {}).filter((id) => !applied.has(id));
+  if (lost.length) return { timeline: null, unsupported: [`${lost.length} moved piece${lost.length > 1 ? "s" : ""} that could not be matched (${lost.slice(0, 5).join(", ")}${lost.length > 5 ? "…" : ""})`] };
   if (edits.layers) out = arrangeLayers(out, edits.layers);
   return { timeline: out, unsupported: [] };
 }
@@ -247,6 +265,15 @@ export type LegacyFields = {
  * they are matched ignoring spaces, punctuation and case (`known` gives the exact name where the character's index says so). A class that matches no symbol (or two), or whose
  * edit uses something not converted, is listed in `left` and gets no timeline: the old edit stays in charge there.
  */
+/** The library symbol an old edit's player class names: the told one, else the one symbol of that name (a top-level one beats copies in folders); null when none or several. */
+export function symbolOfClass(names: Iterable<string>, cls: string, known: Record<string, string> = {}): string | null {
+  const all = [...names];
+  if (known[cls] && all.includes(known[cls])) return known[cls];
+  let found = all.filter((name) => plain(name) === plain(cls));
+  if (found.length > 1) { const top = found.filter((name) => !name.includes("/")); if (top.length === 1) found = top; }
+  return found.length === 1 ? found[0] : null;
+}
+
 export function convertLegacy(symbols: Map<string, { timeline: Timeline }>, fields: LegacyFields, known: Record<string, string> = {}, prepared: Record<string, Array<Layer | undefined>> = {}): { symbols: Record<string, Timeline>; converted: string[]; left: string[] } {
   const byPlain = new Map<string, string[]>();
   for (const name of symbols.keys()) byPlain.set(plain(name), [...(byPlain.get(plain(name)) || []), name]);
@@ -254,9 +281,9 @@ export function convertLegacy(symbols: Map<string, { timeline: Timeline }>, fiel
   const out: Record<string, Timeline> = {}, converted: string[] = [], left: string[] = [];
   for (const cls of classes) {
     // The pose's own class is told (its library name comes from the character's index); otherwise a symbol in the library's top level beats ones in folders (copies of it).
-    let found = known[cls] && symbols.has(known[cls]) ? [known[cls]] : byPlain.get(plain(cls)) || [];
-    if (found.length > 1) { const top = found.filter((name) => !name.includes("/")); if (top.length === 1) found = top; }
-    if (found.length !== 1) { left.push(`${cls} (${found.length ? "more than one symbol of that name" : "not in the Animate file"})`); continue; }
+    const one = symbolOfClass(symbols.keys(), cls, known);
+    if (!one) { left.push(`${cls} (${(byPlain.get(plain(cls)) || []).length ? "more than one symbol of that name" : "not in the Animate file"})`); continue; }
+    const found = [one];
     const result = convertSymbol(symbols.get(found[0])!.timeline, { keys: fields.keys?.[cls], eases: fields.eases?.[cls], values: fields.values?.[cls], layers: fields.layers?.[cls] }, prepared[cls]);
     if (!result.timeline) { left.push(`${cls} (${result.unsupported.join(", ")})`); continue; }
     out[found[0]] = result.timeline;

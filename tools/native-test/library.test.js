@@ -68,5 +68,19 @@ const loaded = (d) => ({ doc: d, renderer: { assets: { images: new Map() }, load
   // matrices
   const m = [2, 1, -1, 3, 5, 7], inv = lib.invert(m), id = lib.mul(m, inv);
   id.forEach((v, i) => assert.ok(Math.abs(v - I[i]) < 1e-9, "m · m⁻¹ = identity"));
+  // the scale a symbol is shown at when reached from a pose: the pose's placement on the stage times every instance on the way down
+  {
+    const lay = (elements) => ({ name: "l", type: "normal", parent: null, hidden: false, frames: [{ i: 0, d: 1, elements }] });
+    const at = (item, k) => ({ k: "instance", item, symbolType: "movie clip", m: [k, 0, 0, k, 0, 0], pivot: [0, 0], loop: "loop", first: 0 });
+    const doc = { stage: { name: "", length: 1, layers: [lay([at("Pose", 2)])] }, symbols: new Map([
+      ["Pose", { name: "Pose", type: "graphic", timeline: { name: "", length: 1, layers: [lay([at("Mid", 0.5)])] }, warnings: [] }],
+      ["Mid", { name: "Mid", type: "graphic", timeline: { name: "", length: 1, layers: [lay([at("Leaf", 3)])] }, warnings: [] }],
+      ["Leaf", { name: "Leaf", type: "graphic", timeline: { name: "", length: 1, layers: [lay([])] }, warnings: [] }],
+    ]) };
+    assert.equal(lib.scaleThrough(doc, "Pose", "Pose"), 2, "the pose itself: its own placement");
+    assert.equal(lib.scaleThrough(doc, "Pose", "Mid"), 1, "one level down: 2 × 0.5");
+    assert.equal(lib.scaleThrough(doc, "Pose", "Leaf"), 3, "two levels down: 2 × 0.5 × 3");
+    assert.equal(lib.scaleThrough(doc, "Pose", "Nowhere"), 2, "not reachable: the pose's own");
+  }
   console.log("library: all assertions passed");
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -12,8 +12,8 @@ import NativePoseEditor, { type NativeColourFrame } from "./NativePoseEditor";
 import { loadNativeDoc, type NativeLoaded } from "../lib/native/loadDoc";
 import { registerLibrary } from "../lib/native/library";
 import { editsOf, type NativeEdits } from "../lib/native/store";
-import { convertLegacy, type LegacyFields } from "../lib/native/legacy";
-import { buildClones } from "../lib/native/legacyClones";
+import { convertLegacy, symbolOfClass, type LegacyFields } from "../lib/native/legacy";
+import { buildClones, pastedClassMap } from "../lib/native/legacyClones";
 import type { ColourRule } from "../lib/native/colour";
 
 export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial, legacy, colours, uploadPicture, hosts, crumbs, onStepOut, onSave, colourPick, onColourFrame, onScope, pointTool, onPointTool, onNotice, history, zoom, onZoom, onFitScale, viewReset, zoomTool, playToggle }: {
@@ -74,10 +74,16 @@ export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial,
         const prepared: Record<string, Awaited<ReturnType<typeof buildClones>>> = {};
         for (const [cls, edit] of Object.entries(legacy.layers || {})) {
           if (!edit.clones?.some((c) => c.symbol || c.image)) continue;
-          if (cls === js) prepared[cls] = await buildClones(result, edit, item, result.doc.symbols.get(item)?.timeline.length || 1);
+          // The symbol this class names: the pose itself, or one nested in it (its clones are built in that symbol's own space).
+          const at = cls === js ? item : symbolOfClass(result.doc.symbols.keys(), cls, { [js]: item });
+          if (at) prepared[cls] = await buildClones(result, edit, item, result.doc.symbols.get(at)?.timeline.length || 1, at);
         }
         if (!alive) return;
-        const made = convertLegacy(result.doc.symbols, legacy, { [js]: item }, prepared);
+        // Edits made inside a part pasted from another character name its copy in this library ("<tag>~<class>").
+        const classes = [...new Set([...Object.keys(legacy.keys || {}), ...Object.keys(legacy.eases || {}), ...Object.keys(legacy.values || {}), ...Object.keys(legacy.layers || {})])];
+        const pasted = await pastedClassMap(result, legacy.layers || {}, classes.filter((c) => c.includes("~")));
+        if (!alive) return;
+        const made = convertLegacy(result.doc.symbols, legacy, { [js]: item, ...pasted }, prepared);
         // The native drawing replaces the player for the whole character, so it is only taken over when every old edit converted.
         if (Object.keys(made.symbols).length && !made.left.length) {
           setSeed(editsOf(result.doc, new Map(Object.entries(made.symbols))));

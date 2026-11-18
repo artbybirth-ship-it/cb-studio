@@ -41,6 +41,32 @@ export function poseScale(doc: FlaDocument, item: string): number {
   return 1;
 }
 
+/**
+ * The scale a library symbol is shown at when it is reached from the pose `poseItem`: the pose's own placement on the stage times the scale of
+ * every instance on the way down (the first one found), as the player's concatenated matrix has it. The pose itself: poseScale.
+ */
+export function scaleThrough(doc: FlaDocument, poseItem: string, item: string): number {
+  const base = poseScale(doc, poseItem);
+  if (item === poseItem) return base;
+  const seen = new Set<string>();
+  const find = (from: string, depth: number): number | null => {
+    if (depth > 12 || seen.has(from)) return null;
+    seen.add(from);
+    const timeline = doc.symbols.get(from)?.timeline;
+    if (!timeline) return null;
+    for (const layer of timeline.layers) for (const key of layer.frames) for (const el of key.elements) {
+      if (el.k !== "instance") continue;
+      const own = Math.hypot(el.m[0], el.m[1]) || 1;
+      if (el.item === item) return own;
+      const deeper = find(el.item, depth + 1);
+      if (deeper != null) return own * deeper;
+    }
+    return null;
+  };
+  const down = find(poseItem, 0);
+  return down == null ? base : base * down;
+}
+
 // ---------- what a symbol uses
 type Uses = { symbols: Set<string>; bitmaps: Set<string>; brushes: Set<string> };
 function usesOf(doc: FlaDocument, items: string[]): Uses {

@@ -86,4 +86,31 @@ assert.equal(foreign.timeline, null); assert.ok(foreign.unsupported[0].includes(
   assert.equal(g.convertTimeline(tl, { values: { "0:0": { frame: 0, props: ["instance"], v: { alpha: 0.5 } } } }).layers[0].frames[0].elements[0].alpha, 0.5);
   console.log("legacy value names ok");
 }
+// edits that cannot be converted yet keep the old edit in charge (nothing is dropped quietly)
+{
+  const unnamed = (item) => ({ k: "instance", item, symbolType: "graphic", m: [1,0,0,1,10,20], pivot: [5,6], loop: "loop", first: 0 });
+  const lay = (name) => ({ name, type: "normal", parent: null, hidden: false, frames: [{ i: 0, d: 10, elements: [unnamed("X")] }] });
+  const tl = { name: "T", length: 10, layers: [lay("a"), lay("b")] };
+  const ok = g.convertSymbol(tl, { values: { "1:0": { frame: 0, props: ["instance_1"], v: { x: 100 } } } });
+  assert.ok(ok.timeline && !ok.unsupported.length, "a value edit that lands converts");
+  const piece = g.convertSymbol(tl, { values: { "0:0:shape_31": { frame: 0, props: ["shape_31"], v: { x: 5 } } } });
+  assert.equal(piece.timeline, null, "a drawn piece moved on its own is not converted");
+  assert.ok(/moved piece/.test(piece.unsupported[0]), piece.unsupported[0]);
+  const gone = g.convertSymbol(tl, { layers: { deletedProps: ["shape", "shape_2"] } });
+  assert.equal(gone.timeline, null, "pieces removed one by one are not converted");
+  assert.ok(/2 drawn pieces removed/.test(gone.unsupported[0]), gone.unsupported[0]);
+  const mixed = g.convertSymbol(tl, { values: { "1:0": { frame: 0, props: ["instance_1"], v: { x: 100 } }, "9:0": { frame: 0, props: ["instance"], v: { x: 1 } } } });
+  assert.equal(mixed.timeline, null, "one edit that lands does not hide one that does not");
+  const whole = g.convertLegacy(new Map([["T", { timeline: tl }]]), { values: { T: { "0:0:shape_1": { frame: 0, props: ["shape_1"], v: { x: 1 } } } } });
+  assert.deepEqual(whole.symbols, {}); assert.equal(whole.left.length, 1); assert.ok(/moved piece/.test(whole.left[0]), whole.left[0]);
+  console.log("legacy unconverted edits kept ok");
+}
+// the symbol an old edit's class names: the told one, else the one of that name (a top-level one beats copies in folders)
+{
+  assert.equal(g.symbolOfClass(["Symbol 9", "Folder/Symbol 9"], "Symbol9"), "Symbol 9", "a top-level symbol beats the copy in a folder");
+  assert.equal(g.symbolOfClass(["A/Head copy", "B/Head copy"], "Headcopy"), null, "two of the same name: none");
+  assert.equal(g.symbolOfClass(["Symbol 1"], "Sardar_01", { Sardar_01: "Symbol 1" }), "Symbol 1", "the told one wins");
+  assert.equal(g.symbolOfClass(["Symbol 1"], "Nothing"), null);
+  console.log("legacy class lookup ok");
+}
 console.log("legacy tests passed");
