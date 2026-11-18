@@ -11,6 +11,7 @@ import { loadNativeDoc } from "./loadDoc";
 import { importElements, mul, registerLibrary, scaleThrough } from "./library";
 import type { SymbolLayerEdit } from "./legacy";
 import { foreignTag, splitClass } from "../symbolLayers";
+import { numberingOf, type DocNumbering, type PieceNumbering } from "./pieces";
 
 const plain = (name: string) => (name.split("/").pop() || name).toLowerCase().replace(/[^a-z0-9]/g, "");
 const findSymbol = (loaded: NativeLoaded, cls: string): string | null => {
@@ -20,30 +21,65 @@ const findSymbol = (loaded: NativeLoaded, cls: string): string | null => {
 };
 const bytesToBase64 = (bytes: Uint8Array) => { let out = ""; for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(out); };
 
+/** How a file's export numbers its drawn pieces ("shape", "shape_1"…): the direction and each class's first number, from its export script (pieces.ts); null when the script is not there or does not decide it. */
+export const numberingFor = (doc: DocNumbering | null, cls: string): PieceNumbering | null => (doc ? { order: doc.order, base: doc.bases.get(cls) ?? 0 } : null);
+
+export async function numberingOfDocument(doc: NativeLoaded["doc"], jsUrl: string): Promise<DocNumbering | null> {
+  try {
+    const response = await fetch(jsUrl);
+    if (!response.ok) return null;
+    const js = await response.text();
+    return numberingOf(js, (cls) => { const item = findSymbolIn(doc.symbols.keys(), cls); return item ? doc.symbols.get(item)?.timeline ?? null : null; });
+  } catch { return null; }
+}
+const findSymbolIn = (names: Iterable<string>, cls: string): string | null => {
+  const found = [...names].filter((name) => plain(name) === plain(cls));
+  const top = found.filter((name) => !name.includes("/"));
+  return found.length === 1 ? found[0] : top.length === 1 ? top[0] : null;
+};
+
+/** The class → library name table of a package, from its timeline index (cb-fla-timeline/<document>/index.json) beside its export: exact where the class name alone is not enough ("Symbol7_1" is the library's "Duplicate Items Folder/Symbol 7"). */
+async function packageClasses(lib: string, documentName: string): Promise<Record<string, string>> {
+  try {
+    const root = lib.replace(/(character_libraries\/[^/]+\/).*$/, "$1");
+    const slug = documentName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const response = await fetch(`${root}cb-fla-timeline/${slug}/index.json`);
+    if (!response.ok) return {};
+    const index = (await response.json()) as { symbols?: Record<string, { name: string }> };
+    return Object.fromEntries(Object.entries(index.symbols || {}).map(([cls, v]) => [cls, v.name]));
+  } catch { return {}; }
+}
+
 /**
  * The old edits of a part pasted from another character are named "<tag>~<class>" (the tag is the source character's: lib/symbolLayers.ts foreignTag).
- * Their symbols are the "Pasted from <character>/…" copies in this character's library (made by buildClones): answers class → that copy, for
- * the classes whose source symbol is found in the source's file and was copied. Classes that name nothing here are left out.
+ * Their symbols are the "Pasted from <character>/…" copies in this character's library (made by buildClones): answers class → that copy, and
+ * class → how the source's export numbers its pieces, for the classes whose source symbol is found and was copied. Others are left out.
  */
-export async function pastedClassMap(target: NativeLoaded, layers: Record<string, SymbolLayerEdit>, classes: string[]): Promise<Record<string, string>> {
+export async function pastedClassMap(target: NativeLoaded, layers: Record<string, SymbolLayerEdit>, classes: string[]): Promise<{ known: Record<string, string>; numbering: Record<string, PieceNumbering | null> }> {
   const libs = new Map<string, string>();
   for (const edit of Object.values(layers)) for (const clone of edit.clones || []) {
     const lib = (clone.foreign as { lib?: string } | undefined)?.lib;
     if (lib) libs.set(foreignTag(lib), lib);
   }
-  const out: Record<string, string> = {};
+  const known: Record<string, string> = {}, numbering: Record<string, PieceNumbering | null> = {};
+  const numberings = new Map<string, Promise<DocNumbering | null>>();
   for (const cls of classes) {
     const [tag, plainClass] = splitClass(cls);
     const lib = tag ? libs.get(tag) : undefined;
     if (!lib) continue;
     try {
       const source = await loadNativeDoc(flaOfExport(lib));
-      const item = findSymbol(source, plainClass);
+      const table = await packageClasses(lib, source.doc.name);
+      const named = table[plainClass];
+      const item = named && source.doc.symbols.has(named) ? named : findSymbol(source, plainClass);
       const copy = item && `Pasted from ${source.doc.name}/${item}`;
-      if (copy && target.doc.symbols.has(copy)) out[cls] = copy;
+      if (!copy || !target.doc.symbols.has(copy)) continue;
+      known[cls] = copy;
+      if (!numberings.has(tag!)) numberings.set(tag!, numberingOfDocument(source.doc, lib));
+      numbering[cls] = numberingFor(await numberings.get(tag!)!, plainClass);
     } catch { /* the source file is not there: the class stays unconverted */ }
   }
-  return out;
+  return { known, numbering };
 }
 
 /** The export's .js the old edit named, to the .fla that sits beside it. */

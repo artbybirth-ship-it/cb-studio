@@ -667,5 +667,2152 @@
     }
    }
   }
+ },
+ {
+  "name": "Sardar",
+  "symbolKeys": {
+   "Sardar_01": {
+    "19": {
+     "props": [
+      "cbnew1"
+     ],
+     "blanks": [
+      27
+     ],
+     "tweens": [
+      [
+       15,
+       0
+      ],
+      [
+       70,
+       0
+      ],
+      [
+       76,
+       0
+      ],
+      [
+       52.328767123287676,
+       0
+      ],
+      [
+       55.86301369863014,
+       0
+      ],
+      [
+       9,
+       0
+      ]
+     ],
+     "anchors": [
+      [
+       0,
+       0
+      ],
+      [
+       9,
+       9
+      ],
+      [
+       15,
+       15
+      ],
+      [
+       20,
+       27
+      ],
+      [
+       27,
+       69
+      ],
+      [
+       52.328767123287676,
+       69
+      ],
+      [
+       55.86301369863014,
+       79
+      ],
+      [
+       62.93150684931507,
+       85
+      ],
+      [
+       70,
+       100
+      ],
+      [
+       76,
+       100
+      ],
+      [
+       88,
+       100
+      ],
+      [
+       100,
+       100
+      ]
+     ]
+    }
+   }
+  },
+  "symbolValues": {
+   "Symbol9": {
+    "8:0": {
+     "v": {
+      "x": 206.75,
+      "y": 146.34,
+      "regX": 106.65,
+      "regY": 266.11,
+      "skewX": 0.53,
+      "skewY": 0.53,
+      "scaleX": 0.8661,
+      "scaleY": 0.8661
+     },
+     "frame": 0,
+     "props": [
+      "cbnew1"
+     ]
+    }
+   },
+   "Symbol15": {
+    "0:0": {
+     "v": {
+      "x": 6.17,
+      "y": -4.69,
+      "regX": 3.08,
+      "regY": -2.34,
+      "skewX": -0.08,
+      "skewY": -0.08,
+      "scaleX": 2,
+      "scaleY": 2
+     },
+     "frame": 0,
+     "props": [
+      "instance"
+     ]
+    }
+   },
+   "Sardar_01": {
+    "1:0": {
+     "v": {
+      "alpha": 1
+     },
+     "frame": 0,
+     "props": [
+      "instance"
+     ]
+    },
+    "8:0": {
+     "v": {
+      "x": 232.1,
+      "y": 945.5
+     },
+     "frame": 0,
+     "props": [
+      "instance_7"
+     ]
+    },
+    "10:0": {
+     "v": {
+      "x": 360.22,
+      "y": 1269.35
+     },
+     "frame": 0,
+     "props": [
+      "instance_9"
+     ]
+    },
+    "11:0": {
+     "v": {
+      "x": 252.45,
+      "y": 694.55,
+      "skewX": -0.46,
+      "skewY": -0.46,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "instance_10"
+     ]
+    },
+    "19:0": {
+     "v": {
+      "x": 248.71,
+      "y": 275.31,
+      "regX": 110.28,
+      "regY": 277.35,
+      "alpha": 1,
+      "skewX": -0.39,
+      "skewY": -0.39,
+      "scaleX": 0.8661,
+      "scaleY": 0.8661
+     },
+     "frame": 0,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:9": {
+     "v": {
+      "x": 246.72,
+      "y": 275.31,
+      "regX": 110.28,
+      "regY": 277.35,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 9,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "3:27": {
+     "v": {
+      "alpha": 1
+     },
+     "frame": 27,
+     "props": [
+      "instance_2"
+     ]
+    },
+    "19:15": {
+     "v": {
+      "x": 248.74,
+      "y": 293.22,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 15,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:20": {
+     "v": {
+      "x": 246.72,
+      "y": 275.31,
+      "regX": 110.28,
+      "regY": 277.35,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 20,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:27": {
+     "v": {
+      "x": 248.74,
+      "y": 271.3,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 27,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:70": {
+     "v": {
+      "x": 210.87,
+      "y": 66.03,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 70,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:76": {
+     "v": {
+      "x": 151.08,
+      "y": 56.05,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 76,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:88": {
+     "v": {
+      "x": 151.08,
+      "y": 46.1,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 88,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:55.86301369863014": {
+     "v": {
+      "x": 248.74,
+      "y": 293.22,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 55.86301369863014,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:62.93150684931507": {
+     "v": {
+      "x": 248.71,
+      "y": 271.3,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 62.93150684931507,
+     "props": [
+      "cbnew1"
+     ]
+    },
+    "19:52.328767123287676": {
+     "v": {
+      "x": 248.71,
+      "y": 271.3,
+      "alpha": 1,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 0.8660993740969225,
+      "scaleY": 0.8660993740969225
+     },
+     "frame": 52.328767123287676,
+     "props": [
+      "cbnew1"
+     ]
+    }
+   },
+   "a894e46e~Headcopy": {
+    "6:0": {
+     "v": {
+      "x": 74.14,
+      "y": 224.49
+     },
+     "frame": 0,
+     "props": [
+      "instance_4"
+     ]
+    },
+    "14:0": {
+     "v": {
+      "x": -25.22,
+      "y": 189.42
+     },
+     "frame": 0,
+     "props": [
+      "instance_10"
+     ]
+    }
+   },
+   "a894e46e~Nosecopy": {
+    "0:0:shape": {
+     "v": {
+      "x": 14.86,
+      "y": 45.81,
+      "regX": -0.5,
+      "regY": 0
+     },
+     "frame": 0,
+     "props": [
+      "shape"
+     ]
+    }
+   },
+   "a894e46e~Symbol7_1": {
+    "0:0:shape_31": {
+     "v": {
+      "x": 70.04,
+      "y": 68.38,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_31"
+     ]
+    },
+    "0:0:shape_57": {
+     "v": {
+      "x": 5.44,
+      "y": 81.09,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_57"
+     ]
+    },
+    "0:0:shape_61": {
+     "v": {
+      "x": 29.05,
+      "y": 83,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_61"
+     ]
+    },
+    "0:0:shape_63": {
+     "v": {
+      "x": 7.49,
+      "y": 85.36,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_63"
+     ]
+    },
+    "0:0:shape_65": {
+     "v": {
+      "x": 6.59,
+      "y": 85.34,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_65"
+     ]
+    },
+    "0:0:shape_69": {
+     "v": {
+      "x": 30.13,
+      "y": 87.28,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_69"
+     ]
+    },
+    "0:0:shape_75": {
+     "v": {
+      "x": 32.1,
+      "y": 91.58,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_75"
+     ]
+    },
+    "0:0:shape_85": {
+     "v": {
+      "x": 32.28,
+      "y": 95.83,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_85"
+     ]
+    },
+    "0:0:shape_97": {
+     "v": {
+      "x": 30.9,
+      "y": 102.2,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_97"
+     ]
+    },
+    "0:0:shape_109": {
+     "v": {
+      "x": 5.77,
+      "y": 108.34,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_109"
+     ]
+    },
+    "0:0:shape_117": {
+     "v": {
+      "x": 24.35,
+      "y": 108.03,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_117"
+     ]
+    },
+    "0:0:shape_119": {
+     "v": {
+      "x": 23.58,
+      "y": 107.33,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_119"
+     ]
+    },
+    "0:0:shape_121": {
+     "v": {
+      "x": 22.63,
+      "y": 107.29,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_121"
+     ]
+    },
+    "0:0:shape_133": {
+     "v": {
+      "x": -2.53,
+      "y": 101.25,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_133"
+     ]
+    },
+    "0:0:shape_137": {
+     "v": {
+      "x": 19.78,
+      "y": 98.94,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_137"
+     ]
+    },
+    "0:0:shape_141": {
+     "v": {
+      "x": -3.73,
+      "y": 97.05,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_141"
+     ]
+    },
+    "0:0:shape_145": {
+     "v": {
+      "x": -3.61,
+      "y": 94.85,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_145"
+     ]
+    },
+    "0:0:shape_153": {
+     "v": {
+      "x": 19.68,
+      "y": 90.24,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_153"
+     ]
+    },
+    "0:0:shape_157": {
+     "v": {
+      "x": -3.23,
+      "y": 88.25,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_157"
+     ]
+    },
+    "0:0:shape_169": {
+     "v": {
+      "x": 20.55,
+      "y": 81.5,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_169"
+     ]
+    },
+    "0:0:shape_191": {
+     "v": {
+      "x": 63.59,
+      "y": 34.2,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_191"
+     ]
+    },
+    "0:0:shape_192": {
+     "v": {
+      "x": 63.4,
+      "y": 27.89,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_192"
+     ]
+    },
+    "0:0:shape_193": {
+     "v": {
+      "x": 63.7,
+      "y": 33.82,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_193"
+     ]
+    },
+    "0:0:shape_194": {
+     "v": {
+      "x": 62.68,
+      "y": 28.23,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_194"
+     ]
+    },
+    "0:0:shape_195": {
+     "v": {
+      "x": 63.7,
+      "y": 33.82,
+      "skewX": 0,
+      "skewY": 0,
+      "scaleX": 1,
+      "scaleY": 1
+     },
+     "frame": 0,
+     "props": [
+      "shape_195"
+     ]
+    }
+   },
+   "a894e46e~Leftearcopy": {
+    "0:0:shape_3": {
+     "v": {
+      "x": 19.31,
+      "y": 88.64
+     },
+     "frame": 0,
+     "props": [
+      "shape_3"
+     ]
+    },
+    "0:0:shape_139": {
+     "v": {
+      "x": 2.66,
+      "y": 104.18
+     },
+     "frame": 0,
+     "props": [
+      "shape_139"
+     ]
+    },
+    "0:0:shape_145": {
+     "v": {
+      "x": 4.29,
+      "y": 99.75
+     },
+     "frame": 0,
+     "props": [
+      "shape_145"
+     ]
+    },
+    "0:0:shape_192": {
+     "v": {
+      "x": 9.29,
+      "y": 76.31
+     },
+     "frame": 0,
+     "props": [
+      "shape_192"
+     ]
+    }
+   }
+  },
+  "symbolLayers": {
+   "Symbol9": {
+    "spec": {
+     "order": [
+      [
+       "cbnew1"
+      ],
+      [
+       "shape",
+       "shape_1",
+       "shape_2",
+       "shape_3",
+       "shape_4",
+       "shape_5",
+       "shape_6",
+       "shape_7",
+       "shape_8",
+       "shape_9",
+       "shape_10",
+       "shape_11",
+       "shape_12",
+       "shape_13",
+       "shape_14",
+       "shape_15",
+       "shape_16",
+       "shape_17",
+       "shape_18",
+       "shape_19",
+       "shape_20",
+       "shape_21",
+       "shape_22",
+       "shape_23",
+       "shape_24"
+      ],
+      [
+       "instance"
+      ],
+      [
+       "shape_25",
+       "shape_26",
+       "instance_1",
+       "instance_2",
+       "shape_27",
+       "shape_28",
+       "shape_29",
+       "shape_30",
+       "shape_31",
+       "shape_32",
+       "shape_33",
+       "shape_34",
+       "shape_35",
+       "shape_36",
+       "shape_37",
+       "shape_38",
+       "shape_39",
+       "shape_40",
+       "instance_3"
+      ],
+      [
+       "shape_41",
+       "shape_42",
+       "shape_43",
+       "shape_44",
+       "shape_45",
+       "shape_46",
+       "shape_47",
+       "shape_48",
+       "shape_49",
+       "shape_50",
+       "shape_51",
+       "shape_52",
+       "shape_53",
+       "shape_54",
+       "shape_55",
+       "shape_56",
+       "shape_57",
+       "shape_58",
+       "shape_59",
+       "shape_60",
+       "shape_61",
+       "shape_62",
+       "shape_63",
+       "shape_64",
+       "shape_65"
+      ],
+      [
+       "shape_66",
+       "shape_67",
+       "shape_68",
+       "shape_69",
+       "shape_70",
+       "shape_71",
+       "shape_72",
+       "shape_73",
+       "shape_74",
+       "shape_75",
+       "shape_76",
+       "shape_77",
+       "shape_78",
+       "shape_79",
+       "shape_80",
+       "shape_81",
+       "shape_82",
+       "shape_83",
+       "shape_84",
+       "shape_85",
+       "shape_86",
+       "shape_87",
+       "shape_88",
+       "shape_89",
+       "shape_90"
+      ],
+      [
+       "shape_91",
+       "shape_92",
+       "shape_93",
+       "shape_94",
+       "shape_95",
+       "shape_96",
+       "shape_97",
+       "shape_98",
+       "shape_99",
+       "shape_100",
+       "shape_101",
+       "shape_102",
+       "shape_103",
+       "shape_104",
+       "shape_105",
+       "shape_106",
+       "shape_107",
+       "shape_108",
+       "shape_109",
+       "shape_110",
+       "shape_111",
+       "shape_112",
+       "shape_113",
+       "shape_114",
+       "shape_115"
+      ],
+      [
+       "instance_4"
+      ],
+      [
+       "shape_116",
+       "shape_117",
+       "shape_118",
+       "shape_119",
+       "shape_120",
+       "shape_121",
+       "shape_122",
+       "shape_123",
+       "shape_124",
+       "shape_125",
+       "shape_126",
+       "shape_127",
+       "shape_128",
+       "shape_129",
+       "shape_130",
+       "shape_131",
+       "shape_132",
+       "shape_133",
+       "shape_134",
+       "shape_135",
+       "shape_136",
+       "shape_137",
+       "shape_138",
+       "shape_139",
+       "shape_140"
+      ]
+     ],
+     "clones": [
+      {
+       "of": "",
+       "prop": "cbnew1",
+       "symbol": "Headcopy",
+       "foreign": {
+        "lib": "/media/character_libraries/a894e46e701d442f907ef96ea98387d4/Rajkumar%20%28Yashvardhan%29/Rajkumar%20%28Yashvardhan%29.js",
+        "loop": -1,
+        "mode": "synched",
+        "frame": 0,
+        "scale": 0.43466706038683006
+       }
+      }
+     ],
+     "hidden": [
+      "cbnew1",
+      "instance_4"
+     ]
+    },
+    "names": {},
+    "order": [
+     8,
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7
+    ],
+    "clones": [
+     {
+      "of": -1,
+      "name": "Head",
+      "prop": "cbnew1",
+      "symbol": "Headcopy",
+      "foreign": {
+       "lib": "/media/character_libraries/a894e46e701d442f907ef96ea98387d4/Rajkumar%20%28Yashvardhan%29/Rajkumar%20%28Yashvardhan%29.js",
+       "loop": -1,
+       "mode": "synched",
+       "frame": 0,
+       "scale": 0.43466706038683006
+      }
+     }
+    ],
+    "hidden": [],
+    "deleted": [
+     6,
+     8
+    ],
+    "parents": {
+     "8": null
+    }
+   },
+   "Sardar_01": {
+    "spec": {
+     "order": [
+      [
+       "cbnew1"
+      ],
+      [
+       "instance"
+      ],
+      [
+       "instance_1"
+      ],
+      [
+       "instance_2"
+      ],
+      [
+       "instance_3"
+      ],
+      [
+       "instance_4"
+      ],
+      [
+       "instance_5"
+      ],
+      [
+       "instance_6"
+      ],
+      [
+       "instance_7"
+      ],
+      [
+       "instance_8"
+      ],
+      [
+       "instance_9"
+      ],
+      [
+       "instance_10"
+      ],
+      [
+       "instance_11"
+      ],
+      [
+       "instance_12"
+      ],
+      [
+       "instance_13",
+       "instance_14"
+      ],
+      [
+       "instance_15",
+       "instance_16"
+      ],
+      [
+       "instance_17"
+      ],
+      [
+       "instance_18"
+      ],
+      [
+       "instance_19"
+      ]
+     ],
+     "clones": [
+      {
+       "of": "",
+       "prop": "cbnew1",
+       "symbol": "Headcopy",
+       "foreign": {
+        "lib": "/media/character_libraries/a894e46e701d442f907ef96ea98387d4/Rajkumar%20%28Yashvardhan%29/Rajkumar%20%28Yashvardhan%29.js",
+        "loop": -1,
+        "mode": "synched",
+        "frame": 0,
+        "scale": 0.43466145819382446
+       }
+      }
+     ],
+     "hidden": [
+      "instance_3"
+     ]
+    },
+    "order": [
+     1000,
+     19,
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18
+    ],
+    "clones": [
+     {
+      "of": -1,
+      "name": "Head",
+      "prop": "cbnew1",
+      "symbol": "Headcopy",
+      "foreign": {
+       "lib": "/media/character_libraries/a894e46e701d442f907ef96ea98387d4/Rajkumar%20%28Yashvardhan%29/Rajkumar%20%28Yashvardhan%29.js",
+       "loop": -1,
+       "mode": "synched",
+       "frame": 0,
+       "scale": 0.43466145819382446
+      }
+     }
+    ],
+    "extras": [
+     {
+      "id": 1000,
+      "name": "Layer 1",
+      "type": "normal"
+     }
+    ],
+    "hidden": [],
+    "deleted": [
+     4,
+     1000
+    ],
+    "parents": {
+     "19": null,
+     "1000": null
+    }
+   },
+   "a894e46e~Headcopy": {
+    "spec": {
+     "hidden": [
+      "instance"
+     ]
+    },
+    "hidden": [],
+    "deleted": [
+     0
+    ]
+   },
+   "a894e46e~Nosecopy": {
+    "spec": {
+     "hidden": [
+      "shape"
+     ]
+    },
+    "deletedProps": [
+     "shape"
+    ]
+   },
+   "a894e46e~Symbol7_1": {
+    "spec": {
+     "order": [
+      [
+       "shape_2",
+       "shape_3",
+       "shape_4",
+       "shape_5",
+       "shape_6",
+       "shape_7",
+       "shape_8",
+       "shape_9",
+       "shape_10",
+       "shape_11",
+       "shape_12",
+       "shape_13",
+       "shape_14",
+       "shape_15",
+       "shape_16",
+       "shape_17",
+       "shape_18",
+       "shape_19",
+       "shape_20",
+       "shape_21",
+       "shape_22",
+       "shape_23",
+       "shape_24",
+       "shape_25",
+       "shape_26",
+       "shape_27",
+       "shape_28",
+       "shape_29",
+       "shape_30",
+       "shape_31",
+       "shape_32",
+       "shape_33",
+       "shape_34",
+       "shape_35",
+       "shape_36",
+       "shape_37",
+       "shape_38",
+       "shape_39",
+       "shape_40",
+       "shape_41",
+       "shape_42",
+       "shape_43",
+       "shape_44",
+       "shape_45",
+       "shape_46",
+       "shape_47",
+       "shape_48",
+       "shape_49",
+       "shape_50",
+       "shape_51",
+       "shape_52",
+       "shape_53",
+       "shape_54",
+       "shape_55",
+       "shape_56",
+       "shape_57",
+       "shape_58",
+       "shape_59",
+       "shape_60",
+       "shape_61",
+       "shape_62",
+       "shape_63",
+       "shape_64",
+       "shape_65",
+       "shape_66",
+       "shape_67",
+       "shape_68",
+       "shape_69",
+       "shape_70",
+       "shape_71",
+       "shape_72",
+       "shape_73",
+       "shape_74",
+       "shape_75",
+       "shape_76",
+       "shape_77",
+       "shape_78",
+       "shape_79",
+       "shape_80",
+       "shape_81",
+       "shape_82",
+       "shape_83",
+       "shape_84",
+       "shape_85",
+       "shape_86",
+       "shape_87",
+       "shape_88",
+       "shape_89",
+       "shape_90",
+       "shape_91",
+       "shape_92",
+       "shape_93",
+       "shape_94",
+       "shape_95",
+       "shape_96",
+       "shape_97",
+       "shape_98",
+       "shape_99",
+       "shape_100",
+       "shape_101",
+       "shape_102",
+       "shape_103",
+       "shape_104",
+       "shape_105",
+       "shape_106",
+       "shape_107",
+       "shape_108",
+       "shape_109",
+       "shape_110",
+       "shape_111",
+       "shape_112",
+       "shape_113",
+       "shape_114",
+       "shape_115",
+       "shape_116",
+       "shape_117",
+       "shape_118",
+       "shape_119",
+       "shape_120",
+       "shape_121",
+       "shape_122",
+       "shape_123",
+       "shape_124",
+       "shape_125",
+       "shape_126",
+       "shape_127",
+       "shape_128",
+       "shape_129",
+       "shape_130",
+       "shape_131",
+       "shape_132",
+       "shape_133",
+       "shape_134",
+       "shape_135",
+       "shape_136",
+       "shape_137",
+       "shape_138",
+       "shape_139",
+       "shape_140",
+       "shape_141",
+       "shape_142",
+       "shape_143",
+       "shape_144",
+       "shape_145",
+       "shape_146",
+       "shape_147",
+       "shape_148",
+       "shape_149",
+       "shape_150",
+       "shape_151",
+       "shape_152",
+       "shape_153",
+       "shape_154",
+       "shape_155",
+       "shape_156",
+       "shape_157",
+       "shape_158",
+       "shape_159",
+       "shape_160",
+       "shape_161",
+       "shape_162",
+       "shape_163",
+       "shape_164",
+       "shape_165",
+       "shape_166",
+       "shape_167",
+       "shape_168",
+       "shape_169",
+       "shape_170",
+       "shape_171",
+       "shape_172",
+       "shape_173",
+       "shape_174",
+       "shape_175",
+       "shape_176",
+       "shape_177",
+       "shape_178",
+       "shape_179",
+       "shape_180",
+       "shape_181",
+       "shape_182",
+       "shape_183",
+       "shape_184",
+       "shape_185",
+       "shape_186",
+       "shape_187",
+       "shape_188",
+       "shape_189",
+       "shape_190",
+       "shape_191",
+       "shape_192",
+       "shape_193",
+       "shape_194",
+       "shape_195"
+      ]
+     ],
+     "hidden": [
+      "shape_6",
+      "shape_7",
+      "shape_8",
+      "shape_9",
+      "shape_10",
+      "shape_11",
+      "shape_12",
+      "shape_13",
+      "shape_14",
+      "shape_15",
+      "shape_16",
+      "shape_17",
+      "shape_18",
+      "shape_19",
+      "shape_20",
+      "shape_21",
+      "shape_22",
+      "shape_23",
+      "shape_24",
+      "shape_25",
+      "shape_26",
+      "shape_27",
+      "shape_28",
+      "shape_29",
+      "shape_30",
+      "shape_56",
+      "shape_58",
+      "shape_60",
+      "shape_62",
+      "shape_64",
+      "shape_66",
+      "shape_68",
+      "shape_70",
+      "shape_72",
+      "shape_74",
+      "shape_76",
+      "shape_77",
+      "shape_78",
+      "shape_80",
+      "shape_82",
+      "shape_84",
+      "shape_86",
+      "shape_88",
+      "shape_90",
+      "shape_92",
+      "shape_93",
+      "shape_94",
+      "shape_96",
+      "shape_98",
+      "shape_100",
+      "shape_102",
+      "shape_104",
+      "shape_105",
+      "shape_106",
+      "shape_107",
+      "shape_108",
+      "shape_110",
+      "shape_111",
+      "shape_112",
+      "shape_114",
+      "shape_116",
+      "shape_118",
+      "shape_120",
+      "shape_122",
+      "shape_124",
+      "shape_125",
+      "shape_126",
+      "shape_128",
+      "shape_130",
+      "shape_132",
+      "shape_134",
+      "shape_136",
+      "shape_138",
+      "shape_140",
+      "shape_142",
+      "shape_144",
+      "shape_146",
+      "shape_148",
+      "shape_150",
+      "shape_152",
+      "shape_154",
+      "shape_156",
+      "shape_158",
+      "shape_160",
+      "shape_161",
+      "shape_162",
+      "shape_164",
+      "shape_165",
+      "shape_166",
+      "shape_168",
+      "shape_170",
+      "shape_44",
+      "shape_45",
+      "shape_46",
+      "shape_48",
+      "shape_49",
+      "shape_50",
+      "shape_52",
+      "shape_54",
+      "shape_91",
+      "shape_172",
+      "shape_173",
+      "shape_174",
+      "shape_176",
+      "shape_178",
+      "shape_180",
+      "shape_182",
+      "shape_3",
+      "shape_4",
+      "shape_5",
+      "shape_32",
+      "shape_34",
+      "shape_36",
+      "shape_38",
+      "shape_184",
+      "shape_186",
+      "shape_188",
+      "shape_189",
+      "shape_190",
+      "shape_51",
+      "shape_53",
+      "shape_55",
+      "shape_57",
+      "shape_59",
+      "shape_61",
+      "shape_63",
+      "shape_65",
+      "shape_67",
+      "shape_69",
+      "shape_71",
+      "shape_73",
+      "shape_75",
+      "shape_79",
+      "shape_81",
+      "shape_83",
+      "shape_85",
+      "shape_87",
+      "shape_89",
+      "shape_95",
+      "shape_97",
+      "shape_99",
+      "shape_101",
+      "shape_103",
+      "shape_109",
+      "shape_113",
+      "shape_115",
+      "shape_117",
+      "shape_119",
+      "shape_121",
+      "shape_123",
+      "shape_127",
+      "shape_129",
+      "shape_131",
+      "shape_133",
+      "shape_135",
+      "shape_137",
+      "shape_139",
+      "shape_141",
+      "shape_143",
+      "shape_145",
+      "shape_147",
+      "shape_149",
+      "shape_151",
+      "shape_153",
+      "shape_155",
+      "shape_157",
+      "shape_159",
+      "shape_163",
+      "shape_167",
+      "shape_169",
+      "shape_171",
+      "shape_177",
+      "shape_40",
+      "shape_41",
+      "shape_42",
+      "shape_43",
+      "shape_47",
+      "shape_175",
+      "shape_179",
+      "shape_181",
+      "shape_185",
+      "shape_2",
+      "shape_33",
+      "shape_35",
+      "shape_37",
+      "shape_39",
+      "shape_183",
+      "shape_187"
+     ]
+    },
+    "order": [
+     1000,
+     0
+    ],
+    "extras": [
+     {
+      "id": 1000,
+      "name": "Folder 1",
+      "type": "folder"
+     }
+    ],
+    "parents": {
+     "0": 1000,
+     "1000": null
+    },
+    "deletedProps": [
+     "shape_6",
+     "shape_7",
+     "shape_8",
+     "shape_9",
+     "shape_10",
+     "shape_11",
+     "shape_12",
+     "shape_13",
+     "shape_14",
+     "shape_15",
+     "shape_16",
+     "shape_17",
+     "shape_18",
+     "shape_19",
+     "shape_20",
+     "shape_21",
+     "shape_22",
+     "shape_23",
+     "shape_24",
+     "shape_25",
+     "shape_26",
+     "shape_27",
+     "shape_28",
+     "shape_29",
+     "shape_30",
+     "shape_56",
+     "shape_58",
+     "shape_60",
+     "shape_62",
+     "shape_64",
+     "shape_66",
+     "shape_68",
+     "shape_70",
+     "shape_72",
+     "shape_74",
+     "shape_76",
+     "shape_77",
+     "shape_78",
+     "shape_80",
+     "shape_82",
+     "shape_84",
+     "shape_86",
+     "shape_88",
+     "shape_90",
+     "shape_92",
+     "shape_93",
+     "shape_94",
+     "shape_96",
+     "shape_98",
+     "shape_100",
+     "shape_102",
+     "shape_104",
+     "shape_105",
+     "shape_106",
+     "shape_107",
+     "shape_108",
+     "shape_110",
+     "shape_111",
+     "shape_112",
+     "shape_114",
+     "shape_116",
+     "shape_118",
+     "shape_120",
+     "shape_122",
+     "shape_124",
+     "shape_125",
+     "shape_126",
+     "shape_128",
+     "shape_130",
+     "shape_132",
+     "shape_134",
+     "shape_136",
+     "shape_138",
+     "shape_140",
+     "shape_142",
+     "shape_144",
+     "shape_146",
+     "shape_148",
+     "shape_150",
+     "shape_152",
+     "shape_154",
+     "shape_156",
+     "shape_158",
+     "shape_160",
+     "shape_161",
+     "shape_162",
+     "shape_164",
+     "shape_165",
+     "shape_166",
+     "shape_168",
+     "shape_170",
+     "shape_44",
+     "shape_45",
+     "shape_46",
+     "shape_48",
+     "shape_49",
+     "shape_50",
+     "shape_52",
+     "shape_54",
+     "shape_91",
+     "shape_172",
+     "shape_173",
+     "shape_174",
+     "shape_176",
+     "shape_178",
+     "shape_180",
+     "shape_182",
+     "shape_3",
+     "shape_4",
+     "shape_5",
+     "shape_32",
+     "shape_34",
+     "shape_36",
+     "shape_38",
+     "shape_184",
+     "shape_186",
+     "shape_188",
+     "shape_189",
+     "shape_190",
+     "shape_51",
+     "shape_53",
+     "shape_55",
+     "shape_57",
+     "shape_59",
+     "shape_61",
+     "shape_63",
+     "shape_65",
+     "shape_67",
+     "shape_69",
+     "shape_71",
+     "shape_73",
+     "shape_75",
+     "shape_79",
+     "shape_81",
+     "shape_83",
+     "shape_85",
+     "shape_87",
+     "shape_89",
+     "shape_95",
+     "shape_97",
+     "shape_99",
+     "shape_101",
+     "shape_103",
+     "shape_109",
+     "shape_113",
+     "shape_115",
+     "shape_117",
+     "shape_119",
+     "shape_121",
+     "shape_123",
+     "shape_127",
+     "shape_129",
+     "shape_131",
+     "shape_133",
+     "shape_135",
+     "shape_137",
+     "shape_139",
+     "shape_141",
+     "shape_143",
+     "shape_145",
+     "shape_147",
+     "shape_149",
+     "shape_151",
+     "shape_153",
+     "shape_155",
+     "shape_157",
+     "shape_159",
+     "shape_163",
+     "shape_167",
+     "shape_169",
+     "shape_171",
+     "shape_177",
+     "shape_40",
+     "shape_41",
+     "shape_42",
+     "shape_43",
+     "shape_47",
+     "shape_175",
+     "shape_179",
+     "shape_181",
+     "shape_185",
+     "shape_2",
+     "shape_33",
+     "shape_35",
+     "shape_37",
+     "shape_39",
+     "shape_183",
+     "shape_187"
+    ]
+   },
+   "a894e46e~Leftearcopy": {
+    "spec": {
+     "hidden": [
+      "shape_6",
+      "shape_8",
+      "shape_9",
+      "shape_10",
+      "shape_21",
+      "shape_22",
+      "shape_23",
+      "shape_24",
+      "shape_25",
+      "shape_28",
+      "shape_54",
+      "shape_58",
+      "shape_59",
+      "shape_60",
+      "shape_62",
+      "shape_64",
+      "shape_66",
+      "shape_68",
+      "shape_69",
+      "shape_70",
+      "shape_72",
+      "shape_74",
+      "shape_76",
+      "shape_78",
+      "shape_79",
+      "shape_80",
+      "shape_82",
+      "shape_84",
+      "shape_86",
+      "shape_88",
+      "shape_90",
+      "shape_92",
+      "shape_94",
+      "shape_95",
+      "shape_96",
+      "shape_98",
+      "shape_100",
+      "shape_102",
+      "shape_104",
+      "shape_7",
+      "shape_4",
+      "shape_5",
+      "shape_11",
+      "shape_12",
+      "shape_26",
+      "shape_27",
+      "shape_67",
+      "shape_91",
+      "shape_126",
+      "shape_150",
+      "shape_154",
+      "shape_158",
+      "shape_161",
+      "shape_162",
+      "shape_164",
+      "shape_46",
+      "shape_47",
+      "shape_48",
+      "shape_50",
+      "shape_52",
+      "shape_56",
+      "shape_87",
+      "shape_166",
+      "shape_170",
+      "shape_172",
+      "shape_174",
+      "shape_176",
+      "shape_13",
+      "shape_14",
+      "shape_15",
+      "shape_16",
+      "shape_17",
+      "shape_18",
+      "shape_19",
+      "shape_20",
+      "shape_103",
+      "shape_106",
+      "shape_108",
+      "shape_110",
+      "shape_114",
+      "shape_116",
+      "shape_118",
+      "shape_120",
+      "shape_122",
+      "shape_124",
+      "shape_128",
+      "shape_130",
+      "shape_132",
+      "shape_134",
+      "shape_135",
+      "shape_136",
+      "shape_138",
+      "shape_140",
+      "shape_141",
+      "shape_142",
+      "shape_143",
+      "shape_144",
+      "shape_146",
+      "shape_148",
+      "shape_152",
+      "shape_1",
+      "shape_41",
+      "shape_37",
+      "shape_42",
+      "shape_38",
+      "shape_181",
+      "shape_40",
+      "shape_182",
+      "shape",
+      "shape_184",
+      "shape_2",
+      "shape_51",
+      "shape_178",
+      "shape_43",
+      "shape_173",
+      "shape_61",
+      "shape_153",
+      "shape_3",
+      "shape_44",
+      "shape_33",
+      "shape_34",
+      "shape_29",
+      "shape_36",
+      "shape_185",
+      "shape_30",
+      "shape_186",
+      "shape_31",
+      "shape_188",
+      "shape_32",
+      "shape_35",
+      "shape_189",
+      "shape_187",
+      "shape_190",
+      "shape_192",
+      "shape_191",
+      "shape_39",
+      "shape_180",
+      "shape_177",
+      "shape_183",
+      "shape_179",
+      "shape_63",
+      "shape_71",
+      "shape_55",
+      "shape_81",
+      "shape_83",
+      "shape_99",
+      "shape_107",
+      "shape_85",
+      "shape_89",
+      "shape_93",
+      "shape_112",
+      "shape_127",
+      "shape_129",
+      "shape_131",
+      "shape_147",
+      "shape_156",
+      "shape_160",
+      "shape_168",
+      "shape_49",
+      "shape_75",
+      "shape_113",
+      "shape_151",
+      "shape_163",
+      "shape_167",
+      "shape_165",
+      "shape_175",
+      "shape_171",
+      "shape_157",
+      "shape_159",
+      "shape_155",
+      "shape_149",
+      "shape_115",
+      "shape_123",
+      "shape_139",
+      "shape_145",
+      "shape_119",
+      "shape_111",
+      "shape_125",
+      "shape_133",
+      "shape_137",
+      "shape_121",
+      "shape_117"
+     ]
+    },
+    "deletedProps": [
+     "shape_6",
+     "shape_8",
+     "shape_9",
+     "shape_10",
+     "shape_21",
+     "shape_22",
+     "shape_23",
+     "shape_24",
+     "shape_25",
+     "shape_28",
+     "shape_54",
+     "shape_58",
+     "shape_59",
+     "shape_60",
+     "shape_62",
+     "shape_64",
+     "shape_66",
+     "shape_68",
+     "shape_69",
+     "shape_70",
+     "shape_72",
+     "shape_74",
+     "shape_76",
+     "shape_78",
+     "shape_79",
+     "shape_80",
+     "shape_82",
+     "shape_84",
+     "shape_86",
+     "shape_88",
+     "shape_90",
+     "shape_92",
+     "shape_94",
+     "shape_95",
+     "shape_96",
+     "shape_98",
+     "shape_100",
+     "shape_102",
+     "shape_104",
+     "shape_7",
+     "shape_4",
+     "shape_5",
+     "shape_11",
+     "shape_12",
+     "shape_26",
+     "shape_27",
+     "shape_67",
+     "shape_91",
+     "shape_126",
+     "shape_150",
+     "shape_154",
+     "shape_158",
+     "shape_161",
+     "shape_162",
+     "shape_164",
+     "shape_46",
+     "shape_47",
+     "shape_48",
+     "shape_50",
+     "shape_52",
+     "shape_56",
+     "shape_87",
+     "shape_166",
+     "shape_170",
+     "shape_172",
+     "shape_174",
+     "shape_176",
+     "shape_13",
+     "shape_14",
+     "shape_15",
+     "shape_16",
+     "shape_17",
+     "shape_18",
+     "shape_19",
+     "shape_20",
+     "shape_103",
+     "shape_106",
+     "shape_108",
+     "shape_110",
+     "shape_114",
+     "shape_116",
+     "shape_118",
+     "shape_120",
+     "shape_122",
+     "shape_124",
+     "shape_128",
+     "shape_130",
+     "shape_132",
+     "shape_134",
+     "shape_135",
+     "shape_136",
+     "shape_138",
+     "shape_140",
+     "shape_141",
+     "shape_142",
+     "shape_143",
+     "shape_144",
+     "shape_146",
+     "shape_148",
+     "shape_152",
+     "shape_1",
+     "shape_41",
+     "shape_37",
+     "shape_42",
+     "shape_38",
+     "shape_181",
+     "shape_40",
+     "shape_182",
+     "shape",
+     "shape_184",
+     "shape_2",
+     "shape_51",
+     "shape_178",
+     "shape_43",
+     "shape_173",
+     "shape_61",
+     "shape_153",
+     "shape_3",
+     "shape_44",
+     "shape_33",
+     "shape_34",
+     "shape_29",
+     "shape_36",
+     "shape_185",
+     "shape_30",
+     "shape_186",
+     "shape_31",
+     "shape_188",
+     "shape_32",
+     "shape_35",
+     "shape_189",
+     "shape_187",
+     "shape_190",
+     "shape_192",
+     "shape_191",
+     "shape_39",
+     "shape_180",
+     "shape_177",
+     "shape_183",
+     "shape_179",
+     "shape_63",
+     "shape_71",
+     "shape_55",
+     "shape_81",
+     "shape_83",
+     "shape_99",
+     "shape_107",
+     "shape_85",
+     "shape_89",
+     "shape_93",
+     "shape_112",
+     "shape_127",
+     "shape_129",
+     "shape_131",
+     "shape_147",
+     "shape_156",
+     "shape_160",
+     "shape_168",
+     "shape_49",
+     "shape_75",
+     "shape_113",
+     "shape_151",
+     "shape_163",
+     "shape_167",
+     "shape_165",
+     "shape_175",
+     "shape_171",
+     "shape_157",
+     "shape_159",
+     "shape_155",
+     "shape_149",
+     "shape_115",
+     "shape_123",
+     "shape_139",
+     "shape_145",
+     "shape_119",
+     "shape_111",
+     "shape_125",
+     "shape_133",
+     "shape_137",
+     "shape_121",
+     "shape_117"
+    ]
+   },
+   "a894e46e~Lipsynccopy": {
+    "spec": {
+     "hidden": [
+      "shape_5"
+     ]
+    },
+    "deletedProps": [
+     "shape_5"
+    ]
+   }
+  },
+  "source_project": "873db1b0"
  }
 ]

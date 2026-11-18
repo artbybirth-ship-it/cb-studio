@@ -3,7 +3,7 @@
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 out=$(mktemp -d)
-(cd "$here/../../frontend" && npx tsc lib/native/ops.ts lib/native/shapeTween.ts lib/native/library.ts lib/native/colour.ts lib/native/names.ts lib/native/points.ts lib/native/props.ts lib/native/handles.ts --outDir "$out" --module commonjs --target es2020 --skipLibCheck --moduleResolution node)
+(cd "$here/../../frontend" && npx tsc lib/native/ops.ts lib/native/shapeTween.ts lib/native/library.ts lib/native/colour.ts lib/native/names.ts lib/native/points.ts lib/native/props.ts lib/native/handles.ts lib/native/pieces.ts --outDir "$out" --module commonjs --target es2020 --skipLibCheck --moduleResolution node)
 cp "$here/ops.test.js" "$out/test.js"
 node "$out/test.js"
 cp "$here/library.test.js" "$out/library.test.js"
@@ -14,6 +14,8 @@ cp "$here/names.test.js" "$out/names.test.js"
 node "$out/names.test.js"
 cp "$here/points.test.js" "$out/points.test.js"
 node "$out/points.test.js"
+cp "$here/pieces.test.js" "$out/pieces.test.js"
+node "$out/pieces.test.js"
 cp "$here/props.test.js" "$out/props.test.js"
 node "$out/props.test.js"
 cp "$here/handles.test.js" "$out/handles.test.js"

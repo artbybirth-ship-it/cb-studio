@@ -10,6 +10,7 @@ import type { BitmapElement, Ease, FlaElement, InstanceElement, Keyframe, Layer,
 import { easeFunction, lerp, tweenMatrix } from "./evaluate";
 import { invert, mul } from "./library";
 import { autoNameAt, autoNames, layerKey } from "./names";
+import { applyPieceEdits, type PieceNumbering } from "./pieces";
 
 /** What the file's layer shows at the (possibly fractional) file frame: a classic tween applied between its keys. */
 function elementsAtFile(layer: Layer, frame: number): FlaElement[] {
@@ -156,12 +157,28 @@ export function convertTimeline(timeline: Timeline, edits: LegacySymbolEdits, ap
     if (edits.values) {
       // Values are keyed by the file's frame; a keyframe the editor added (or moved) is still known by the frame it came from.
       const lkey = layerKey(timeline.layers, index);
+      // The player's tween engine keeps a property a step does not set at its running value: a registration point set on one keyframe stays for the
+      // keyframes after it (until one sets its own), so the later keyframes of that part turn about it too, whatever their own values are.
+      const running = new Map<string, [number, number]>();
+      const nameOf = (el: FlaElement, e: number, n: number) => (el.k === "instance" || el.k === "bitmap" ? el.name || autoNameAt(auto, lkey, files[n], e) : "");
       const frames = out.frames.map((k, n) => {
         const id = `${index}:${files[n]}`, v = edits.values![id];
-        if (!v) return k;
-        const next = applyValues(k, v, (e) => autoNameAt(auto, lkey, files[n], e));
+        let next = v ? applyValues(k, v, (e) => autoNameAt(auto, lkey, files[n], e)) : k;
         // On a blank keyframe there is nothing the values could move: nothing is lost.
-        if (next !== k || !k.elements.length) applied?.add(id);
+        if (v && (next !== k || !k.elements.length)) applied?.add(id);
+        const setsReg = v && (typeof v.v?.regX === "number" || typeof v.v?.regY === "number");
+        let elements: FlaElement[] | null = null;
+        next.elements.forEach((el, e) => {
+          if (el.k !== "instance") return;
+          const name = nameOf(el, e, n);
+          if (!name) return;
+          if (setsReg && v!.props?.includes(name)) { running.set(name, [el.pivot[0], el.pivot[1]]); return; }
+          const carried = running.get(name);
+          if (!carried || (carried[0] === el.pivot[0] && carried[1] === el.pivot[1])) return;
+          elements = elements || next.elements.slice();
+          elements[e] = elementOf(el, { ...propsOf(el), regX: carried[0], regY: carried[1] });
+        });
+        if (elements) next = { ...next, elements };
         return next;
       });
       // Keyframes the old editor squeezed away (moved onto the end of the layer, or cut off) no longer show: their values move nothing either.
@@ -233,14 +250,15 @@ export function arrangeLayers(timeline: Timeline, edit: SymbolLayerEdit): Timeli
 export type LegacySymbol = { keys?: Record<string, SymbolKeyEdit>; eases?: Record<string, SymbolEaseEdit>; values?: Record<string, SymbolValueEdit>; layers?: SymbolLayerEdit };
 
 /** Everything the old editor saved for one symbol, applied to its timeline. `unsupported` lists what could not be converted (then `timeline` is null and the old edit stays in charge). */
-export function convertSymbol(timeline: Timeline, edits: LegacySymbol, prepared?: Array<Layer | undefined>): { timeline: Timeline | null; unsupported: string[] } {
+export function convertSymbol(timeline: Timeline, edits: LegacySymbol, prepared?: Array<Layer | undefined>, numbering: PieceNumbering | null = null): { timeline: Timeline | null; unsupported: string[] } {
   const unsupported = edits.layers ? unsupportedLayers(edits.layers, prepared) : [];
-  // Single drawn pieces taken out of a layer one by one (Delete on part of it) are not converted yet.
-  const pieces = edits.layers?.deletedProps?.length || 0;
-  if (pieces) unsupported.push(`${pieces} drawn piece${pieces > 1 ? "s" : ""} removed one by one`);
-  if (unsupported.length) return { timeline: null, unsupported };
-  let out = edits.layers ? addDuplicates(timeline, edits.layers, prepared) : timeline;
+  // Drawn pieces taken out one by one, or moved on their own: found by the player's numbering of the file's shapes (pieces.ts). Without that
+  // numbering they cannot be found, and the old edit stays in charge.
   const applied = new Set<string>();
+  const pieces = applyPieceEdits(timeline, { deleted: edits.layers?.deletedProps, values: edits.values }, numbering, applied);
+  if (pieces.lost.length) unsupported.push(numbering ? `${pieces.lost.length} piece edit${pieces.lost.length > 1 ? "s" : ""} that could not be matched (${pieces.lost.slice(0, 4).join(", ")})` : pieces.lost.join(", "));
+  if (unsupported.length) return { timeline: null, unsupported };
+  let out = edits.layers ? addDuplicates(pieces.timeline, edits.layers, prepared) : pieces.timeline;
   out = convertTimeline(out, { keys: edits.keys, eases: edits.eases, values: edits.values }, applied);
   // A value edit that landed on nothing (a drawn piece moved on its own, keyed "<layer>:<frame>:<piece>", or a part the file no longer has) would be lost: the old edit stays in charge.
   const lost = Object.keys(edits.values || {}).filter((id) => !applied.has(id));
@@ -274,7 +292,7 @@ export function symbolOfClass(names: Iterable<string>, cls: string, known: Recor
   return found.length === 1 ? found[0] : null;
 }
 
-export function convertLegacy(symbols: Map<string, { timeline: Timeline }>, fields: LegacyFields, known: Record<string, string> = {}, prepared: Record<string, Array<Layer | undefined>> = {}): { symbols: Record<string, Timeline>; converted: string[]; left: string[] } {
+export function convertLegacy(symbols: Map<string, { timeline: Timeline }>, fields: LegacyFields, known: Record<string, string> = {}, prepared: Record<string, Array<Layer | undefined>> = {}, numbering: Record<string, PieceNumbering | null> = {}): { symbols: Record<string, Timeline>; converted: string[]; left: string[] } {
   const byPlain = new Map<string, string[]>();
   for (const name of symbols.keys()) byPlain.set(plain(name), [...(byPlain.get(plain(name)) || []), name]);
   const classes = new Set([...Object.keys(fields.keys || {}), ...Object.keys(fields.eases || {}), ...Object.keys(fields.values || {}), ...Object.keys(fields.layers || {})]);
@@ -284,7 +302,7 @@ export function convertLegacy(symbols: Map<string, { timeline: Timeline }>, fiel
     const one = symbolOfClass(symbols.keys(), cls, known);
     if (!one) { left.push(`${cls} (${(byPlain.get(plain(cls)) || []).length ? "more than one symbol of that name" : "not in the Animate file"})`); continue; }
     const found = [one];
-    const result = convertSymbol(symbols.get(found[0])!.timeline, { keys: fields.keys?.[cls], eases: fields.eases?.[cls], values: fields.values?.[cls], layers: fields.layers?.[cls] }, prepared[cls]);
+    const result = convertSymbol(symbols.get(found[0])!.timeline, { keys: fields.keys?.[cls], eases: fields.eases?.[cls], values: fields.values?.[cls], layers: fields.layers?.[cls] }, prepared[cls], numbering[cls] ?? null);
     if (!result.timeline) { left.push(`${cls} (${result.unsupported.join(", ")})`); continue; }
     out[found[0]] = result.timeline;
     converted.push(cls);
