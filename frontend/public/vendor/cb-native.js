@@ -616,6 +616,7 @@ function timelineOf(el, warnings) {
         type: layer.getAttribute("layerType") || "normal",
         parent: layer.hasAttribute("parentLayerIndex") ? num(layer.getAttribute("parentLayerIndex")) : null,
         hidden: layer.getAttribute("visible") === "false",
+        ...(layer.getAttribute("color") ? { color: layer.getAttribute("color") } : {}),
         frames: kids(child(layer, "frames"), "DOMFrame").map((frame) => {
             const out = { i: num(frame.getAttribute("index")), d: num(frame.getAttribute("duration"), 1), elements: elementsOf(child(frame, "elements"), warnings) };
             const tween = frame.getAttribute("tweenType");
@@ -632,8 +633,10 @@ function timelineOf(el, warnings) {
             }
             if (frame.getAttribute("name"))
                 out.label = frame.getAttribute("name");
-            if (frame.getAttribute("soundName"))
+            if (frame.getAttribute("soundName")) {
                 warnings.add("sound");
+                out.sound = frame.getAttribute("soundName");
+            }
             return out;
         }),
     }));
@@ -1158,6 +1161,8 @@ class NativeRenderer {
     }
     setColourRules(list) { this.rules = (0, colour_2.prepareRules)(list); }
     classFor(item) { return this.classes.get(item) ?? (0, colour_2.classOf)(item); }
+    /** The player class a library item goes by (stepping into a part from the timeline goes by it). */
+    classOfItem(item) { return this.classFor(item); }
     /**
      * The colour scope of parts picked in `item` (the pose or a symbol stepped into): "@<class>/<name>+<name>", the instances by the
      * names the player knows them by, as the old pose view made it. Drawn shapes at that level have no name and are left out; null when
@@ -1604,6 +1609,13 @@ class NativeRenderer {
         for (let i = layers.length - 1; i >= 0; i -= 1) {
             const layer = layers[i];
             if (done.has(i) || layer.type === "folder" || layer.type === "guide")
+                continue;
+            // A layer inside a folder that is switched off is not drawn (the folder's eye hides everything in it).
+            let folderOff = false;
+            for (let up = layer.parent, guard = 0; up != null && guard < 30 && !folderOff; up = layers[up]?.parent ?? null, guard += 1)
+                if (layers[up]?.type === "folder" && layers[up]?.off)
+                    folderOff = true;
+            if (folderOff)
                 continue;
             const maskIndex = layer.type === "mask" ? i : layer.parent != null && layers[layer.parent]?.type === "mask" ? layer.parent : null;
             if (maskIndex == null) {
@@ -2061,6 +2073,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.mul = exports.IDENTITY = exports.importedOf = void 0;
 exports.invert = invert;
 exports.poseScale = poseScale;
+exports.scaleThrough = scaleThrough;
 exports.renameElements = renameElements;
 exports.registerLibrary = registerLibrary;
 exports.importElements = importElements;
@@ -2092,6 +2105,39 @@ function poseScale(doc, item) {
                 if (el.k === "instance" && el.item === item)
                     return Math.hypot(el.m[0], el.m[1]) || 1;
     return 1;
+}
+/**
+ * The scale a library symbol is shown at when it is reached from the pose `poseItem`: the pose's own placement on the stage times the scale of
+ * every instance on the way down (the first one found), as the player's concatenated matrix has it. The pose itself: poseScale.
+ */
+function scaleThrough(doc, poseItem, item) {
+    const base = poseScale(doc, poseItem);
+    if (item === poseItem)
+        return base;
+    const seen = new Set();
+    const find = (from, depth) => {
+        if (depth > 12 || seen.has(from))
+            return null;
+        seen.add(from);
+        const timeline = doc.symbols.get(from)?.timeline;
+        if (!timeline)
+            return null;
+        for (const layer of timeline.layers)
+            for (const key of layer.frames)
+                for (const el of key.elements) {
+                    if (el.k !== "instance")
+                        continue;
+                    const own = Math.hypot(el.m[0], el.m[1]) || 1;
+                    if (el.item === item)
+                        return own;
+                    const deeper = find(el.item, depth + 1);
+                    if (deeper != null)
+                        return own * deeper;
+                }
+        return null;
+    };
+    const down = find(poseItem, 0);
+    return down == null ? base : base * down;
 }
 function usesOf(doc, items) {
     const uses = { symbols: new Set(), bitmaps: new Set(), brushes: new Set() };

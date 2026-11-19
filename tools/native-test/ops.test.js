@@ -69,10 +69,10 @@ assert.ok(sf.frames[0].morph && sf.frames[1].morph, "both halves re-matched");
 // editing the end key re-matches the tween into it
 let se = o.setMatrix(st, 10, 0, [2, 0, 0, 2, 0, 0]); assert.ok(se.frames[0].morph, "re-matched after edit");
 assert.notDeepEqual(se.frames[0].morph, st.frames[0].morph);
-// unequal outlines: 4 corners vs a 6-sided shape get the same count
+// unequal outlines: 4 corners vs a 6-sided shape are cut at each other's corners (as Animate does: between the longer count and a + b − 1)
 const hex = { k: "shape", m: [1,0,0,1,0,0], fillStyles: { 1: { t: "solid", color: "#00FF00", alpha: 1 } }, strokeStyles: {}, strokes: [], fills: [{ style: { t: "solid", color: "#00FF00", alpha: 1 }, paths: [[["M", 0, 0], ["L", 10, 0], ["L", 15, 8], ["L", 10, 16], ["L", 0, 16], ["L", -5, 8], ["L", 0, 0]]] }] };
 let hx = o.setTween(L([{ i: 0, d: 4, elements: [sq(0, 0, 20, "#00FF00")] }, { i: 4, d: 1, elements: [hex] }]), 0, "shape");
-assert.equal(hx.frames[0].morph[0].curves.length, 6);
+assert.ok(hx.frames[0].morph[0].curves.length >= 6 && hx.frames[0].morph[0].curves.length <= 9, "cut at each other's corners: " + hx.frames[0].morph[0].curves.length);
 // an outline with no partner shrinks to its centre
 let two = o.setTween(L([{ i: 0, d: 4, elements: [sq(0, 0, 20, "#00FF00"), sq(100, 0, 20, "#00FF00")] }, { i: 4, d: 1, elements: [sq(0, 0, 20, "#00FF00")] }]), 0, "shape");
 assert.equal(two.frames[0].morph.length, 2);

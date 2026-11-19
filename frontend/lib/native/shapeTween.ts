@@ -63,7 +63,9 @@ function contoursOf(elements: FlaElement[]): Contour[] {
   const out: Contour[] = [];
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
   const add = (paths: Path[], m: Matrix, kind: "fill" | "stroke", style: number) => {
-    for (const path of paths) {
+    // Each sub-outline (a path can hold several, started by a move) is matched on its own.
+    const subs = paths.flatMap((path) => { const out: Path[] = []; for (const c of path) { if (c[0] === "M") out.push([c]); else out[out.length - 1]?.push(c); } return out; });
+    for (const path of subs) {
       const segs = segsOf(path, m);
       if (!segs.length) continue;
       const pts = segs.map((s) => [s.x0, s.y0]);
@@ -91,19 +93,63 @@ function align(a: Contour, b: Contour): [Seg[], Seg[]] {
     const flipped = d(a.segs[0], flip[0]) + Math.hypot(a.segs[a.segs.length - 1].x1 - flip[flip.length - 1].x1, a.segs[a.segs.length - 1].y1 - flip[flip.length - 1].y1);
     if (flipped < keep) sb = flip;
   }
-  const n = Math.max(a.segs.length, sb.length);
-  const A = grow(a.segs, n);
-  let B = grow(sb, n);
-  if (a.closed && b.closed) {
-    let best = 0, bestCost = Infinity;
-    for (let r = 0; r < n; r += 1) {
-      let cost = 0;
-      for (let i = 0; i < n; i += 1) { const p = A[i], q = B[(i + r) % n]; cost += (p.x0 - q.x0) ** 2 + (p.y0 - q.y0) ** 2; }
-      if (cost < bestCost) { bestCost = cost; best = r; }
-    }
-    if (best) B = [...B.slice(best), ...B.slice(0, best)];
+  // Animate's count is about a + b − 1: both outlines are cut where the other has a corner (matched by the share of the outline's length
+  // travelled), so no corner of either is lost. For a closed pair the start of B is the corner that makes the vertices lie closest together.
+  const turns = a.closed && b.closed ? sb.length : 1;
+  let best: [Seg[], Seg[]] | null = null, bestCost = Infinity;
+  for (let r = 0; r < turns; r += 1) {
+    const rotated = r ? [...sb.slice(r), ...sb.slice(0, r)] : sb;
+    // Outlines with the same number of curves are paired curve for curve (as Animate does); others are cut at each other's corners.
+    const [A, B] = a.segs.length === rotated.length ? [a.segs, rotated] : meet(a.segs, rotated);
+    let cost = 0;
+    for (let i = 0; i < A.length; i += 1) cost += (A[i].x0 - B[i].x0) ** 2 + (A[i].y0 - B[i].y0) ** 2;
+    if (cost < bestCost) { bestCost = cost; best = [A, B]; }
   }
-  return [A, B];
+  return best!;
+}
+
+/** Where each segment starts, as the share (0…1) of the outline's length travelled. */
+function starts(segs: Seg[]): number[] {
+  const total = segs.reduce((n, s) => n + length(s), 0) || 1;
+  let run = 0;
+  return segs.map((s) => { const at = run / total; run += length(s); return at; });
+}
+/** One segment cut at fractions (0…1, rising) of its own length. */
+function cut(s: Seg, at: number[]): Seg[] {
+  const out: Seg[] = [];
+  let rest = s, done = 0;
+  for (const f of at) {
+    const local = (f - done) / (1 - done);
+    if (!(local > 1e-6 && local < 1 - 1e-6)) continue;
+    const ax = rest.x0 + (rest.cx - rest.x0) * local, ay = rest.y0 + (rest.cy - rest.y0) * local;
+    const bx = rest.cx + (rest.x1 - rest.cx) * local, by = rest.cy + (rest.y1 - rest.cy) * local;
+    const mx = ax + (bx - ax) * local, my = ay + (by - ay) * local;
+    if (rest.line) {
+      const lx = rest.x0 + (rest.x1 - rest.x0) * local, ly = rest.y0 + (rest.y1 - rest.y0) * local;
+      out.push({ x0: rest.x0, y0: rest.y0, cx: (rest.x0 + lx) / 2, cy: (rest.y0 + ly) / 2, x1: lx, y1: ly, line: true });
+      rest = { x0: lx, y0: ly, cx: (lx + rest.x1) / 2, cy: (ly + rest.y1) / 2, x1: rest.x1, y1: rest.y1, line: true };
+    } else {
+      out.push({ x0: rest.x0, y0: rest.y0, cx: ax, cy: ay, x1: mx, y1: my, line: false });
+      rest = { x0: mx, y0: my, cx: bx, cy: by, x1: rest.x1, y1: rest.y1, line: false };
+    }
+    done = f;
+  }
+  out.push(rest);
+  return out;
+}
+/** Both outlines cut at each other's corners: the same number of curves, each pair covering the same share of the outline. */
+function meet(a: Seg[], b: Seg[]): [Seg[], Seg[]] {
+  const ua = starts(a), ub = starts(b);
+  const all: number[] = [];
+  for (const u of [...ua, ...ub].sort((x, y) => x - y)) if (!all.length || u - all[all.length - 1] > 1e-4) all.push(u);
+  const pieces = (segs: Seg[], u: number[]): Seg[] => segs.flatMap((s, i) => {
+    const lo = u[i], hi = i + 1 < u.length ? u[i + 1] : 1;
+    const inside = all.filter((v) => v > lo + 2e-4 && v < hi - 2e-4).map((v) => (v - lo) / (hi - lo));
+    return cut(s, inside);
+  });
+  const A = pieces(a, ua), B = pieces(b, ub);
+  const n = Math.max(A.length, B.length);
+  return [grow(A, n), grow(B, n)];
 }
 
 const collapsed = (segs: Seg[], cx: number, cy: number): Seg[] => segs.map((s) => ({ x0: cx, y0: cy, cx, cy, x1: cx, y1: cy, line: s.line }));
@@ -125,8 +171,9 @@ export function matchShapes(from: FlaElement[], to: FlaElement[]): MorphSegment[
     let best = -1, bestCost = Infinity;
     for (const i of free) {
       const b = B[i];
-      if (b.kind !== a.kind || b.style !== a.style) continue;
-      const cost = Math.hypot(a.cx - b.cx, a.cy - b.cy) + 0.5 * Math.abs(Math.sqrt(Math.abs(a.area)) - Math.sqrt(Math.abs(b.area)));
+      if (b.kind !== a.kind) continue;
+      // The same style is preferred, but an outline whose fill changed between the keys is still the same outline.
+      const cost = Math.hypot(a.cx - b.cx, a.cy - b.cy) + 0.5 * Math.abs(Math.sqrt(Math.abs(a.area)) - Math.sqrt(Math.abs(b.area))) + (b.style === a.style ? 0 : 40);
       if (cost < bestCost) { bestCost = cost; best = i; }
     }
     if (best < 0) {

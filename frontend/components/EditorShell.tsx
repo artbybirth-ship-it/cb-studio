@@ -4530,7 +4530,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   };
   // ---- Frame operations, as in Animate: insert / remove frames, insert / clear keyframes, copy / cut / paste frames.
   // The pose's timeline keeps its length, so frames slide inside it. One operation is one undo step.
-  type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "delete-drawing" | "paste-place" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move" | "reverse";
+  type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "delete-drawing" | "paste-place" | "create-tween" | "create-shape-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move" | "reverse";
   type FrameSel = { layers: number[]; from: number; to: number };
   const frameClipboard = useRef<{ layerBase: number; from?: number; items: Array<{ layer: number; offset: number; values: Record<string, number>; tween?: boolean; blank?: boolean }> } | null>(null);
   const [clipboardFilled, setClipboardFilled] = useState(false);

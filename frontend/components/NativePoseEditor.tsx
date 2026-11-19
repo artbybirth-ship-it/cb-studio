@@ -1500,7 +1500,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       case "blank-keyframe": if (!per((l) => insertBlankKeyframe(l, sel.from))) say("There is no frame to put a blank keyframe on there."); return;
       case "clear-keyframe": per((l) => { let out = l; for (const k of l.frames) if (k.i > 0 && k.i >= sel.from && k.i <= sel.to) out = clearKeyframe(out, k.i); return out; }); return;
       case "delete-drawing": if (!per((l) => blankKeyframes(l, sel.from, sel.to))) say("Select a keyframe to delete its drawing (it becomes a blank keyframe)."); return;
-      case "create-tween": case "remove-tween": {
+      case "create-tween": case "create-shape-tween": case "remove-tween": {
         const done = per((l) => {
           let out = l;
           for (const i of startsTouched(l)) {
@@ -1511,7 +1511,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
           }
           return out;
         });
-        if (!done) say(op === "create-tween" ? "Add a keyframe where the tween should end first (F6), then create the tween: a classic tween needs a symbol on the keyframe." : "No tween in these frames.");
+        if (!done) say(op === "create-shape-tween" ? "Add a keyframe where the tween should end first (F6); a shape tween needs drawn shapes on both keyframes." : op === "create-tween" ? "Add a keyframe where the tween should end first (F6), then create the tween: a classic tween needs a symbol on the keyframe." : "No tween in these frames.");
         return;
       }
       case "copy": case "cut": {
@@ -1578,6 +1578,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         const picks = ids.flatMap((i) => { const key = shown?.layers[i] && layerStateAt(shown.layers[i], frame)?.key; return key?.elements.length ? [{ layer: i, el: 0 }] : []; });
         if (!picks.length) return;
         setLayerIndex(picks[0].layer); setElIndex(picks[0].el); setOthers(picks.slice(1));
+            if (op === "create-shape-tween" && (!k.tween || k.tween === "motion") && next && k.elements.some((el) => el.k === "shape") && next.elements.some((el) => el.k === "shape")) out = setTween(out, i, "shape");
       }}
       onFrameOp={runPanelOp}
       canPaste={hasFrames}
@@ -1651,6 +1652,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     commitLayers(layers);
     layers = [];
   };
+      shapeTweens
   const partAction = (action: PartAction) => {
     setPartMenu(null);
     const ids = pickedLayers();

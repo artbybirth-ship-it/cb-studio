@@ -29,7 +29,7 @@ export type FlaLayer = {
 };
 export type FlaSymbol = { version: number; js: string; fps: number; name: string; frames: number; layers: FlaLayer[] };
 
-export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "delete-drawing" | "paste-place" | "create-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move" | "reverse";
+export type FrameOp = "insert-frame" | "remove-frames" | "insert-keyframe" | "clear-keyframe" | "blank-keyframe" | "delete-drawing" | "paste-place" | "create-tween" | "create-shape-tween" | "remove-tween" | "copy" | "cut" | "paste" | "move" | "reverse";
 const DEFAULT_ZOOM = 27; // about 11 px per frame, as in the scene's timeline
 let lastZoom = DEFAULT_ZOOM; // kept while stepping in and out of symbols
 const cellFor = (zoom: number) => 4 + (Math.max(1, Math.min(100, zoom)) / 100) * 26;
@@ -99,7 +99,7 @@ function ValueField({ label, unit, value, decimals, min, max, onChange }: { labe
   );
 }
 
-export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onAddPicture, onUploadPicture, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, pickedProps, onPickLayers, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys, onSetTweenEase, onPreviewTweenEase, onCopyKey, onNative }: {
+export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEdit, onLayerEdit, onDuplicateLayers, onListLibrary, onAddSymbol, onAddPicture, onUploadPicture, onNotice, eases, keys, editable: editableProp, values, keyValues, pickedProp, pickedProps, onPickLayers, onFrameOp, canPaste, onSelectLayer, onSelectKey, onSetValue, onSeek, onPlay, onCrumb, onStepInto, onSetEase, onPreviewEase, onSetKeys, onPreviewKeys, onSetTweenEase, onPreviewTweenEase, onCopyKey, onNative, shapeTweens }: {
   /** Opens the native pose editor for this character's pose (beta). */
   onNative?: () => void;
   /** Scene › character › … › this symbol; clicking one steps back out to it. */
@@ -135,6 +135,8 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   /** Several rows picked here (Shift / ⌘): the layers' indexes. */
   onPickLayers?: (ids: number[]) => void;
   /** A frame operation of Animate on the selected frames (insert / remove frames, insert / clear keyframes, copy / cut / paste). */
+  /** Shape tweens can be made and eased here (native poses). */
+  shapeTweens?: boolean;
   onFrameOp: (op: FrameOp, selection: { layers: number[]; from: number; to: number }, by?: number) => void | Promise<void>;
   /** Frames were copied: Paste is available. */
   canPaste: boolean;
@@ -201,7 +203,8 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
   const pickedShown = picked && pickedLayer ? shownFrames(pickedLayer, anchorsOf(picked.layer), keys?.[picked.layer]).find((item) => item.i === picked.i) : undefined;
   const pickedFrame = pickedShown?.source;
   const pickedEdit = picked && pickedFrame && !pickedShown?.made ? eases?.[`${picked.layer}:${pickedFrame.i}`] : undefined;
-  const pickedClassic = (pickedShown?.tween === "classic" || pickedShown?.tween === "motion") && Boolean(pickedLayer?.props?.length);
+  const pickedShape = Boolean(shapeTweens) && pickedShown?.tween === "shape";
+  const pickedClassic = pickedShape || ((pickedShown?.tween === "classic" || pickedShown?.tween === "motion") && Boolean(pickedLayer?.props?.length));
   // A tween made here (Create Classic Tween) keeps its ease with the layer's keyframes, not among the file's eases.
   const pickedMade = Boolean(pickedShown?.made && picked);
   const pickedMadeFrame = pickedMade && picked ? anchorsOf(picked.layer)[pickedShown!.anchor][0] : 0;
@@ -591,7 +594,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
           </div>
         ) : (
           <span className="cb-symbol-note" title="Inside a character you can edit classic tween eases, and move or add keyframes on tweened layers; shape tweens and layers built from frames are view only">
-            {pickedFrame?.tween === "shape" ? "Shape tween: view only" : "Click a purple tween: edit its ease, drag its keyframes"}
+            {pickedFrame?.tween === "shape" && !shapeTweens ? "Shape tween: view only" : "Click a purple tween: edit its ease, drag its keyframes"}
           </span>
         )}
         <div className="cb-frame-view">
@@ -745,6 +748,7 @@ export default function SymbolTimeline({ crumbs, symbol, frame, playing, layerEd
               <button type="button" role="menuitem" disabled={!onKeyframe} onClick={() => run("clear-keyframe")}>Clear Keyframe<kbd>⇧F6</kbd></button>
               <span className="cb-frame-menu-sep" aria-hidden="true" />
               <button type="button" role="menuitem" onClick={() => run("create-tween")}>Create Classic Tween</button>
+              {shapeTweens && <button type="button" role="menuitem" onClick={() => run("create-shape-tween")}>Create Shape Tween</button>}
               <button type="button" role="menuitem" onClick={() => run("remove-tween")}>Remove Tween</button>
               <span className="cb-frame-menu-sep" aria-hidden="true" />
               <button type="button" role="menuitem" onClick={() => run("copy")}>Copy Frames<kbd>⌥⌘C</kbd></button>

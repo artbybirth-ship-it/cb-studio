@@ -268,6 +268,36 @@ try:
         crumbs2 = js(f"[...document.querySelectorAll('{PANEL} .cb-symbol-crumbs span')].length")
         check("double-clicking a layer's frames steps into its symbol", crumbs2 == 4, f"{crumbs2} crumbs")
         shot("2-inside")
+        # ---- Create Shape Tween (right-click menu) on a keyframe of drawn shapes, then its Ease box
+        made = None; item = None
+        inrows = js("[...document.querySelectorAll('[data-symbol-row]')].map(r=>+r.dataset.symbolRow)")
+        for r in inrows:
+            if (keys(r) or [[0, 9]])[0][1] < 3:  # a one-frame drawing: stretch it so a second keyframe fits
+                click(*lane_at(r, 0))
+                for _ in range(3): key("F5", "F5", 116)
+            k = [x for x in (keys(r) or []) if x[2] == "frames" and x[1] >= 3]
+            if not k: continue
+            at = k[0][0]
+            click(*lane_at(r, at + 2)); key("F6", "F6", 117)  # a second keyframe holding the same drawing
+            click(*lane_at(r, at)); x, y = lane_at(r, at); click(x, y, button="right")
+            item = js("(()=>{const b=[...document.querySelectorAll('.cb-frame-menu button')].find(b=>b.textContent==='Create Shape Tween');if(!b)return null;const r=b.getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2]})()")
+            if not item: break
+            click(*item); time.sleep(0.8)
+            if any(kk[2] == "shape" for kk in (keys(r) or [])): made = (r, at); break
+            undo()
+        check("the right-click menu offers Create Shape Tween", bool(item))
+        if made:
+            r, at = made
+            check("Create Shape Tween makes a green shape tween", any(kk[2] == "shape" for kk in (keys(r) or [])), str(keys(r))[:120])
+            click(*lane_at(r, at + 1))
+            box = js("!!document.querySelector('.cb-symbol-ease .cb-symbol-ease-label') && !/view only/.test(document.querySelector('.cb-symbol-timeline').textContent)")
+            check("a shape tween has the Ease box (not 'view only')", box)
+            undo()
+            check("...⌘Z takes the shape tween away", not any(kk[2] == "shape" for kk in (keys(r) or [])))
+            undo()
+        else:
+            check("Create Shape Tween found a layer of drawn shapes to tween", False)
+
         back = js(f"(()=>{{const b=[...document.querySelectorAll('{PANEL} .cb-symbol-crumbs button')][2];if(!b)return null;const r=b.getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2]}})()")
         if back: click(*back); time.sleep(1)
         check("the pose's crumb steps back out to it", js(f"[...document.querySelectorAll('{PANEL} .cb-symbol-crumbs span')].length") == 3)
