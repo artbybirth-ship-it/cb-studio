@@ -20,7 +20,7 @@ import { EXTRA_BASE, addSymbolLayer, arrangeSymbolLayers, duplicateLayers, group
 import { affinePart, canTransform, flipPart, stageRectOf, isSound, localToParent, partBox, rotatePart, scalePart, skewPart, stageToLocal, type PartInfo, type Pt, type ScaleHandle, type SkewEdge } from "@/lib/partTransform";
 import type { AnimationPlan, CharacterPartDescriptor, CharacterPartKey, ColorReplacement, EditorData, EditorObject, GroupKeyframe, GroupMotion, PoseForeign, Project, RenderJob, Scene, SymbolEaseEdit, SymbolKeyEdit, SymbolLayerEdit, SymbolValueEdit, SymbolValueKey } from "@/types";
 import AssetPanel, { showLibrariesHome } from "./AssetPanel";
-import StageCanvas, { type TransformPatch } from "./StageCanvas";
+import StageCanvas, { type StageViewApi, type TransformPatch } from "./StageCanvas";
 import { readOpenProjects, recentProjectsOf, removeOpenProject, upsertOpenProject, type OpenProjectTab } from "@/lib/openProjects";
 import { buildProjectFile, formatEditedAgo, openProjectFileAsNew, saveProjectFile } from "@/lib/projectFile";
 import SymbolTimeline, { type FlaSymbol } from "./SymbolTimeline";
@@ -428,24 +428,15 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // While either transform dialog is open, the editor's keyboard shortcuts stay off.
   scaleRotateOpenRef.current = scaleRotateOpen || reflectOpen;
   const [canvasFitScale, setCanvasFitScale] = useState(1);
-  // A native pose open in place has its own view over the canvas area: its zoom (1 = the pose fitted to the area), what that is on
-  // screen (CSS pixels per pose unit), and a count that brings it back to the middle. ⌘+ / ⌘− / ⌘0 / ⌘1 and the zoom box act on it then.
-  const [poseZoom, setPoseZoom] = useState(1);
-  const [poseFitScale, setPoseFitScale] = useState(1);
-  const [poseViewReset, setPoseViewReset] = useState(0);
   /** Enter / Return inside a native pose open in place: each press plays or pauses it. */
   const [nativePlayToggle, setNativePlayToggle] = useState(0);
-  const viewFitScale = () => (nativePoseOpenRef.current ? poseFitScale : canvasFitScale);
-  const setViewZoom = (next: number | ((value: number) => number)) => {
-    const set = nativePoseOpenRef.current ? setPoseZoom : setCanvasZoom;
-    set((value) => clampCanvasZoom(typeof next === "function" ? next(value) : next));
-  };
-  const fitView = () => {
-    if (nativePoseOpenRef.current) { setPoseZoom(1); setPoseViewReset((count) => count + 1); }
-    else resetCanvasView();
-  };
+  /** The canvas's zoom and pan, for a native pose open in place: it is drawn on the canvas in the character's place (Animate's Edit in
+   *  Place), so ⌘+ / ⌘− / ⌘0 / ⌘1 and the zoom box zoom the canvas with it, and the wheel, the Zoom tool and Space-drag over it go here. */
+  const stageViewRef = useRef<StageViewApi | null>(null);
+  const setViewZoom = (next: number | ((value: number) => number)) => setCanvasZoom((value) => clampCanvasZoom(typeof next === "function" ? next(value) : next));
+  const fitView = () => resetCanvasView();
   // Actual Size (100%): Cmd/Ctrl+1 or a double-click on the Zoom tool, as in Illustrator.
-  const zoomToActualSize = () => setViewZoom(1 / Math.max(0.01, viewFitScale()));
+  const zoomToActualSize = () => setViewZoom(1 / Math.max(0.01, canvasFitScale));
   const zoomViewByRef = useRef((factor: number) => setViewZoom((value) => value * factor));
   zoomViewByRef.current = (factor: number) => setViewZoom((value) => value * factor);
   const fitViewRef = useRef(fitView);
@@ -4252,10 +4243,6 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // The older pose view's part shortcuts (copy / paste parts, flip, nudge, group, delete…) leave a native pose to its own editor.
   const nativePoseOpen = Boolean(nativeInPlace && nativeInPlace !== "checking");
   nativePoseOpenRef.current = nativePoseOpen;
-  // The zoom box shows the open pose's view while one is open in place; each visit starts fitted.
-  const shownZoom = nativePoseOpen ? poseZoom : canvasZoom;
-  const shownFitScale = nativePoseOpen ? poseFitScale : canvasFitScale;
-  useEffect(() => { setPoseZoom(1); setPoseViewReset((count) => count + 1); }, [nativePoseOpen]);
   symbolDuplicateRef.current = () => {
     if (nativePoseOpen) return false; // a native pose open in place: its editor takes these keys
     if (!symbolView || !symbolLevelNow) return false;
@@ -5008,8 +4995,8 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const stageSymbolView = useMemo(() => {
     if (!symbolView) return null;
     // Hidden layers are saved with the character now (symbolLayers); the view itself hides nothing.
-    return { objectId: symbolView.objectId, levels: symbolView.levels.map((level) => ({ props: level.props, frame: level.frame })), hidden: [] as string[] };
-  }, [symbolView]);
+    return { objectId: symbolView.objectId, levels: symbolView.levels.map((level) => ({ props: level.props, frame: level.frame })), hidden: [] as string[], native: nativePoseOpen };
+  }, [symbolView, nativePoseOpen]);
 
   const deleteLayer = useCallback((id: string) => {
     mutate((data) => {
@@ -6307,14 +6294,14 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                 </button>
               </span>
               <button type="button" ref={zoomValueRef} className="cb-canvas-zoom-value" aria-haspopup="menu" aria-expanded={zoomMenuOpen} onClick={() => setZoomMenuOpen((open) => !open)}>
-                Canvas {Math.round(shownFitScale * shownZoom * 100)}%
+                Canvas {Math.round(canvasFitScale * canvasZoom * 100)}%
                 <svg className="cb-zoom-chevron" viewBox="0 0 14 8" aria-hidden="true"><path d="M1 1l6 6 6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </button>
               <Popover open={zoomMenuOpen} anchorRef={zoomValueRef} onClose={() => setZoomMenuOpen(false)} align="end" offset={14} className="cb-canvas-zoom-menu cb-zoom-menu-v2" aria-label="Canvas zoom">
-                <button type="button" role="menuitem" className={shownZoom === 1 ? "current" : ""} onClick={() => { fitView(); setZoomMenuOpen(false); }}>Fit in Window</button>
+                <button type="button" role="menuitem" className={canvasZoom === 1 ? "current" : ""} onClick={() => { fitView(); setZoomMenuOpen(false); }}>Fit in Window</button>
                 {[25, 50, 75, 100, 200, 500, 1000, 1500, 2000].map((percent) => (
-                  <button key={percent} type="button" role="menuitem" className={shownZoom !== 1 && Math.round(shownFitScale * shownZoom * 100) === percent ? "current" : ""}
-                    onClick={() => { setViewZoom((percent / 100) / Math.max(0.01, shownFitScale)); setZoomMenuOpen(false); }}>
+                  <button key={percent} type="button" role="menuitem" className={canvasZoom !== 1 && Math.round(canvasFitScale * canvasZoom * 100) === percent ? "current" : ""}
+                    onClick={() => { setViewZoom((percent / 100) / Math.max(0.01, canvasFitScale)); setZoomMenuOpen(false); }}>
                     {percent}%
                   </button>
                 ))}
@@ -6484,6 +6471,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               onZoomChange={(value) => setCanvasZoom(clampCanvasZoom(value))}
               onFitScaleChange={setCanvasFitScale}
               viewResetRevision={canvasViewResetRevision}
+              viewApiRef={stageViewRef}
             />
             {symbolView && nativeInPlace && <div ref={setNativeStageHost} className="cb-native-stage-host" data-testid="native-stage-host" style={{ position: "absolute", inset: 0, zIndex: 40 }} />}
           </div>
@@ -6511,10 +6499,12 @@ export default function EditorShell({ projectId }: { projectId: string }) {
                     pointTool={activeTool === "direct"}
                     onPointTool={(on) => setActiveTool(on ? "direct" : "select")}
                     onNotice={showNotice}
-                    zoom={poseZoom}
-                    onZoom={(value) => setPoseZoom(clampCanvasZoom(value))}
-                    onFitScale={setPoseFitScale}
-                    viewReset={poseViewReset}
+                    placement={() => {
+                      const box = document.querySelector<HTMLElement>(`.cb-stage-character[data-editor-object-id="${CSS.escape(target.objectId)}"]`);
+                      return box ? { box, fit: playerFitOf(frameAccessRef.current?.(target.objectId)) ?? draftRef.current?.objects.find((item) => item.id === target.objectId)?.nativePoseFit ?? null } : null;
+                    }}
+                    onViewZoom={(factor, x, y) => stageViewRef.current?.zoomAt(factor, x, y)}
+                    onViewPan={(dx, dy) => stageViewRef.current?.panBy(dx, dy)}
                     zoomTool={activeTool === "zoom"}
                     playToggle={nativePlayToggle}
                   />

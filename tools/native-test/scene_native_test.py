@@ -7,6 +7,7 @@ Opens the project, steps into the character's pose (double-click), opens the "Na
 Use a throwaway project: the edit is written to it.
 """
 import base64, json, os, subprocess, sys, time, urllib.request, websocket
+from pose_view import empty_spot, pose_point, pose_rect
 
 PROJECT, OUT = sys.argv[1], sys.argv[2]
 os.makedirs(OUT, exist_ok=True)
@@ -74,7 +75,7 @@ try:
     shot("3-native-open")
 
     # move a part on the dialog's stage
-    r = rect("[data-testid=stage]"); cx, cy = r[0] + r[2] * 0.5, r[1] + r[3] * 0.4
+    r = pose_rect(js); cx, cy = r[0] + r[2] * 0.5, r[1] + r[3] * 0.4
     mouse("mousePressed", cx, cy, clickCount=1); time.sleep(0.5)
     for i in range(1, 9):
         mouse("mouseMoved", cx + i * 6, cy + i * 3, buttons=1); time.sleep(0.05)

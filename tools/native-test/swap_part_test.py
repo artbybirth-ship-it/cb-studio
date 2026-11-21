@@ -6,6 +6,7 @@ copy (the stage changes, the swapped layer keeps its place), undoes and redoes i
 the swap stayed. Use a throwaway project: the edits are written to it. CB_BACKEND_ORIGIN of the frontend must be http://backend:8000.
 """
 import base64, json, os, subprocess, sys, time, urllib.request, websocket
+from pose_view import empty_spot, pose_point, pose_rect
 
 PROJECT, OUT = sys.argv[1], sys.argv[2]
 os.makedirs(OUT, exist_ok=True)
@@ -77,7 +78,7 @@ try:
     for k in ("nativePose", "nativePoseFit", "symbolKeys", "symbolValues", "symbolEases", "symbolLayers"): o.pop(k, None)
     patch(sc, ed)
     check("the pose opens in the native editor", open_pose())
-    r = rect("[data-testid=stage]")
+    r = pose_rect(js)
     before = stage(); shot("1-open")
     spots = [(0.5, 0.45), (0.5, 0.3), (0.5, 0.6), (0.45, 0.5), (0.55, 0.5), (0.5, 0.2), (0.4, 0.4), (0.6, 0.4), (0.5, 0.75)]
     # the layer row the editor highlights is the selected part's layer
@@ -91,7 +92,7 @@ try:
             if layer and layer != skip_layer: return layer, (fx, fy)
         return None, None
     def plain():
-        click_at(r[0] + r[2] * 0.02, r[1] + r[3] * 0.97)  # empty stage away from the crumbs (top left) and the part panel (top right)
+        click_at(*empty_spot(js))  # the pasteboard: nothing on it
         return stage()
 
     # copy one part, then pick a different part to replace
@@ -113,11 +114,16 @@ try:
     check("Undo brings the old part back exactly", plain() == prior)
     press("z", "KeyZ", 90, 4 | 8)
     check("Redo swaps again", plain() == swapped)
-    # swapping a part for itself does nothing harmful
-    menu_pick(r[0] + r[2] * spot[0], r[1] + r[3] * spot[1], "swap"); time.sleep(1)
-    check("swapping again is a no-op or the same picture", plain() == swapped, note())
+    # a second swap on whatever is under that spot now (another part) works too, and one Undo takes just it back
+    menu_pick(r[0] + r[2] * spot[0], r[1] + r[3] * spot[1], "swap"); time.sleep(1.5)
+    press("z", "KeyZ", 90, 4)
+    check("a second swap is one undo step", plain() == swapped, note())
     click(".cb-symbol-crumbs button"); time.sleep(2)
-    saved = scene()["editor_data"]["objects"][0].get("nativePose") or {}
+    saved = {}
+    for _ in range(20):
+        saved = scene()["editor_data"]["objects"][0].get("nativePose") or {}
+        if saved: break
+        time.sleep(1)
     check("the swap was saved with the scene", bool(saved))
     check("after a reload the pose reopens", open_pose())
     check("the swap is still there", plain() == swapped)

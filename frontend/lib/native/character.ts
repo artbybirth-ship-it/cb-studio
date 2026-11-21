@@ -29,6 +29,9 @@ export function playerFitOf(frame: HTMLIFrameElement | null | undefined): Fit | 
   } catch { return null; }
 }
 
+/** Where the unedited pose `item` of the .fla at `flaUrl` sits in its box, from its artwork (when neither the player nor a saved placement is there). */
+export const artworkFit = (flaUrl: string, loaded: NativeLoaded, item: string): Fit => fitOf(`${flaUrl}|${item}`, loaded, item);
+
 /** Where the unedited pose sits in its box, worked out from its artwork when the player is not available. Cached per pose. */
 function fitOf(key: string, loaded: NativeLoaded, item: string) {
   const cached = fitCache.get(key);
@@ -186,11 +189,13 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
 // ---------- the colour tools' questions, for any drawing (the scene's character, or the level open in the native pose editor)
 const huesOf = (style: import("../fla/xfl").Fill): string[] => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [hexOf(parseColour(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
 
-/** The colour drawn at (px, py) of a drawing of `item` at `frame` placed by `fit` (pixels of that drawing): as shown, and as the file has it. */
-export function colourAtPoint(renderer: NativeRenderer, item: string, frame: number, fit: Fit, px: number, py: number, scope: string): { picked: string; original: string; current: string } | null {
+/** The colour drawn at (px, py) of a drawing of `item` at `frame` placed by `fit` (pixels of that drawing; or a whole matrix, for a turned or
+ *  flipped placement): as shown, and as the file has it. */
+export function colourAtPoint(renderer: NativeRenderer, item: string, frame: number, fit: Fit | readonly number[], px: number, py: number, scope: string): { picked: string; original: string; current: string } | null {
   const ctx = new OffscreenCanvas(1, 1).getContext("2d")!;
+  const m = "s" in fit ? [fit.s, 0, 0, fit.s, fit.tx, fit.ty] : fit;
   // The placement, shifted so the asked-for point lands on the middle of the one pixel.
-  ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - px + 0.5, fit.ty - py + 0.5);
+  ctx.setTransform(m[0], m[1], m[2], m[3], m[4] - px + 0.5, m[5] - py + 0.5);
   renderer.setPartBase(new DOMMatrix().translate(-px + 0.5, -py + 0.5));
   const hit = renderer.hitAt(ctx, item, frame, 0.5, 0.5, scope);
   if (!hit) return null;

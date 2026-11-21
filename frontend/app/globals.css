@@ -3407,6 +3407,8 @@ body.cb-scrubbing,body.cb-scrubbing *{cursor:ew-resize!important;user-select:non
 /* a ⌘G group's registration point (white circle, as on a single object) */
 .cb-group-pivot{position:absolute;width:calc(13px / var(--cb-gz,1));height:calc(13px / var(--cb-gz,1));padding:0;transform:translate(-50%,-50%);box-sizing:border-box;border:calc(1.5px / var(--cb-gz,1)) solid #141414;border-radius:50%;background:#fff;pointer-events:auto;cursor:move;touch-action:none}
 .cb-symbol-viewing .cb-character-tight-hitbox,.cb-symbol-viewing .cb-selection-gizmo{display:none!important}
+/* A native pose open in place draws the character itself, in its place on the canvas: the scene's own drawing of it stands aside. */
+.cb-stage-character[data-native-editing]>*{visibility:hidden!important}
 .cb-symbol-handles{position:absolute;inset:0;z-index:2001;pointer-events:none}
 .cb-symbol-box{position:absolute;pointer-events:none}
 .cb-symbol-box-lines{position:absolute;inset:0;width:100%;height:100%;overflow:visible}

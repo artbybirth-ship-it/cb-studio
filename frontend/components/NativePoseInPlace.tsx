@@ -15,9 +15,10 @@ import { editsOf, type NativeEdits } from "../lib/native/store";
 import { convertLegacy, symbolOfClass, type LegacyFields } from "../lib/native/legacy";
 import { buildClones, numberingFor, numberingOfDocument, pastedClassMap } from "../lib/native/legacyClones";
 import type { PieceNumbering } from "../lib/native/pieces";
+import { artworkFit, type Fit } from "../lib/native/character";
 import type { ColourRule } from "../lib/native/colour";
 
-export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial, legacy, colours, uploadPicture, hosts, crumbs, onStepOut, onSave, colourPick, onColourFrame, onScope, pointTool, onPointTool, onNotice, history, zoom, onZoom, onFitScale, viewReset, zoomTool, playToggle }: {
+export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial, legacy, colours, uploadPicture, hosts, crumbs, onStepOut, onSave, colourPick, onColourFrame, onScope, pointTool, onPointTool, onNotice, history, placement, onViewZoom, onViewPan, zoomTool, playToggle }: {
   flaUrl: string; item: string; poseName: string;
   /** The pose's class in the player (what old edits and colour rules call it). */
   js: string;
@@ -45,11 +46,12 @@ export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial,
   onNotice?: (text: string) => void;
   /** The scene's one Undo / Redo (each change here is one step of it); `turn` changes after each, and the editor takes the edits again. */
   history: { turn: number; undo: () => void; redo: () => void };
-  /** The scene editor's view of the pose (⌘+ / ⌘− / ⌘0 / ⌘1, the zoom box, the Zoom tool): see NativePoseEditor. */
-  zoom?: number;
-  onZoom?: (zoom: number) => void;
-  onFitScale?: (scale: number) => void;
-  viewReset?: number;
+  /** The placed character's box on the scene and where its player put the pose in it (null: not known, then the saved placement or the
+   *  artwork's own is used): the pose opens there, in place (see NativePoseEditor). */
+  placement?: () => { box: HTMLElement; fit: Fit | null } | null;
+  /** The scene canvas's zoom and pan, for the wheel, the Zoom tool and Space-drag over the pose. */
+  onViewZoom?: (factor: number, clientX: number, clientY: number) => void;
+  onViewPan?: (dx: number, dy: number) => void;
   zoomTool?: boolean;
   /** Enter / Return in the scene editor: plays or pauses the pose. */
   playToggle?: number;
@@ -113,6 +115,15 @@ export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial,
   // The shared drawing goes back to the file's own colours when the pose is left.
   useEffect(() => () => { loaded?.renderer.setColourRules(undefined); loaded?.renderer.classes.clear(); }, [loaded]);
 
+  // Where the pose goes on the scene: the character's box, and the pose in it as its player placed it (else as the artwork fits the box).
+  const placementRef = useRef(placement);
+  placementRef.current = placement;
+  const place = useCallback(() => {
+    const found = placementRef.current?.();
+    if (!found || !loaded) return null;
+    return { box: found.box, fit: found.fit ?? artworkFit(flaUrl, loaded, item) };
+  }, [loaded, flaUrl, item]);
+
   const onChange = useCallback((edits: NativeEdits) => { onSave(Object.keys(edits.symbols).length ? { ...edits, pose: item } : null); }, [onSave, item]);
 
   if (error || !loaded) {
@@ -127,7 +138,7 @@ export default function NativePoseInPlace({ flaUrl, item, poseName, js, initial,
   return (
     <NativePoseEditor flaUrl={flaUrl} doc={loaded.doc} renderer={loaded.renderer} poses={[{ item, name: poseName }]} initialEdits={opening.current ?? seed} onChange={onChange}
       uploadPicture={uploadPicture} embedded={hosts} crumbs={crumbs} onStepOut={onStepOut} colourPick={colourPick} onColourFrame={onColourFrame} onScope={onScope} pointTool={pointTool} onPointTool={onPointTool} onNotice={onNotice} redrawKey={coloursKey} note={converted}
-      zoom={zoom} onZoom={onZoom} onFitScale={onFitScale} viewReset={viewReset} zoomTool={zoomTool} playToggle={playToggle}
+      placement={placement ? place : undefined} onViewZoom={onViewZoom} onViewPan={onViewPan} zoomTool={zoomTool} playToggle={playToggle}
       sceneHistory={{ turn: history.turn, edits: initial ?? seed, undo: history.undo, redo: history.redo }} />
   );
 }

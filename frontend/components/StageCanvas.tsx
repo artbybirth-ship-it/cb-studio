@@ -85,7 +85,8 @@ type Props = {
   /** Step inside a character (view only): the character whose own timeline is shown, the symbol
    *  path inside it (cb-animate-bridge SYMBOL_VIEW levels) and the objects of hidden layers. The
    *  rest of the scene is dimmed and the stage only answers double-clicks. */
-  symbolView?: { objectId: string; levels: Array<{ props?: string[]; frame: number }>; hidden: string[] } | null;
+  /** `native`: the pose is open in the native editor, whose stage draws it in the character's place (the character itself is hidden). */
+  symbolView?: { objectId: string; levels: Array<{ props?: string[]; frame: number }>; hidden: string[]; native?: boolean } | null;
   /** Inside a character: a press on a part starts dragging it; the handle moves it by the pointer's travel (fractions of the player) and ends. */
   onSymbolDragStart?: (normalizedX: number, normalizedY: number, shift?: boolean, context?: boolean) => Promise<{ move: (dx: number, dy: number, shift: boolean) => void; end: () => void; click?: () => void } | null>;
   /** A box dragged on empty stage inside a pose (fractions of the player): the parts it touches; additive with Shift. */
@@ -137,7 +138,13 @@ type Props = {
   viewResetRevision?: number;
   /** localStorage key that remembers zoom + pan across page refreshes. */
   viewStorageKey?: string;
+  /** Filled with this view's zoom and pan, for a native pose open in place: its stage lies over the canvas, so the wheel, the Zoom tool
+   *  and Space-drag over it move this view through here. */
+  viewApiRef?: MutableRefObject<StageViewApi | null>;
 };
+
+/** The canvas view, moved from outside (a native pose open in place): zoom by a factor about a screen point; move by screen pixels. */
+export type StageViewApi = { zoomAt: (factor: number, clientX: number, clientY: number) => void; panBy: (dx: number, dy: number) => void };
 
 export type TransformPatch = Partial<Pick<EditorObject, "x" | "y" | "scale" | "rotation" | "pivotX" | "pivotY" | "stretchX" | "stretchY" | "skewX" | "skewY">>;
 type Fit = { scale: number; left: number; top: number };
@@ -307,7 +314,7 @@ const holdToMove = (startX: number, startY: number, box: HTMLElement | null, arm
   };
 };
 
-export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", directSelect = false, editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, colourFrameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolBoxSelect, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, onSymbolPivotReset, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0, viewStorageKey }: Props) {
+export default function StageCanvas({ data, width, height, selectedObjectId, selectedObjectIds, onSelectionChange, onMoveMany, onDuplicateMoved, toolMode = "transform", directSelect = false, editingText = null, onCreateText, onEditText, onTextInput, onTextEditEnd, textSizeRef, transparencyGrid = false, clipToStage = false, isPlaying, playhead, onSelect, onMove, onTransform, onTransformMany, enteredObjectGroup = null, onEnterObjectGroup, onObjectGroupStepOut, onSetGroupPivot, activeCharacterPart = null, onMoveCharacterPart, onTransformCharacterPart: onTransformCharacterPartProp, onSetCharacterPartPivot, onActiveCharacterPart, onCharacterPartDoubleClick, characterPartEntered = false, frameAccessRef, colourFrameAccessRef, viewCenterRef, layerGeometryRef, blockDoubleClick = false, symbolView = null, onSymbolDoubleClick, onSymbolDragStart, onSymbolBoxSelect, canEnterSymbol, onSymbolHandleStart, onSymbolDeselect, onSymbolContext, onSymbolPivotReset, symbolBox, onEnterSymbol, characterIsolated = false, onDistributeParts, onTogglePartSelection, onPartsInBox, onIsolationEmptyClick, onIsolationStepOut, onTransformCharacterParts, colorPickActive = false, colorPickCursor = "pick", onColorPick, onCharacterPartsReady, renderMode = false, renderSeekRevision = 0, zoom = 1, onZoomChange, onFitScaleChange, viewResetRevision = 0, viewStorageKey, viewApiRef }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
   // Characters drawn natively (those with edits from the native editor): the canvas that stands in for the player's, and whether it is showing yet.
@@ -1167,6 +1174,15 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
     wheelZoomTargetRef.current = nextZoom; // keeps the zoom effect from re-centring the view
     setPan({ x: anchorX - fit.left - point.x * nextScale, y: anchorY - fit.top - point.y * nextScale });
     onZoomChange(nextZoom);
+  };
+  if (viewApiRef) viewApiRef.current = {
+    zoomAt: (factor, clientX, clientY) => {
+      const host = hostRef.current;
+      if (renderMode || !host) return;
+      const rect = host.getBoundingClientRect();
+      zoomViewAt(editorZoom * factor, (clientX - rect.left) * browserZoomFactor, (clientY - rect.top) * browserZoomFactor);
+    },
+    panBy: (dx, dy) => { if (!renderMode) setPan((p) => ({ x: p.x + dx * browserZoomFactor, y: p.y + dy * browserZoomFactor })); },
   };
   const [zoomToolOut, setZoomToolOut] = useState(false);
   useEffect(() => {
@@ -3535,6 +3551,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                 key={object.id}
                 data-editor-object-id={object.id}
                 data-symbol-focus={inFocus(object) ? "" : undefined}
+                data-native-editing={symbolView?.native && symbolView.objectId === object.id ? "" : undefined}
                 className={`cb-stage-character ${lockClass} ${selected && !renderMode ? "selected" : ""} ${selected && activeCharacterPart && !renderMode ? "part-edit-mode" : ""}`}
                 style={{
                   ...baseStyle,

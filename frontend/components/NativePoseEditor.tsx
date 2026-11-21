@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { colourAtPoint, paletteOf, relativesOf } from "../lib/native/character";
+import { BOX_H, BOX_W, colourAtPoint, paletteOf, relativesOf, type Fit } from "../lib/native/character";
 import type { Ease, FlaDocument, FlaElement, Keyframe, Layer, Matrix, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
 import { blankKeyframes, clearKeyframe, commit, copyFrames, moveFrames, reverseFrames, setTween, cutFrames, deleteLayers, duplicateLayers, pasteFrames, type FrameClip, history, insertBlankKeyframe, insertLayer, renameLayer, setLayerLocked, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setEase, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
@@ -90,6 +90,29 @@ function PropField({ id, label, unit, value, decimals, min, max, onChange }: { i
     </label>
   );
 }
+/** How strongly the rest of the pose shows around a part being edited (Animate dims it the same way). */
+const DIMMED = 0.35;
+/**
+ * One level around a part being edited (the instance of `item` at index `el` of layer `layer`), with only what lies on one `side` of that part:
+ * the layers on the other side are switched off (layer 0 is the top; masks stay, so what they mask is still masked) and, in the part's own
+ * layer, so are the instances on the other side. The part itself stays when it is a level on the way to the open one (`keep`: it holds things
+ * on both sides), else it is left out (it is drawn in full on its own).
+ */
+const sideOfPart = (timeline: Timeline, layer: number, el: number, item: string, keep: boolean, side: "below" | "above"): Timeline => ({
+  ...timeline,
+  layers: timeline.layers.map((l, i) => {
+    if (i === layer) {
+      return { ...l, frames: l.frames.map((k) => ({ ...k, elements: k.elements.map((e, j) => {
+        if (e.k !== "instance") return e;
+        if (j === el && e.item === item) return keep ? e : { ...e, alpha: 0 };
+        return (side === "below" ? j > el : j < el) ? { ...e, alpha: 0 } : e;
+      }) })) };
+    }
+    const otherSide = side === "below" ? i < layer : i > layer;
+    return otherSide && l.type !== "mask" && l.type !== "folder" ? { ...l, off: true } : l;
+  }),
+});
+
 const isTyping = (target: EventTarget | null) => target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
 
 /** Where a drawing's ink lies, in the units `draw` draws in (found on a big scratch canvas at half size); null when nothing is drawn. */
@@ -107,7 +130,7 @@ function inkBox(draw: (ctx: OffscreenCanvasRenderingContext2D) => void): { x: nu
 /** The colour tools' view of the open level (what the Animate player's colour finder answers), for the scene editor's dropper and the like. */
 export type NativeColourFrame = { getBoundingClientRect: () => DOMRect; contentWindow: { cbColorAt: (x: number, y: number, scope: string) => unknown; cbColorPalette: (scope: string) => unknown; cbColorRelatives: (hex: string, scope: string) => unknown } };
 
-export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl, uploadPicture, embedded, crumbs, onStepOut, colourPick, onColourFrame, onScope, pointTool, onPointTool, onNotice, redrawKey, note: outsideNote, sceneHistory, zoom: zoomProp, onZoom, onFitScale, viewReset, zoomTool, playToggle }: {
+export default function NativePoseEditor({ doc, renderer, poses, initialEdits, onChange, flaUrl, uploadPicture, embedded, crumbs, onStepOut, colourPick, onColourFrame, onScope, pointTool, onPointTool, onNotice, redrawKey, note: outsideNote, sceneHistory, placement, onViewZoom, onViewPan, zoomTool, playToggle }: {
   doc: FlaDocument; renderer: NativeRenderer; poses: Pose[];
   /** Where this character's .fla came from: lets a copied part be found again after a reload. */
   flaUrl?: string;
@@ -143,14 +166,13 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
    * timelines are taken again from `edits`, the character's edits as the scene now has them.
    */
   sceneHistory?: { turn: number; edits?: NativeEdits | null; undo: () => void; redo: () => void };
-  /** In place: the view's zoom, set by the scene editor (⌘+ / ⌘− / ⌘0 / ⌘1, its zoom box). 1 = the open level fitted to the stage. */
-  zoom?: number;
-  /** Asked for another zoom from here (the wheel / a pinch, the Zoom tool's click), about the pointer. */
-  onZoom?: (zoom: number) => void;
-  /** Told what zoom 1 is on screen (CSS pixels per unit of the open level), for the scene editor's zoom box and Actual Size. */
-  onFitScale?: (scale: number) => void;
-  /** In place: changes when the view goes back to the middle (⌘0, Fit in Window). */
-  viewReset?: number;
+  /** In place (Animate's Edit in Place): the placed character's box on the scene and where the pose sits in it. The pose is drawn there, so
+   *  the scene's canvas, its size and the rest of the scene show around it, and the scene's zoom and pan move it. */
+  placement?: () => { box: HTMLElement; fit: Fit } | null;
+  /** In place: the wheel / a pinch and the Zoom tool's click over the stage zoom the scene's canvas about that screen point. */
+  onViewZoom?: (factor: number, clientX: number, clientY: number) => void;
+  /** In place: Space-drag or the middle button over the stage moves the scene's canvas (screen pixels). */
+  onViewPan?: (dx: number, dy: number) => void;
   /** In place: the scene's Zoom tool is on (a click zooms in there, ⌥-click zooms out). */
   zoomTool?: boolean;
   /** In place: changes when the scene editor's Enter / Return plays or pauses the pose (as the timeline's play button does). */
@@ -184,8 +206,10 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     setHist(history<Working>(map));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sceneHistory?.turn]);
-  // The symbols stepped into, pose first; each level after the first remembers where its instance stood in the one above (to carry parts between levels).
-  const [stack, setStack] = useState<Array<{ item: string; m: Matrix }>>(() => [{ item: poses[0]?.item || "", m: IDENTITY }]);
+  // The symbols stepped into, pose first; each level after the first remembers where its instance stood in the one above (to carry parts between
+  // levels and to draw it in place), and `at`: the frame the level above showed then and the instance's layer and index there (the levels around
+  // the open one are drawn dimmed as they stood, without it).
+  const [stack, setStack] = useState<Array<{ item: string; m: Matrix; at?: { frame: number; layer: number; el: number } }>>(() => [{ item: poses[0]?.item || "", m: IDENTITY }]);
   const symbol = stack[stack.length - 1].item;
   const [frame, setFrame] = useState(0);
   const [range, setRange] = useState<[number, number]>([0, 0]);
@@ -217,24 +241,22 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   /** A Properties number while it is being dragged: shown on the stage, kept as one undo step when the drag ends. */
   const [valuePreview, setValuePreview] = useState<{ layer: number; next: Layer } | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, w: 500, h: 900 });
-  /** In place: how far the view is moved from the middle, in canvas pixels (Space-drag or the middle button). */
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  /** A zoom asked for from here (wheel, Zoom tool): the canvas point, from the stage's middle, that stays under the pointer when it arrives. */
-  const zoomAnchor = useRef<{ zoom: number; at: [number, number] } | null>(null);
-  const [zoomSeen, setZoomSeen] = useState(zoomProp ?? 1);
-  const [resetSeen, setResetSeen] = useState(viewReset);
-  /** Space held (a drag moves the view), and a view move in progress. */
+  /** In place: Space held (a drag then moves the scene's canvas), and such a move in progress (the pointer's last place). */
   const [spaceHeld, setSpaceHeld] = useState(false);
-  const panDrag = useRef<{ x: number; y: number; from: { x: number; y: number } } | null>(null);
+  const panDrag = useRef<{ x: number; y: number } | null>(null);
   const [panning, setPanning] = useState(false);
+  /** In place: where the pose sits on this stage's canvas (the pose's units -> canvas pixels), measured from the character on the scene. */
+  const [placeM, setPlaceM] = useState<Matrix | null>(null);
   const [note, setNote] = useState("");
   const canvas = useRef<HTMLCanvasElement>(null);
+  /** Where the dimmed rest of the pose (below and above the part being edited) is drawn before it goes onto the stage. */
+  const dimCanvases = useRef<{ below?: OffscreenCanvas; above?: OffscreenCanvas }>({});
   /** The stage's size on screen (CSS pixels); its canvas has a third more pixels. In place it follows the scene's canvas area. */
   const [stageCss, setStageCss] = useState({ w: 570, h: 420 });
   useEffect(() => {
     const host = embedded?.stage;
     if (!host) return;
-    const measure = () => { const r = host.getBoundingClientRect(); setStageCss({ w: Math.max(200, Math.floor(r.width) - 2), h: Math.max(160, Math.floor(r.height) - 2) }); };
+    const measure = () => { const r = host.getBoundingClientRect(); setStageCss({ w: Math.max(200, Math.floor(r.width)), h: Math.max(160, Math.floor(r.height)) }); };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(host);
@@ -523,8 +545,9 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     setLayerIndex(at); setElIndex(0); setOthers([]);
     setNote(`New layer ${name}`);
   }, [base, working, symbol, layerIndex]);
-  /** The middle of what the stage shows, in this level's own space: where a new layer's artwork is centred. */
-  const viewCentre = (): [number, number] => [view.x + view.w / 2, view.y + view.h / 2];
+  /** What the stage shows, in this level's own space (its middle and size): where a new layer's artwork goes. Set once the view is known. */
+  const shownAreaRef = useRef<() => { c: [number, number]; w: number; h: number }>(() => ({ c: [0, 0], w: 500, h: 900 }));
+  const viewCentre = (): [number, number] => shownAreaRef.current().c;
   const addSymbolLayer = useCallback((item: string, above?: number) => {
     const symbolInfo = doc.symbols.get(item);
     if (!symbolInfo) return;
@@ -549,7 +572,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       const added = await addPicture({ doc, renderer }, { url, bytes, name: picture.name.replace(/\.[a-z0-9]+$/i, "") });
       // Fitted into 40% of what the stage shows (never enlarged), centred.
       const [cx, cy] = viewCentre();
-      const k = Math.min(1, (view.w * 0.4) / Math.max(1, added.width), (view.h * 0.4) / Math.max(1, added.height));
+      const area = shownAreaRef.current();
+      const k = Math.min(1, (area.w * 0.4) / Math.max(1, added.width), (area.h * 0.4) / Math.max(1, added.height));
       addLayerWith({ k: "bitmap", item: added.item, m: [k, 0, 0, k, cx - (added.width * k) / 2, cy - (added.height * k) / 2] }, picture.name.replace(/\.[a-z0-9]+$/i, "") || "Picture", above);
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Could not add the picture");
@@ -570,9 +594,6 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     const data = ctx.getImageData(0, 0, SIZE, SIZE).data;
     let x0 = SIZE, y0 = SIZE, x1 = -1, y1 = -1;
     for (let y = 0; y < SIZE; y += 1) for (let x = 0; x < SIZE; x += 1) if (data[(y * SIZE + x) * 4 + 3] > 8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-    // Each level opens fitted to the stage (stepping in or out frames the new level).
-    setPan({ x: 0, y: 0 });
-    onZoom?.(1);
     if (x1 < 0) { setView({ x: -250, y: -450, w: 500, h: 900 }); return; }
     setView({ x: (x0 - SIZE / 2) / S, y: (y0 - SIZE / 2) / S, w: (x1 - x0) / S, h: (y1 - y0) / S });
     setFrame(0); setRange([0, 0]); setLayerIndex(0); setElIndex(null); setOthers([]);
@@ -587,32 +608,68 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layoutKey, renderer]);
 
-  // The view: the open level fitted to the stage, then zoomed about the stage's middle and moved by `pan` (canvas pixels). Drawing, picking,
-  // dragging, the handles and the colour tools all go through fit(), so they follow the zoom.
-  const zoom = embedded ? zoomProp ?? 1 : 1;
-  // A new zoom keeps the point it was asked about where it is (the middle for ⌘+ / ⌘−); ⌘0 brings the view back to the middle.
-  if (zoomSeen !== zoom) {
-    const a = zoomAnchor.current && Math.abs(zoomAnchor.current.zoom - zoom) < 1e-9 ? zoomAnchor.current.at : [0, 0];
-    const r = zoom / zoomSeen;
-    setZoomSeen(zoom);
-    setPan({ x: a[0] - (a[0] - pan.x) * r, y: a[1] - (a[1] - pan.y) * r });
-  }
-  if (resetSeen !== viewReset) { setResetSeen(viewReset); setPan({ x: 0, y: 0 }); }
-  /** Zoom by a factor about a canvas point (from the stage's middle); the scene editor keeps the zoom (same limits as its canvas). */
-  const zoomAt = (factor: number, at: [number, number]) => {
-    if (!onZoom) return;
-    const next = Math.max(0.1, Math.min(200, zoom * factor));
-    zoomAnchor.current = { zoom: next, at };
-    onZoom(next);
+  // In place the pose is drawn where the character stands on the scene (Animate's Edit in Place), so the scene's canvas, its size and the
+  // rest of the scene show around it and the scene's zoom and pan move it. Its placement is measured every frame from the character's box
+  // on the scene (three marks at the box's corners: where the box is, how big, turned or flipped) and where the pose sits in that box.
+  const placementRef = useRef(placement);
+  placementRef.current = placement;
+  const placed = Boolean(placement);
+  useEffect(() => {
+    if (!placed) return;
+    let raf = 0, lastKey = "", marked: HTMLElement | null = null;
+    const marks = [0, 1, 2].map((i) => {
+      const mark = document.createElement("i");
+      mark.className = "cb-native-place-mark";
+      mark.style.cssText = `position:absolute;width:0;height:0;margin:0;padding:0;border:0;pointer-events:none;left:${i === 1 ? "100%" : "0"};top:${i === 2 ? "100%" : "0"}`;
+      return mark;
+    });
+    const measure = () => {
+      raf = requestAnimationFrame(measure);
+      const place = placementRef.current?.(), el = canvas.current;
+      if (!place || !el) return;
+      if (marked !== place.box) { marks.forEach((mark) => place.box.appendChild(mark)); marked = place.box; }
+      const [a, b, c] = marks.map((mark) => mark.getBoundingClientRect());
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      const kx = el.width / r.width, ky = el.height / r.height;
+      // The drawing's box (BOX_W x BOX_H pixels, as the scene draws the character) -> this canvas's pixels; then the pose into the box.
+      const box: Matrix = [((b.left - a.left) / BOX_W) * kx, ((b.top - a.top) / BOX_W) * ky, ((c.left - a.left) / BOX_H) * kx, ((c.top - a.top) / BOX_H) * ky, (a.left - r.left) * kx, (a.top - r.top) * ky];
+      const m = mulM(box, [place.fit.s, 0, 0, place.fit.s, place.fit.tx, place.fit.ty]);
+      const key = m.map((v) => v.toFixed(3)).join(",");
+      if (key !== lastKey) { lastKey = key; setPlaceM(m); }
+    };
+    measure();
+    return () => { cancelAnimationFrame(raf); marks.forEach((mark) => mark.remove()); };
+  }, [placed]);
+
+  /** The open level -> canvas pixels. In place: the pose's place on the scene, then the parts stepped into (each where it sits in its
+   *  parent); elsewhere the level fitted to the stage. `back` is the way back, `s` canvas pixels per unit (for how near is near). */
+  type View = { m: Matrix; back: Matrix; s: number };
+  const viewOf = useCallback((w: number, h: number): View => {
+    let m: Matrix;
+    if (placeM) m = stack.slice(1).reduce((outer: Matrix, level) => mulM(outer, level.m), placeM);
+    else {
+      const s0 = Math.min(w / (view.w * 1.15), h / (view.h * 1.15));
+      m = [s0, 0, 0, s0, w / 2 - (view.x + view.w / 2) * s0, h / 2 - (view.y + view.h / 2) * s0];
+    }
+    return { m, back: invertM(m), s: Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1 };
+  }, [placeM, stack, view]);
+  /** A canvas point as a point of the open level; a level point on the canvas; a move on the canvas as a move in the level. */
+  const toLevel = (v: View, cx: number, cy: number): [number, number] => applyM(v.back, [cx, cy]);
+  const onCanvas = (v: View, p: Pt): [number, number] => applyM(v.m, p);
+  const levelMove = (v: View, dx: number, dy: number): [number, number] => [v.back[0] * dx + v.back[2] * dy, v.back[1] * dx + v.back[3] * dy];
+  shownAreaRef.current = () => {
+    if (!placeM) return { c: [view.x + view.w / 2, view.y + view.h / 2], w: view.w, h: view.h };
+    const v = viewOf(canvasW, canvasH);
+    return { c: toLevel(v, canvasW / 2, canvasH / 2), w: canvasW / v.s, h: canvasH / v.s };
   };
+
+  // The wheel and a trackpad pinch over the stage zoom the scene's canvas about the pointer (and never zoom the page).
   const wheelRef = useRef<(e: WheelEvent) => void>(() => {});
   wheelRef.current = (e) => {
-    const el = canvas.current;
-    if (!embedded || !onZoom || !el) return;
-    // The wheel and a trackpad pinch zoom about the pointer, as on the scene's canvas (and never zoom the page).
+    if (!embedded || !onViewZoom) return;
     e.preventDefault();
-    const r = el.getBoundingClientRect();
-    zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, [(e.clientX - r.left) * (el.width / r.width) - el.width / 2, (e.clientY - r.top) * (el.height / r.height) - el.height / 2]);
+    onViewZoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX, e.clientY);
   };
   useEffect(() => {
     const el = canvas.current;
@@ -632,27 +689,17 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     window.addEventListener("blur", away);
     return () => { window.removeEventListener("keydown", down, true); window.removeEventListener("keyup", up, true); window.removeEventListener("blur", away); };
   }, [inPlace]);
-  const fit = useCallback((w: number, h: number) => {
-    const s0 = Math.min(w / (view.w * 1.15), h / (view.h * 1.15));
-    const tx0 = w / 2 - (view.x + view.w / 2) * s0, ty0 = h / 2 - (view.y + view.h / 2) * s0;
-    return { s: s0 * zoom, tx: w / 2 + (tx0 - w / 2) * zoom + pan.x, ty: h / 2 + (ty0 - h / 2) * zoom + pan.y };
-  }, [view, zoom, pan]);
-  // What zoom 1 is on screen, for the scene editor's zoom box (CSS pixels per unit).
-  useEffect(() => {
-    if (!onFitScale) return;
-    onFitScale(Math.min(canvasW / (view.w * 1.15), canvasH / (view.h * 1.15)) * (stageCss.w / canvasW));
-  }, [onFitScale, view, canvasW, canvasH, stageCss.w]);
 
   // The colour tools' view of what the stage shows (the open level at this frame, with the edits): registered once, reading the latest state.
-  const colourState = useRef({ symbol, frame, working, fit });
-  colourState.current = { symbol, frame, working, fit };
+  const colourState = useRef({ symbol, frame, working, viewOf });
+  colourState.current = { symbol, frame, working, viewOf };
   useEffect(() => {
     if (!onColourFrame) return;
     const prepare = () => { const st = colourState.current; renderer.overrides.clear(); for (const [n, t] of st.working) renderer.overrides.set(n, t); return st; };
     onColourFrame({
       getBoundingClientRect: () => canvas.current?.getBoundingClientRect() ?? new DOMRect(),
       contentWindow: {
-        cbColorAt: (x, y, scope) => { const el = canvas.current; if (!el) return null; const st = prepare(); return colourAtPoint(renderer, st.symbol, st.frame, st.fit(el.width, el.height), x * el.width, y * el.height, scope); },
+        cbColorAt: (x, y, scope) => { const el = canvas.current; if (!el) return null; const st = prepare(); return colourAtPoint(renderer, st.symbol, st.frame, st.viewOf(el.width, el.height).m, x * el.width, y * el.height, scope); },
         cbColorPalette: (scope) => paletteOf(renderer, prepare().symbol, scope),
         cbColorRelatives: (hex, scope) => relativesOf(renderer, prepare().symbol, hex, scope),
       },
@@ -668,11 +715,39 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     renderer.overrides.set(symbol, shown);
     const ctx = el.getContext("2d")!;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, el.width, el.height);
-    const { s, tx, ty } = fit(el.width, el.height);
-    ctx.setTransform(s, 0, 0, s, tx, ty);
+    // In place the scene shows through around the pose; elsewhere a white stage.
+    if (embedded) ctx.clearRect(0, 0, el.width, el.height);
+    else { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, el.width, el.height); }
+    const v = viewOf(el.width, el.height);
+    // Inside a part (Animate's Edit in Place): the rest of the pose stays in view, dimmed, as it stood when the part was stepped into, and the
+    // part keeps its place in it: what lies below it is drawn dimmed, then the part in full, then what lies above it dimmed again. Each side is
+    // drawn apart first (a mask in it may reset the canvas's alpha), then laid on the stage faded.
+    const around = stack.length > 1 && stack.slice(1).every((level) => level.at)
+      ? (() => {
+        const chain = stack.slice(1).reduce((outer: Matrix, level) => mulM(outer, level.m), IDENTITY as Matrix);
+        const root = mulM(v.m, invertM(chain));
+        const levels = stack.slice(0, -1).map((level, k) => ({ item: level.item, line: working.get(level.item) ?? doc.symbols.get(level.item)?.timeline, part: stack[k + 1], keep: k < stack.length - 2 }));
+        const side = (which: "below" | "above") => {
+          for (const level of levels) if (level.line) renderer.overrides.set(level.item, sideOfPart(level.line, level.part.at!.layer, level.part.at!.el, level.part.item, level.keep, which));
+          const target = dimCanvases.current[which];
+          const canvasNow = target && target.width === el.width && target.height === el.height ? target : (dimCanvases.current[which] = new OffscreenCanvas(el.width, el.height));
+          const dim = canvasNow.getContext("2d")!;
+          dim.setTransform(1, 0, 0, 1, 0, 0);
+          dim.globalAlpha = 1;
+          dim.clearRect(0, 0, el.width, el.height);
+          dim.setTransform(root[0], root[1], root[2], root[3], root[4], root[5]);
+          renderer.drawSymbol(dim, stack[0].item, stack[1].at!.frame);
+          for (const level of levels) { const own = working.get(level.item); if (own) renderer.overrides.set(level.item, own); else renderer.overrides.delete(level.item); }
+          return canvasNow;
+        };
+        return { below: side("below"), above: side("above") };
+      })()
+      : null;
+    const fade = (layer: OffscreenCanvas) => { ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = DIMMED; ctx.drawImage(layer, 0, 0); ctx.restore(); };
+    if (around) fade(around.below);
+    ctx.setTransform(v.m[0], v.m[1], v.m[2], v.m[3], v.m[4], v.m[5]);
     renderer.drawSymbol(ctx, symbol, frame);
+    if (around) fade(around.above);
     // Each selected part's registration point (the main one in pink, the others in blue), and the drag box.
     const marks: Array<Sel & { main: boolean }> = [...(elIndex != null ? [{ layer: layerIndex, el: elIndex, main: true }] : []), ...others.map((o) => ({ ...o, main: false }))];
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -680,17 +755,17 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       const layer = shown.layers[mark.layer];
       const e = layer && resolveElements(layer, frame)[mark.el];
       if (!e) continue;
-      const pivot = e.k === "instance" ? e.pivot : [0, 0];
-      const px = e.m[0] * pivot[0] + e.m[2] * pivot[1] + e.m[4], py = e.m[1] * pivot[0] + e.m[3] * pivot[1] + e.m[5];
+      const pivot: Pt = e.k === "instance" ? e.pivot : [0, 0];
+      const [qx, qy] = onCanvas(v, applyM(e.m, pivot));
       ctx.strokeStyle = mark.main ? "#e5007d" : "#1a73e8"; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(px * s + tx, py * s + ty, 9, 0, Math.PI * 2); ctx.moveTo(px * s + tx - 14, py * s + ty); ctx.lineTo(px * s + tx + 14, py * s + ty); ctx.moveTo(px * s + tx, py * s + ty - 14); ctx.lineTo(px * s + tx, py * s + ty + 14); ctx.stroke();
+      ctx.beginPath(); ctx.arc(qx, qy, 9, 0, Math.PI * 2); ctx.moveTo(qx - 14, qy); ctx.lineTo(qx + 14, qy); ctx.moveTo(qx, qy - 14); ctx.lineTo(qx, qy + 14); ctx.stroke();
     }
     // Point editing: the main selected part, when it is a drawn shape, shows its anchors (squares) and curve control points (dots).
     let pointsShown = false;
     if (pointMode && elIndex != null) {
       const shape = shown.layers[layerIndex] && resolveElements(shown.layers[layerIndex], frame)[elIndex];
       if (shape?.k === "shape") {
-        const toScreen = (p: Pt): Pt => [(shape.m[0] * p[0] + shape.m[2] * p[1] + shape.m[4]) * s + tx, (shape.m[1] * p[0] + shape.m[3] * p[1] + shape.m[5]) * s + ty];
+        const toScreen = (p: Pt): Pt => onCanvas(v, applyM(shape.m, p));
         const { anchors, controls } = shapePoints(shape);
         ctx.lineWidth = 1; ctx.strokeStyle = "rgba(229,0,125,0.55)";
         for (const c of controls) { const [cx, cy] = toScreen(c.at), [ax, ay] = toScreen(c.a), [bx, by] = toScreen(c.b); ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(cx, cy); ctx.lineTo(bx, by); ctx.stroke(); }
@@ -711,7 +786,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       const x = Math.min(drag.from[0], drag.to[0]), y = Math.min(drag.from[1], drag.to[1]), w = Math.abs(drag.to[0] - drag.from[0]), h = Math.abs(drag.to[1] - drag.from[1]);
       ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
     }
-  }, [renderer, working, shown, symbol, frame, fit, layerIndex, elIndex, others, drag, pointMode, selPts, canvasW, canvasH, redrawKey]);
+  }, [renderer, working, shown, symbol, frame, viewOf, stack, layerIndex, elIndex, others, drag, pointMode, selPts, canvasW, canvasH, redrawKey]);
   // The selected points belong to one shape at one frame.
   useEffect(() => { setSelPts([]); }, [symbol, frame, layerIndex, elIndex, pointMode]);
   // After Undo / Redo (or any change to the shape), only the selected points the shape still has stay selected.
@@ -751,8 +826,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   /** The part at the pointer on the stage. */
   function pick(cx: number, cy: number): { layer: number; el: number } | null {
     if (!shown || !canvas.current) return null;
-    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
-    return pickAt(shown, frame, (cx - tx) / s, (cy - ty) / s, s);
+    const v = viewOf(canvas.current.width, canvas.current.height), [x, y] = toLevel(v, cx, cy);
+    return pickAt(shown, frame, x, y, v.s);
   }
 
   /** Double-click: step into the symbol under the pointer (and select what lies under it there); on empty stage, step back out. */
@@ -784,11 +859,10 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     const part = resolveElements(layer, frame)[hit.el];
     const inner = part?.k === "instance" ? doc.symbols.get(part.item)?.timeline : undefined;
     if (!part || part.k !== "instance" || !inner) { setNote("Nothing to step into here: this is plain artwork"); return; }
-    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
     const back = invert(part.m);
-    const x = (cx - tx) / s, y = (cy - ty) / s;
+    const [x, y] = toLevel(viewOf(canvas.current.width, canvas.current.height), cx, cy);
     arriving.current = { frame: innerFrame(part, layerStateAt(layer, frame)?.offset ?? 0, inner.length), at: [back[0] * x + back[2] * y + back[4], back[1] * x + back[3] * y + back[5]] };
-    setStack((st) => [...st, { item: part.item, m: [...part.m] as Matrix }]);
+    setStack((st) => [...st, { item: part.item, m: [...part.m] as Matrix, at: { frame, layer: hit.layer, el: hit.el } }]);
   };
 
   const toCanvas = (e: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
@@ -798,7 +872,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   /** Every part whose artwork touches the box (canvas pixels). */
   function boxPick(x0: number, y0: number, x1: number, y1: number): Sel[] {
     if (!shown || !canvas.current) return [];
-    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
+    const { m: vm } = viewOf(canvas.current.width, canvas.current.height);
     const w = Math.max(1, Math.ceil(x1 - x0)), h = Math.max(1, Math.ceil(y1 - y0));
     const found: Sel[] = [];
     renderer.overrides.clear();
@@ -810,7 +884,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       if (!state) return;
       resolveElements(layer, frame).forEach((part, j) => {
         const probe = new OffscreenCanvas(w, h), ctx = probe.getContext("2d", { willReadFrequently: true })!;
-        ctx.setTransform(s, 0, 0, s, tx - x0, ty - y0);
+        ctx.setTransform(vm[0], vm[1], vm[2], vm[3], vm[4] - x0, vm[5] - y0);
         const only: Layer = { ...layer, parent: null, type: "normal", frames: [{ i: state.key.i, d: state.key.d, elements: [part as FlaElement] }] };
         renderer.drawTimeline(ctx, { name: "", layers: [only], length: shown.length }, frame);
         const data = ctx.getImageData(0, 0, w, h).data;
@@ -831,13 +905,13 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     if (!pointMode || elIndex == null || !timeline || !canvas.current || timeline.layers[layerIndex]?.locked) return null;
     const shape = timeline.layers[layerIndex] && resolveElements(timeline.layers[layerIndex], frame)[elIndex];
     if (!shape || shape.k !== "shape") return null;
-    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
+    const v = viewOf(canvas.current.width, canvas.current.height), s = v.s;
     const m = shape.m, back = invert(m);
     return {
       shape, layer: layerIndex, el: elIndex,
       /** Shape space to canvas pixels, and back. */
-      screen: (p: Pt): Pt => [(m[0] * p[0] + m[2] * p[1] + m[4]) * s + tx, (m[1] * p[0] + m[3] * p[1] + m[5]) * s + ty],
-      local: (cx: number, cy: number): Pt => { const x = (cx - tx) / s, y = (cy - ty) / s; return [back[0] * x + back[2] * y + back[4], back[1] * x + back[3] * y + back[5]]; },
+      screen: (p: Pt): Pt => onCanvas(v, applyM(m, p)),
+      local: (cx: number, cy: number): Pt => applyM(back, toLevel(v, cx, cy)),
       /** A move of (dx, dy) in the level's units, in the shape's own space. */
       delta: (dx: number, dy: number): Pt => [back[0] * dx + back[2] * dy, back[1] * dx + back[3] * dy],
       /** Canvas pixels per shape unit (for how near the pointer must be). */
@@ -868,8 +942,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     if (!pointMode || elIndex == null || !shown || !canvas.current || shown.layers[layerIndex]?.locked) return null;
     const shape = shown.layers[layerIndex] && resolveElements(shown.layers[layerIndex], frame)[elIndex];
     if (!shape || shape.k !== "shape") return null;
-    const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
-    const screen = (p: Pt): Pt => [(shape.m[0] * p[0] + shape.m[2] * p[1] + shape.m[4]) * s + tx, (shape.m[1] * p[0] + shape.m[3] * p[1] + shape.m[5]) * s + ty];
+    const v = viewOf(canvas.current.width, canvas.current.height);
+    const screen = (p: Pt): Pt => onCanvas(v, applyM(shape.m, p));
     const { anchors, controls } = shapePoints(shape);
     const R = 9;
     let best: { ref: PointRef; d: number } | null = null;
@@ -891,17 +965,16 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   };
   const onStageDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button === 2) return; // the right button opens the part menu (onStageContext)
-    // In place: Space-drag or the middle button moves the view; the Zoom tool's click zooms in there (⌥: out).
+    // In place: Space-drag or the middle button moves the scene's canvas; the Zoom tool's click zooms it in there (⌥: out).
     if (embedded && (e.button === 1 || (e.button === 0 && spaceHeld))) {
       e.preventDefault();
       e.currentTarget.setPointerCapture(e.pointerId);
-      panDrag.current = { x: e.clientX, y: e.clientY, from: pan };
+      panDrag.current = { x: e.clientX, y: e.clientY };
       setPanning(true);
       return;
     }
     if (embedded && zoomTool && e.button === 0) {
-      const [cx, cy] = toCanvas(e);
-      zoomAt(e.altKey ? 1 / 1.25 : 1.25, [cx - e.currentTarget.width / 2, cy - e.currentTarget.height / 2]);
+      onViewZoom?.(e.altKey ? 1 / 1.25 : 1.25, e.clientX, e.clientY);
       return;
     }
     focusRef.current = "stage";
@@ -959,8 +1032,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const onStageMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const moving = panDrag.current;
     if (moving) {
-      const k = e.currentTarget.width / e.currentTarget.getBoundingClientRect().width;
-      setPan({ x: moving.from.x + (e.clientX - moving.x) * k, y: moving.from.y + (e.clientY - moving.y) * k });
+      onViewPan?.(e.clientX - moving.x, e.clientY - moving.y);
+      panDrag.current = { x: e.clientX, y: e.clientY };
       return;
     }
     if (!drag || !shown || !canvas.current) return;
@@ -969,27 +1042,24 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     if (drag.kind === "anchors") {
       const ps = pointShape(base);
       if (!ps) return;
-      const { s } = fit(canvas.current.width, canvas.current.height);
-      const d = ps.delta((cx - drag.start[0]) / s, (cy - drag.start[1]) / s);
+      const d = ps.delta(...levelMove(viewOf(canvas.current.width, canvas.current.height), cx - drag.start[0], cy - drag.start[1]));
       const to = drag.from.map((p): Pt => [p[0] + d[0], p[1] + d[1]]);
       const moved = setElement(base!.layers[drag.layer], frame, drag.el, (el) => (el.k === "shape" ? moveAnchors(el, drag.from, to) : el));
       setDrag({ ...drag, to, preview: new Map([[drag.layer, moved]]) });
       return;
     }
     if (drag.kind === "point") {
-      const { s, tx, ty } = fit(canvas.current.width, canvas.current.height);
       const level = base!.layers[drag.layer] && resolveElements(base!.layers[drag.layer], frame)[drag.el];
       if (!level || level.k !== "shape") return;
       // The pointer, in the level's space and then in the shape's own space.
-      const back = invert(level.m), x = (cx - tx) / s, y = (cy - ty) / s;
+      const back = invert(level.m), [x, y] = toLevel(viewOf(canvas.current.width, canvas.current.height), cx, cy);
       const to: Pt = [back[0] * x + back[2] * y + back[4], back[1] * x + back[3] * y + back[5]];
       const moved = setElement(base!.layers[drag.layer], frame, drag.el, (el) => (el.k === "shape" ? movePoint(el, drag.ref, to) : el));
       setDrag({ ...drag, preview: new Map([[drag.layer, moved]]) });
       return;
     }
     if (drag.kind !== "part") return;
-    const { s } = fit(canvas.current.width, canvas.current.height);
-    const dx = (cx - drag.start[0]) / s, dy = (cy - drag.start[1]) / s;
+    const [dx, dy] = levelMove(viewOf(canvas.current.width, canvas.current.height), cx - drag.start[0], cy - drag.start[1]);
     const preview = new Map<number, Layer>();
     for (const h of drag.held) preview.set(h.layer, setMatrix(preview.get(h.layer) ?? base!.layers[h.layer], frame, h.el, [h.m[0], h.m[1], h.m[2], h.m[3], h.m[4] + dx, h.m[5] + dy]));
     setDrag({ ...drag, preview });
@@ -1090,9 +1160,8 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   const levelPoint = (clientX: number, clientY: number): [number, number] | null => {
     const el = canvas.current;
     if (!el) return null;
-    const r = el.getBoundingClientRect(), { s, tx, ty } = fit(el.width, el.height);
-    const cx = (clientX - r.left) * (el.width / r.width), cy = (clientY - r.top) * (el.height / r.height);
-    return [(cx - tx) / s, (cy - ty) / s];
+    const r = el.getBoundingClientRect();
+    return toLevel(viewOf(el.width, el.height), (clientX - r.left) * (el.width / r.width), (clientY - r.top) * (el.height / r.height));
   };
   const beginHandle = (handle: Handle) => (e: React.PointerEvent<HTMLElement>) => {
     if (e.button !== 0 || !handleModel) return;
@@ -1283,16 +1352,18 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         <span data-testid="note" style={{ font: "12px system-ui" }}>{note || outsideNote}</span>
       </div>
   );
+  /** The stage's border (none in place: the canvas lies exactly over the scene's). */
+  const edge = embedded ? 0 : 1;
   const stageEl = (
-        <div style={{ position: "relative", width: stageCss.w + 2, height: stageCss.h + 2, flex: "none" }}>
-        <canvas data-testid="stage" ref={canvas} width={canvasW} height={canvasH} style={{ border: "1px solid #ccc", width: stageCss.w, height: stageCss.h, touchAction: "none", cursor: panning ? "grabbing" : embedded && spaceHeld ? "grab" : embedded && zoomTool ? "zoom-in" : colourPick ? "crosshair" : drag?.kind === "part" || drag?.kind === "point" ? "grabbing" : drag?.kind === "box" ? "crosshair" : "default" }}
+        <div style={{ position: "relative", width: stageCss.w + edge * 2, height: stageCss.h + edge * 2, flex: "none" }}>
+        <canvas data-testid="stage" ref={canvas} width={canvasW} height={canvasH} style={{ border: embedded ? "none" : "1px solid #ccc", display: "block", width: stageCss.w, height: stageCss.h, touchAction: "none", cursor: panning ? "grabbing" : embedded && spaceHeld ? "grab" : embedded && zoomTool ? "zoom-in" : colourPick ? "crosshair" : drag?.kind === "part" || drag?.kind === "point" ? "grabbing" : drag?.kind === "box" ? "crosshair" : "default" }}
           onPointerDown={onStageDown} onPointerMove={onStageMove} onPointerUp={onStageUp} onDoubleClick={onStageDouble} onContextMenu={onStageContext} />
         {handleModel && canvas.current && (() => {
           // The box follows a drag in progress (the preview), the handles sit on it.
-          const el = canvas.current, { s, tx, ty } = fit(el.width, el.height), k = stageCss.w / el.width;
+          const el = canvas.current, v = viewOf(el.width, el.height), k = stageCss.w / el.width;
           const G = drag?.kind === "handle" && drag.preview ? (() => { const h = drag.held[0], now = drag.preview!.get(h.layer); const m = now && resolveElements(now, frame)[h.el]?.m; return m ? mulM(m, invertM(h.m)) : null; })() : null;
           const frameNow = G ? mulM(G, handleModel.frame) : handleModel.frame;
-          const toCss = (p: [number, number]): [number, number] => [1 + (p[0] * s + tx) * k, 1 + (p[1] * s + ty) * k];
+          const toCss = (p: [number, number]): [number, number] => { const [x, y] = onCanvas(v, p); return [edge + x * k, edge + y * k]; };
           const corners = cornersOf(frameNow, handleModel.box).map(toCss);
           const at = (f: [number, number]) => toCss(applyM(frameNow, [handleModel.box.x0 + f[0] * (handleModel.box.x1 - handleModel.box.x0), handleModel.box.y0 + f[1] * (handleModel.box.y1 - handleModel.box.y0)]));
           const centre: [number, number] = [(corners[0][0] + corners[2][0]) / 2, (corners[0][1] + corners[2][1]) / 2];
@@ -1335,7 +1406,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
           {parts.map((p, i) => (
             <div key={i}>
               <button style={{ ...btn, background: i === elIndex ? "#ffd7ee" : undefined }} onClick={() => setElIndex(i)}>#{i + 1} {p.k === "instance" ? short(p.item) : p.k}</button>
-              {p.k === "instance" && i === elIndex && doc.symbols.has(p.item) && <button style={btn} onClick={() => setStack((s) => [...s, { item: p.item, m: [...p.m] as Matrix }])}>Step into</button>}
+              {p.k === "instance" && i === elIndex && doc.symbols.has(p.item) && <button style={btn} onClick={() => setStack((s) => [...s, { item: p.item, m: [...p.m] as Matrix, at: { frame, layer: layerIndex, el: i } }])}>Step into</button>}
             </div>
           ))}
           {tween && (
@@ -1507,6 +1578,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
             const k = out.frames.find((x) => x.i === i), next = out.frames.find((x) => x.i === (k ? k.i + k.d : -1));
             if (!k) continue;
             if (op === "create-tween" && !k.tween && next && k.elements.some((el) => el.k === "instance")) out = setTween(out, i, "motion");
+            if (op === "create-shape-tween" && (!k.tween || k.tween === "motion") && next && k.elements.some((el) => el.k === "shape") && next.elements.some((el) => el.k === "shape")) out = setTween(out, i, "shape");
             if (op === "remove-tween" && k.tween) out = setTween(out, i, null);
           }
           return out;
@@ -1578,9 +1650,9 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         const picks = ids.flatMap((i) => { const key = shown?.layers[i] && layerStateAt(shown.layers[i], frame)?.key; return key?.elements.length ? [{ layer: i, el: 0 }] : []; });
         if (!picks.length) return;
         setLayerIndex(picks[0].layer); setElIndex(picks[0].el); setOthers(picks.slice(1));
-            if (op === "create-shape-tween" && (!k.tween || k.tween === "motion") && next && k.elements.some((el) => el.k === "shape") && next.elements.some((el) => el.k === "shape")) out = setTween(out, i, "shape");
       }}
       onFrameOp={runPanelOp}
+      shapeTweens
       canPaste={hasFrames}
       onSelectLayer={(index) => {
         focusRef.current = "timeline";
@@ -1612,7 +1684,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
         const part = key?.elements.find((el) => el.k === "instance" && renderer.classOfItem(el.item) === js);
         if (!part || part.k !== "instance" || !doc.symbols.has(part.item)) { say("Nothing to step into here: this is plain artwork"); return; }
         arriving.current = null;
-        setStack((st) => [...st, { item: part.item, m: [...part.m] as Matrix }]);
+        setStack((st) => [...st, { item: part.item, m: [...part.m] as Matrix, at: { frame: at, layer: layerIndex2, el: key!.elements.indexOf(part) } }]);
       }}
       onSetEase={(layer, key: FlaFrame, value) => setPanelEase(layer, key.i, value)}
       onPreviewEase={(layer, key: FlaFrame, value) => setEasePreview(value == null ? null : { layer, at: key.i, value })}
@@ -1652,7 +1724,6 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     commitLayers(layers);
     layers = [];
   };
-      shapeTweens
   const partAction = (action: PartAction) => {
     setPartMenu(null);
     const ids = pickedLayers();
@@ -1706,11 +1777,17 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
     return (
       <>
         {createPortal(
-          <div data-testid="native-editor" className="cb-native-inplace-stage" style={{ position: "absolute", inset: 0, background: "#e7e7e7", overflow: "hidden" }}
+          <div data-testid="native-editor" className="cb-native-inplace-stage" style={{ position: "absolute", inset: 0, background: "transparent", overflow: "hidden" }}
             // For the headless tests: the last message, the picked part (layer, part, its X / Y) and point editing, which no panel shows here.
             data-note={note || outsideNote || ""} data-point-mode={pointMode ? "on" : "off"}
-            // ...and the view: scale and offset of the open level on the canvas, and canvas pixels per CSS pixel.
-            data-view={(() => { const v = fit(canvasW, canvasH); return JSON.stringify({ s: v.s, tx: v.tx, ty: v.ty, k: canvasW / stageCss.w, zoom }); })()}
+            // ...and the view: the open level -> canvas pixels, canvas pixels per CSS pixel, and whether it is placed on the scene yet.
+            // `frame`: where the open level's own framing (its first frame's ink with a margin, as the stage once showed it) lies on the stage,
+            // in CSS pixels from the stage's top left, so tests can still point at "the middle of the pose" wherever it now stands.
+            data-view={(() => {
+              const v = viewOf(canvasW, canvasH), k = canvasW / stageCss.w, s0 = Math.min(canvasW / (view.w * 1.15), canvasH / (view.h * 1.15));
+              const a = onCanvas(v, [view.x + view.w / 2 - canvasW / 2 / s0, view.y + view.h / 2 - canvasH / 2 / s0]), b = onCanvas(v, [view.x + view.w / 2 + canvasW / 2 / s0, view.y + view.h / 2 + canvasH / 2 / s0]);
+              return JSON.stringify({ m: v.m, k, placed: Boolean(placeM), frame: [Math.min(a[0], b[0]) / k, Math.min(a[1], b[1]) / k, Math.abs(b[0] - a[0]) / k, Math.abs(b[1] - a[1]) / k] });
+            })()}
             data-picked={(() => { const el = elIndex != null && shown?.layers[layerIndex] ? resolveElements(shown.layers[layerIndex], frame)[elIndex] : undefined; return el ? JSON.stringify({ layer: layerIndex, el: elIndex, x: Math.round(el.m[4] * 100) / 100, y: Math.round(el.m[5] * 100) / 100, count: selected().length }) : ""; })()}>
             {stageEl}
           </div>, embedded.stage)}

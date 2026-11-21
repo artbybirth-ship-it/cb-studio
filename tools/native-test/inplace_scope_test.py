@@ -7,6 +7,7 @@ A click on the same colour outside the picked part makes no rule. With nothing p
 Esc with Light/Dark open puts the tool away and stays in the pose; the next Esc steps out, and the scene draws the scoped rule.
 """
 import base64, io, json, os, subprocess, sys, time, urllib.request, websocket
+from pose_view import empty_spot, pose_point, pose_rect
 from PIL import Image
 
 PROJECT, OUT, SOURCE = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -75,7 +76,7 @@ try:
         return bool(js("!!document.querySelector('.cb-light-dark')"))
     def pick_part():
         for dy in (0.5, 0.45, 0.55, 0.4, 0.35, 0.6):
-            x, y = centre(STAGE, 0.5, dy); click_at(x, y)
+            x, y = pose_point(js, 0.5, dy); click_at(x, y)
             if js(PICKED): return (x, y)
         return None
 
@@ -114,7 +115,7 @@ try:
     check("⌘Z takes the rule back", len(rules_now(0)) == 0)
 
     # ---- nothing picked: the whole character
-    click_at(*centre(STAGE, 0.05, 0.9))
+    click_at(*empty_spot(js))
     check("a click on empty stage drops the pick", not js(PICKED))
     time.sleep(0.6); snap()
     dark(); click_at(*spot); time.sleep(0.8)

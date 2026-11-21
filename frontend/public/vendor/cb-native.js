@@ -11,7 +11,7 @@
 defs["lib/native/character"] = function (exports, require) {
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.hasNativePose = exports.BOX_H = exports.BOX_W = void 0;
+exports.hasNativePose = exports.artworkFit = exports.BOX_H = exports.BOX_W = void 0;
 exports.playerFitOf = playerFitOf;
 exports.drawsNatively = drawsNatively;
 exports.partKeysUsed = partKeysUsed;
@@ -36,6 +36,9 @@ function playerFitOf(frame) {
         return null;
     }
 }
+/** Where the unedited pose `item` of the .fla at `flaUrl` sits in its box, from its artwork (when neither the player nor a saved placement is there). */
+const artworkFit = (flaUrl, loaded, item) => fitOf(`${flaUrl}|${item}`, loaded, item);
+exports.artworkFit = artworkFit;
 /** Where the unedited pose sits in its box, worked out from its artwork when the player is not available. Cached per pose. */
 function fitOf(key, loaded, item) {
     const cached = fitCache.get(key);
@@ -198,11 +201,13 @@ function createNativeCharacter(object) {
 }
 // ---------- the colour tools' questions, for any drawing (the scene's character, or the level open in the native pose editor)
 const huesOf = (style) => (style.t === "solid" ? [style] : style.stops.map(([, color, alpha]) => ({ color, alpha }))).flatMap((c) => (c.alpha >= 0.05 ? [(0, colour_1.hexOf)((0, colour_1.parseColour)(c.color) ?? { r: 0, g: 0, b: 0, a: 1 })] : []));
-/** The colour drawn at (px, py) of a drawing of `item` at `frame` placed by `fit` (pixels of that drawing): as shown, and as the file has it. */
+/** The colour drawn at (px, py) of a drawing of `item` at `frame` placed by `fit` (pixels of that drawing; or a whole matrix, for a turned or
+ *  flipped placement): as shown, and as the file has it. */
 function colourAtPoint(renderer, item, frame, fit, px, py, scope) {
     const ctx = new OffscreenCanvas(1, 1).getContext("2d");
+    const m = "s" in fit ? [fit.s, 0, 0, fit.s, fit.tx, fit.ty] : fit;
     // The placement, shifted so the asked-for point lands on the middle of the one pixel.
-    ctx.setTransform(fit.s, 0, 0, fit.s, fit.tx - px + 0.5, fit.ty - py + 0.5);
+    ctx.setTransform(m[0], m[1], m[2], m[3], m[4] - px + 0.5, m[5] - py + 0.5);
     renderer.setPartBase(new DOMMatrix().translate(-px + 0.5, -py + 0.5));
     const hit = renderer.hitAt(ctx, item, frame, 0.5, 0.5, scope);
     if (!hit)

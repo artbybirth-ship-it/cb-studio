@@ -7,6 +7,7 @@ drops, undo restores it), deletes again, presses Done, reloads and checks the hi
 Use a throwaway project: the edits are written to it. CB_BACKEND_ORIGIN of the frontend must be http://backend:8000.
 """
 import base64, json, os, subprocess, sys, time, urllib.request, websocket
+from pose_view import empty_spot, pose_point, pose_rect
 
 PROJECT, OUT = sys.argv[1], sys.argv[2]
 os.makedirs(OUT, exist_ok=True)
@@ -97,7 +98,7 @@ try:
     redo_key()
     check("Redo hides it again", stage() == hidden_stage)
     # a click where the hidden layer used to be no longer picks that layer
-    r = rect("[data-testid=stage]")
+    r = pose_rect(js)
 
     # ---- delete: pick a part by clicking, press Delete
     undo_key()  # visible again; the eye state is tested, now delete a clicked part

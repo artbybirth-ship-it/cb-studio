@@ -7,6 +7,7 @@ Opens the project, steps into the character's pose (double-click), opens the "Na
 Use a throwaway project: the edit is written to it.
 """
 import base64, json, os, subprocess, sys, time, urllib.request, websocket
+from pose_view import empty_spot, pose_point, pose_rect
 
 PROJECT, OUT = sys.argv[1], sys.argv[2]
 os.makedirs(OUT, exist_ok=True)
@@ -112,7 +113,7 @@ try:
     # ---- copy Rajkumar's head (⌘C on a part picked on the stage)
     check("Rajkumar's pose opens in place", enter("Rajkumar"))
     shot("2-rajkumar")
-    r = rect("[data-testid=stage]")
+    r = pose_rect(js)
     picked = None
     for fy in (0.14, 0.18, 0.22, 0.26, 0.30):
         mouse("mousePressed", r[0] + r[2] * 0.5, r[1] + r[3] * fy, clickCount=1); mouse("mouseReleased", r[0] + r[2] * 0.5, r[1] + r[3] * fy, clickCount=1); time.sleep(0.8)
