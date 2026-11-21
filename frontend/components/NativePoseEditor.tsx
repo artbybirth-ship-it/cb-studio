@@ -12,10 +12,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BOX_H, BOX_W, colourAtPoint, paletteOf, relativesOf, type Fit } from "../lib/native/character";
-import type { Ease, FlaDocument, FlaElement, Keyframe, Layer, Matrix, Timeline } from "../lib/fla/xfl";
+import type { Ease, FlaDocument, FlaElement, Keyframe, Layer, Matrix, ShapeElement, Timeline } from "../lib/fla/xfl";
 import type { NativeRenderer } from "../lib/native/render";
 import { blankKeyframes, clearKeyframe, commit, copyFrames, moveFrames, reverseFrames, setTween, cutFrames, deleteLayers, duplicateLayers, pasteFrames, type FrameClip, history, insertBlankKeyframe, insertLayer, renameLayer, setLayerLocked, insertFrames, insertKeyframe, moveKeyframe, redo, removeFrames, resolveElements, setEase, setElement, setLayerOff, setMatrix, swapSymbol, undo, type History } from "../lib/native/ops";
-import { addAnchor, convertAnchor, deleteAnchors, edgeAt, moveAnchors, movePoint, samePoint, shapePoints, type PointRef, type Pt } from "../lib/native/points";
+import { addAnchor, bendEdge, convertAnchor, deleteAnchors, edgeAt, moveAnchors, movePoint, samePoint, shapePoints, type EdgeRef, type PointRef, type Pt } from "../lib/native/points";
 import { innerFrame, layerStateAt } from "../lib/native/evaluate";
 import { applyEdits, editsOf, parseEdits, serializeEdits, type NativeEdits } from "../lib/native/store";
 import { IDENTITY, addPicture, importElements, invert, mul, poseScale, registerLibrary } from "../lib/native/library";
@@ -41,7 +41,7 @@ const ROW = 24;
 type Working = ReadonlyMap<string, Timeline>;
 type Pose = { item: string; name: string };
 type Sel = { layer: number; el: number };
-type Drag = { kind: "part"; start: [number, number]; held: Array<Sel & { m: Matrix }>; preview?: Map<number, Layer> } | { kind: "point"; layer: number; el: number; ref: PointRef; preview?: Map<number, Layer> } | { kind: "anchors"; layer: number; el: number; from: Pt[]; start: [number, number]; to?: Pt[]; preview?: Map<number, Layer> } | { kind: "box"; from: [number, number]; to: [number, number]; points?: { add: boolean; onShape: boolean } } | { kind: "key"; layer: number; from: number; start: number; to: number; copy: boolean; toLayer: number; d: number }
+type Drag = { kind: "part"; start: [number, number]; held: Array<Sel & { m: Matrix }>; preview?: Map<number, Layer> } | { kind: "point"; layer: number; el: number; ref: PointRef; preview?: Map<number, Layer> } | { kind: "anchors"; layer: number; el: number; from: Pt[]; start: [number, number]; to?: Pt[]; preview?: Map<number, Layer> } | { kind: "bend"; layer: number; el: number; shape: ShapeElement; edge: EdgeRef; t: number; preview?: Map<number, Layer> } | { kind: "box"; from: [number, number]; to: [number, number]; points?: { add: boolean; onShape: boolean } } | { kind: "key"; layer: number; from: number; start: number; to: number; copy: boolean; toLayer: number; d: number }
   | { kind: "handle"; handle: Handle; frame: Matrix; box: Box; pivot: [number, number]; start: [number, number]; held: Array<Sel & { m: Matrix }>; preview?: Map<number, Layer> }
   | { kind: "pivot"; layer: number; el: number; m: Matrix; preview?: Map<number, Layer> };
 
@@ -271,7 +271,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
   // The timeline on screen: the working copy with a drag in progress laid over it.
   const shown: Timeline | undefined = useMemo(() => {
     if (!base) return undefined;
-    if ((drag?.kind === "part" || drag?.kind === "point" || drag?.kind === "anchors" || drag?.kind === "handle" || drag?.kind === "pivot") && drag.preview) return { ...base, layers: base.layers.map((l, i) => drag.preview!.get(i) ?? l) };
+    if ((drag?.kind === "part" || drag?.kind === "point" || drag?.kind === "bend" || drag?.kind === "anchors" || drag?.kind === "handle" || drag?.kind === "pivot") && drag.preview) return { ...base, layers: base.layers.map((l, i) => drag.preview!.get(i) ?? l) };
     if (panelPreview) return { ...base, layers: base.layers.map((l, i) => panelPreview.get(i) ?? l) };
     if (easePreview) return { ...base, layers: base.layers.map((l, i) => (i === easePreview.layer ? setEase(l, easePreview.at, easeOfNumber(easePreview.value)) : l)) };
     if (valuePreview) return { ...base, layers: base.layers.map((l, i) => (i === valuePreview.layer ? valuePreview.next : l)) };
@@ -998,6 +998,14 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       setDrag({ kind: "point", layer: point.layer, el: point.el, ref: point.ref });
       return;
     }
+    // Option-drag on an edge bends it (a straight edge becomes a curve).
+    const bending = e.altKey ? pointShape(base) : null;
+    const hitEdge = bending && edgeAt(bending.shape, bending.local(cx, cy), 7 / bending.scale);
+    if (bending && hitEdge) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setDrag({ kind: "bend", layer: bending.layer, el: bending.el, shape: bending.shape, edge: hitEdge.edge, t: hitEdge.t });
+      return;
+    }
     const hit = pick(cx, cy);
     // Point editing a shape: a drag on empty stage or on the shape itself (its edges count, even under another part) draws a box that selects the
     // anchors inside it.
@@ -1048,6 +1056,13 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       setDrag({ ...drag, to, preview: new Map([[drag.layer, moved]]) });
       return;
     }
+    if (drag.kind === "bend") {
+      const ps = pointShape(base);
+      if (!ps) return;
+      const bent = bendEdge(drag.shape, drag.edge, drag.t, ps.local(cx, cy));
+      setDrag({ ...drag, preview: new Map([[drag.layer, setElement(base!.layers[drag.layer], frame, drag.el, (el) => (el.k === "shape" ? bent : el))]]) });
+      return;
+    }
     if (drag.kind === "point") {
       const level = base!.layers[drag.layer] && resolveElements(base!.layers[drag.layer], frame)[drag.el];
       if (!level || level.k !== "shape") return;
@@ -1085,7 +1100,7 @@ export default function NativePoseEditor({ doc, renderer, poses, initialEdits, o
       setDrag(null);
       return;
     }
-    if ((drag?.kind === "part" || drag?.kind === "point" || drag?.kind === "anchors" || drag?.kind === "handle" || drag?.kind === "pivot") && drag.preview) {
+    if ((drag?.kind === "part" || drag?.kind === "point" || drag?.kind === "bend" || drag?.kind === "anchors" || drag?.kind === "handle" || drag?.kind === "pivot") && drag.preview) {
       const preview = drag.preview;
       const layers = base!.layers.map((l, i) => preview.get(i) ?? l);
       const map = new Map(working);

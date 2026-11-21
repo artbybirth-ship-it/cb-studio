@@ -107,4 +107,13 @@ assert.deepEqual(corner.fills[0].paths[0][1], ["L", 20, 0], "the curve is now st
 assert.ok(corner.fills[0].paths.flat().every((c) => c[0] !== "Q"), "no curve meets that anchor any more");
 // the round trip: a corner made smooth and back is a corner again
 assert.equal(pts(p.convertAnchor(smooth, [0, 20]).fills[0].paths[0]), pts(outline), "smooth then corner = the outline");
-console.log("points (several, delete, add, convert) ok");
+// Option-drag on an edge: the straight left... right edge (20,0)-(20,20) is pulled out to (30,10) at its middle; the ends stay, the neighbour's copy bends too
+const edge = { a: [20, 20], b: [20, 0], c: null };
+const bentEdge = p.bendEdge(shape, edge, 0.5, [30, 10]);
+const qb = bentEdge.fills[0].paths[0].find((c) => c[0] === "Q" && c[3] === 20 && c[4] === 20 || c[0] === "Q" && c[3] === 20 && c[4] === 0 && c[1] > 20);
+assert.ok(qb, "the right edge is a curve now: " + pts(bentEdge.fills[0].paths[0]));
+assert.ok(Math.abs(qb[1] - 40) < 1e-9 && Math.abs(qb[2] - 10) < 1e-9, "its control point puts the middle at (30,10): " + pts(qb));
+assert.ok(bentEdge.fills[0].paths[1].some((c) => c[0] === "Q"), "the neighbouring fill's copy bends with it");
+assert.ok(bentEdge.strokes[0].paths[0].some((c) => c[0] === "Q" && c[1] === 40), "the stroke follows");
+assert.equal(pts(shape.fills[0].paths[0]), pts(outline), "input not changed");
+console.log("points (several, delete, add, convert, bend) ok");

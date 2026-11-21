@@ -184,6 +184,17 @@ export function addAnchor(el: ShapeElement, edge: EdgeRef, t: number): { shape: 
 }
 
 /**
+ * Option-drag on an edge (Animate's Subselection with ⌥): the edge bends so that its point at t (0..1 from a to b) goes to `through`; its ends
+ * stay. A straight edge becomes a curve; a curved one is bent again. Every copy of the edge bends together.
+ */
+export function bendEdge(el: ShapeElement, edge: EdgeRef, t: number, through: Pt): ShapeElement {
+  const ref: Seg = { from: edge.a, to: edge.b, c: edge.c };
+  const u = Math.min(0.95, Math.max(0.05, t)), k = 2 * u * (1 - u);
+  const c: Pt = [(through[0] - (1 - u) ** 2 * edge.a[0] - u * u * edge.b[0]) / k, (through[1] - (1 - u) ** 2 * edge.a[1] - u * u * edge.b[1]) / k];
+  return mapPaths(el, (path) => pathOf(runsOf(path).map((run) => ({ segs: run.segs.map((s) => (sameSeg(s, ref) ? { from: s.from, to: s.to, c } : s)) }))));
+}
+
+/**
  * Corner ↔ curve at the anchor p (Animate's Convert Anchor Point tool). When any edge meeting there is curved, every edge meeting there
  * is made straight (a corner). When they are all straight, they bend into one smooth curve through p, along the line from the anchor
  * before it to the one after it.

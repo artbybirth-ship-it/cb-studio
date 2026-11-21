@@ -189,6 +189,27 @@ try:
                 click("[data-testid=point-mode]"); same_drawing = stage() == img2; click("[data-testid=point-mode]")
                 check("Undo (3×) takes add and both switches back", same_points and same_drawing, f"{count()} points, same points and steps {same_points}, same drawing {same_drawing}")
 
+            # ---- ⌥-drag on an edge bends it: a straight edge becomes a curve (found among the middles between two points), undone in one step
+            anchors0 = anchors_now(); ctrl0 = len([q for q in pts() if q["k"] == "control"]); bent_ok = None
+            tried = 0
+            for i in range(len(anchors0)):
+                for j in range(i + 1, len(anchors0)):
+                    if bent_ok or tried >= 40: break
+                    m = [(anchors0[i][0] + anchors0[j][0]) / 2, (anchors0[i][1] + anchors0[j][1]) / 2]
+                    others = [a for k, a in enumerate(anchors0) if k not in (i, j)]
+                    if min(((m[0] - a[0]) ** 2 + (m[1] - a[1]) ** 2) ** 0.5 for a in others + [q["p"] for q in pts() if q["k"] == "control"]) < 12: continue
+                    tried += 1
+                    x0, y0 = to_client(m)
+                    mouse("mousePressed", x0, y0, modifiers=1); time.sleep(0.15)
+                    for k in range(1, 7): mouse("mouseMoved", x0 + 3 * k, y0 + 3 * k, buttons=1, modifiers=1); time.sleep(0.04)
+                    mouse("mouseReleased", x0 + 18, y0 + 18, modifiers=1); time.sleep(0.7)
+                    if len([q for q in pts() if q["k"] == "control"]) > ctrl0: bent_ok = (i, j)
+                if bent_ok: break
+            check("⌥-drag on a straight edge bends it into a curve", bool(bent_ok), f"{ctrl0} -> {len([q for q in pts() if q['k'] == 'control'])} handles after {tried} tries")
+            if bent_ok:
+                click("[data-testid=undo]"); time.sleep(0.5)
+                check("...and one Undo makes it straight again", len([q for q in pts() if q["k"] == "control"]) == ctrl0 and anchors_now() == anchors0)
+
             # a shape tween: editing inside the span makes a keyframe there, and the tween plays on with the new shape
             js("document.querySelector('[data-layer]')?.scrollIntoView({block:'center'})"); time.sleep(0.3)
             green = js("""(()=>{const rows=[...document.querySelectorAll('[data-layer]')];for(const r of rows){const k=[...r.querySelectorAll('[data-key]')].find(k=>getComputedStyle(k).backgroundColor==='rgb(191, 232, 191)'&&parseInt(k.style.width)>=60);if(k){const b=r.getBoundingClientRect();return {layer:+r.dataset.layer,key:k.dataset.key,left:parseInt(k.style.left),y:b.top+b.height/2,x:b.left}}}return null})()""")
