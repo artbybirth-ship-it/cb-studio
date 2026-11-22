@@ -46,9 +46,10 @@ import HeaderUserIcon from "./HeaderUserIcon";
 import Popover from "./Popover";
 import { renderProjectThumbnail } from "@/lib/projectThumbnail";
 import ScaleRotateDialog from "./ScaleRotateDialog";
+import AlignPanel from "@/components/AlignPanel";
 import ToolGroup from "./ToolGroup";
 import {
-  AlignBottomIcon, AlignHCenterIcon, AlignIcon, AlignLeftIcon, AlignRightIcon, AlignTopIcon, AlignVCenterIcon, AdjustColourIcon, ColourIcon, DistributeHIcon, DistributeVIcon,
+  AlignBottomIcon, AlignHCenterIcon, AlignIcon, AlignLeftIcon, AlignRightIcon, AlignTopIcon, AlignVCenterIcon, AdjustColourIcon, ColourIcon, DrawIcon, DistributeHIcon, DistributeVIcon,
   EyedropperIcon, ExportIcon, FileIcon, FillStrokeIcon, FindReplaceIcon, ImportIcon, LightDarkIcon, NewFileIcon, OpenFileIcon, ReflectIcon, DirectSelectIcon, SaveAsIcon, SaveIcon, ScaleIcon, SelectIcon, TextIcon, TransformIcon,
 } from "./toolIcons";
 import TextPanel, { type TextValues } from "./TextPanel";
@@ -402,6 +403,16 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   const [dirty, setDirty] = useState(false);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "unsaved" | "error">("saved");
   const [openTabs, setOpenTabs] = useState<OpenProjectTab[]>([]);
+  const [openMoreOpen, setOpenMoreOpen] = useState(false);
+  const openMoreRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!openMoreOpen) return;
+    const away = (event: PointerEvent) => { if (!openMoreRef.current?.contains(event.target as Node)) setOpenMoreOpen(false); };
+    const esc = (event: KeyboardEvent) => { if (event.key === "Escape") setOpenMoreOpen(false); };
+    window.addEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", esc);
+    return () => { window.removeEventListener("pointerdown", away, true); window.removeEventListener("keydown", esc); };
+  }, [openMoreOpen]);
   const [activeCharacterPart, setActiveCharacterPart] = useState<CharacterPartKey | null>(null);
   const [canvasZoom, setCanvasZoom] = useState(() => readSavedCanvasView(projectId).zoom);
   // View-only transparency grid (Shift+T); never saved or exported.
@@ -590,7 +601,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   // One dark box on the rail at a time, only once a tool is used: the last tool clicked keeps it
   // until another is clicked; tool shortcuts (V / Q / S / O, Cmd+F) move it too. None when the
   // editor opens, and automatic tool changes (back to Select after a pick or Esc) don't move it.
-  const [railHighlight, setRailHighlight] = useState<"edit" | "file" | "text" | "colour" | "align" | null>(null);
+  const [railHighlight, setRailHighlight] = useState<"edit" | "file" | "text" | "colour" | "draw" | "align" | null>(null);
 
   // A refresh must never lose work: every change is also kept in this browser until the
   // autosave reaches the server, and a newer local copy wins when the scene is opened.
@@ -6115,20 +6126,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }}>
         <aside className="cb-tool-rail">
           {/* Tool groups (Illustrator): a corner mark means more inside — hold, or click the mark. */}
-          <ToolGroup label="Edit" panelTitle="Edit"
-            icon={lastEditTool === "scale" ? <ScaleIcon /> : lastEditTool === "reflect" ? <ReflectIcon /> : lastEditTool === "direct" ? <DirectSelectIcon /> : <SelectIcon />}
-            active={railHighlight === "edit"} onPress={() => setRailHighlight("edit")}
-            title={lastEditTool === "direct" ? "Direct select tool (A): like Select, but the selection is a thin light-blue outline with no transform handles" : lastEditTool === "scale" ? "Scale tool (S)" : lastEditTool === "reflect" ? "Reflect tool (O), then Enter for the Reflect dialog" : "Selection tool (V): click to select (Shift+click adds), drag to move; handles scale, rotate, stretch and skew"}
-            onPrimary={() => setActiveTool(lastEditTool)}
-            items={[
-              // One dark box: Transform while its panel is open, else the current tool.
-              { id: "select", label: "Select", shortcut: "V", icon: <SelectIcon />, active: !transformOpen && activeTool === "select", onSelect: () => setActiveTool("select") },
-              { id: "direct", label: "Direct select", shortcut: "A", icon: <DirectSelectIcon />, active: !transformOpen && activeTool === "direct", title: "Direct select (A): select and move like Select, but the selection is a thin light-blue outline with no transform handles", onSelect: () => setActiveTool("direct") },
-              { id: "scale", label: "Scale", shortcut: "S", icon: <ScaleIcon />, active: !transformOpen && activeTool === "scale", onSelect: () => setActiveTool("scale") },
-              { id: "reflect", label: "Reflect", shortcut: "O", icon: <ReflectIcon />, active: !transformOpen && activeTool === "reflect", onSelect: () => setActiveTool("reflect") },
-              { id: "transform", label: "Transform", shortcut: spacedShortcut(transformShortcut), icon: <TransformIcon />, active: transformOpen, title: "Open or close the Transform panel", onSelect: () => setTransformOpen((open) => !open) },
-            ]} />
-          <ToolGroup label="File" panelTitle="File" icon={<FileIcon />} buttonRef={openButtonRef} active={railHighlight === "file"} onPress={() => setRailHighlight("file")} title="New, open, save or export the project"
+          <ToolGroup label="File" panelTitle="File" panelClassName="cb-vflyout" icon={<FileIcon />} buttonRef={openButtonRef} active={railHighlight === "file"} onPress={() => setRailHighlight("file")} title="New, open, save or export the project"
             items={[
               { id: "save", label: "Save", shortcut: "⌘ S", icon: <SaveIcon />, title: "Save to a .cb file on this device", onSelect: () => void save() },
               { id: "import", label: "Import", shortcut: "⌘ I", icon: <ImportIcon />, title: "Import to the stage or the library",
@@ -6143,6 +6141,19 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               { id: "open", label: "Open file", shortcut: "⌘ O", icon: <OpenFileIcon />, title: "Recent projects, or open a .cb file from this device", onSelect: () => { if (!openPanel) toggleOpenPanel(); } },
               { id: "new", label: "New file", shortcut: transformShortcut === "⌘T" ? "⌘ N" : "⌥ ⌘ N", icon: <NewFileIcon />, title: "Start a new project", onSelect: newFile },
             ]} />
+          <ToolGroup label="Edit" panelTitle="Edit" panelClassName="cb-edit-flyout cb-vflyout" openOnClick
+            icon={lastEditTool === "scale" ? <ScaleIcon /> : lastEditTool === "reflect" ? <ReflectIcon /> : lastEditTool === "direct" ? <DirectSelectIcon /> : <SelectIcon />}
+            active={railHighlight === "edit"} onPress={() => setRailHighlight("edit")}
+            title={lastEditTool === "direct" ? "Direct select tool (A): like Select, but the selection is a thin light-blue outline with no transform handles" : lastEditTool === "scale" ? "Scale tool (S)" : lastEditTool === "reflect" ? "Reflect tool (O), then Enter for the Reflect dialog" : "Selection tool (V): click to select (Shift+click adds), drag to move; handles scale, rotate, stretch and skew"}
+            onPrimary={() => setActiveTool(lastEditTool)}
+            items={[
+              // One dark box: Transform while its panel is open, else the current tool.
+              { id: "select", label: "Select", shortcut: "V", icon: <SelectIcon />, active: !transformOpen && activeTool === "select", onSelect: () => setActiveTool("select") },
+              { id: "direct", label: "Open Select", shortcut: "A", icon: <DirectSelectIcon />, active: !transformOpen && activeTool === "direct", title: "Direct select (A): select and move like Select, but the selection is a thin light-blue outline with no transform handles", onSelect: () => setActiveTool("direct") },
+              { id: "transform", label: "Transform", shortcut: spacedShortcut(transformShortcut), icon: <TransformIcon />, active: transformOpen, title: "Open or close the Transform panel", onSelect: () => setTransformOpen((open) => !open) },
+              { id: "scale", label: "Scale", shortcut: "S", icon: <ScaleIcon />, active: !transformOpen && activeTool === "scale", onSelect: () => setActiveTool("scale") },
+              { id: "reflect", label: "Reflect", shortcut: "O", icon: <ReflectIcon />, active: !transformOpen && activeTool === "reflect", onSelect: () => setActiveTool("reflect") },
+            ]} />
           <ToolGroup label="Text" icon={<TextIcon />} active={railHighlight === "text"} onPress={() => setRailHighlight("text")} buttonRef={textRailRef}
             title="Text tool (T): click the canvas to type; double-click, hold, or T then Return, for the Text panel"
             onPrimary={() => setActiveTool("text")} onOpenPanel={() => setTextPanelOpen((open) => !open)} panelOpen={textPanelOpen} />
@@ -6153,20 +6164,11 @@ export default function EditorShell({ projectId }: { projectId: string }) {
               { id: "find-replace", label: "Find/Replace", shortcut: "⇧⌘F", icon: <FindReplaceIcon />, active: findReplaceOpen, title: "Find and Replace: colour, text or font", onSelect: () => setFindReplaceOpen(true) },
               { id: "adjust", label: "Adjust colour", shortcut: "⌘ J", icon: <AdjustColourIcon />, active: Boolean(adjust), title: "Adjust colour balance of the selected character or text", onSelect: openAdjust },
               { id: "dropper", label: "Colour Dropper", shortcut: "i", icon: <EyedropperIcon />, active: activeTool === "eyedropper", title: "Colour Dropper: click the canvas to copy a colour (or a text layer's style) onto the selection", onSelect: () => { setActiveTool("eyedropper"); setRailHighlight("colour"); } },            ]} />
-          <ToolGroup label="Align" panelTitle="Align" panelClassName="cb-align-flyout" icon={<AlignIcon />} active={railHighlight === "align"} onPress={() => setRailHighlight("align")} title="Align and distribute the selected layers"
-            items={[
-              { id: "left", label: "Left", icon: <AlignLeftIcon />, keepOpen: true, onSelect: () => runAlign("left") },
-              { id: "hcenter", label: "Centre", icon: <AlignHCenterIcon />, keepOpen: true, onSelect: () => runAlign("hcenter") },
-              { id: "right", label: "Right", icon: <AlignRightIcon />, keepOpen: true, onSelect: () => runAlign("right") },
-              { id: "top", label: "Top", icon: <AlignTopIcon />, keepOpen: true, onSelect: () => runAlign("top") },
-              { id: "vcenter", label: "Middle", icon: <AlignVCenterIcon />, keepOpen: true, onSelect: () => runAlign("vcenter") },
-              { id: "bottom", label: "Bottom", icon: <AlignBottomIcon />, keepOpen: true, onSelect: () => runAlign("bottom") },
-              { id: "hdistribute", label: "Distribute ↔", icon: <DistributeHIcon />, keepOpen: true, title: "Space the centres evenly from left to right (3 or more layers)", onSelect: () => runAlign("hdistribute") },
-              { id: "vdistribute", label: "Distribute ↕", icon: <DistributeVIcon />, keepOpen: true, title: "Space the centres evenly from top to bottom (3 or more layers)", onSelect: () => runAlign("vdistribute") },
-            ]}>
-            <label className="cb-align-to-stage" title="Off: two or more layers align to each other (one layer always aligns to the stage)">
-              <input type="checkbox" checked={alignToStage} onChange={(event) => setAlignToStage(event.target.checked)} /> Align to stage
-            </label>
+          <ToolGroup label="Draw" panelTitle="Draw" icon={<DrawIcon />} active={railHighlight === "draw"} onPress={() => setRailHighlight("draw")} title="Draw: the drawing tools (coming soon)">
+            <p className="cb-draw-soon">Drawing tools coming soon</p>
+          </ToolGroup>
+          <ToolGroup label="Align" panelTitle="Align" panelClassName="cb-align-flyout" icon={<AlignIcon />} active={railHighlight === "align"} onPress={() => setRailHighlight("align")} title="Align and distribute the selected layers">
+            <AlignPanel run={runAlign} alignToStage={alignToStage} setAlignToStage={setAlignToStage} />
           </ToolGroup>
         </aside>
         {activeTool === "tone" && (
@@ -6229,31 +6231,36 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onPointerDown={(event) => beginBorderDrag(event, "y")} onDoubleClick={() => resetBorder("y")} />
           <div className="cb-project-tab-row">
             <div className="cb-project-tabs" role="tablist" aria-label="Open projects">
-              {(openTabs.length ? openTabs : [{ id: project.id, title: project.title || "Untitled Project-01" }]).map((tab) => (
-                <div key={tab.id} className={`cb-project-tab ${tab.id === project.id ? "active" : ""}`} title={tab.title}>
-                  <button type="button" role="tab" aria-selected={tab.id === project.id} className="cb-project-tab-label" onClick={() => void switchProject(tab.id)}>
-                    {tab.id === project.id ? (project.title || tab.title) : tab.title}
-                  </button>
-                  {tab.id === project.id && (
+              {(() => {
+                const others = openTabs.filter((tab) => tab.id !== project.id);
+                return (
+                  <div className="cb-project-tab active" title={project.title}>
+                    <button type="button" role="tab" aria-selected className="cb-project-tab-label">{project.title || "Untitled Project-01"}</button>
                     <span className={`cb-tab-save-state ${saveState}`} role="status" title={saveState === "error" ? "Could not reach the server — your work is kept in this browser and saving will retry" : "Your work saves automatically"}>
                       {saveState === "saving" ? "Saving…" : saveState === "unsaved" ? "Unsaved" : saveState === "error" ? "Not saved" : "Saved"}
                     </span>
-                  )}
-                  <button type="button" className="cb-project-tab-close" onClick={() => void closeProjectTab(tab.id)} aria-label={`Close ${tab.title}`} title="Close tab (the project is kept)">×</button>
-                </div>
-              ))}
+                    <button type="button" className="cb-project-tab-close" onClick={() => void closeProjectTab(project.id)} aria-label={`Close ${project.title}`} title="Close tab (the project is kept)">×</button>
+                    {others.length > 0 && (
+                      <div className="cb-open-more" ref={openMoreRef}>
+                        <button type="button" className="cb-open-more-btn" aria-haspopup="menu" aria-expanded={openMoreOpen} title={`${others.length} other open project${others.length === 1 ? "" : "s"}`} onClick={() => setOpenMoreOpen((open) => !open)}>
+                          <svg viewBox="0 0 12 10" aria-hidden="true"><path d="M1 1.5h10M1 5h10M1 8.5h10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" fill="none" /></svg>
+                          <b>{others.length}</b>
+                        </button>
+                        {openMoreOpen && (
+                          <div className="cb-open-more-list" role="menu" aria-label="Other open projects">
+                            {others.map((tab) => (
+                              <button key={tab.id} type="button" role="menuitem" title={tab.title} onClick={() => { setOpenMoreOpen(false); void switchProject(tab.id); }}>{tab.title}</button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
-            <div className="cb-scene-tabs" role="tablist" aria-label="Scenes">
-              {project.scenes.map((item) => (
-                <div key={item.id} className={`cb-scene-tab ${item.id === scene.id ? "active" : ""}`} title={item.name}>
-                  <button type="button" role="tab" aria-selected={item.id === scene.id} className="cb-scene-tab-label" onClick={() => void changeScene(item)}>{item.name}</button>
-                  {project.scenes.length > 1 && (
-                    <button type="button" className="cb-scene-tab-close" onClick={() => void deleteScene(item)} aria-label={`Delete ${item.name}`} title="Delete this scene">×</button>
-                  )}
-                </div>
-              ))}
-              <button type="button" className="cb-scene-add" onClick={addScene} aria-label="Add scene" title="Add scene">＋</button>
-            </div>
+            {/* The empty bar: it will show the properties of the selected tool. */}
+            <div className="cb-tool-props-bar" aria-label="Tool properties" />
             {/* New / Open / Save / Export live in the tool rail's File group; only the export status stays here. */}
             <div className="cb-editor-project-actions">
               <Popover open={openPanel} anchorRef={openButtonRef} onClose={() => setOpenPanel(false)} placement="right" offset={10} className="cb-open-panel" aria-label="Open project">
@@ -6581,6 +6588,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
             onSelect={changeScene}
             onSelectLayer={selectRow}
             onAdd={addScene}
+            onDelete={(target) => void deleteScene(target)}
             onSeek={(seconds) => setPlayhead(Math.max(0, Math.min(duration, seconds)))}
             onPlay={() => { if (!isPlaying && atLastFrame) setPlayhead(0); setPlaying(!isPlaying); }}
             onAddKeyframe={(id, time) => addOrUpdateCharacterKeyframe(id, time)}

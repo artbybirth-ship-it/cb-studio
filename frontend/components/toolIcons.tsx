@@ -56,7 +56,39 @@ export const NewFileIcon = () => (
   <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M14 12.5h10.5V24H8V17" {...line} /><path d="M11 18h10.5M11 21h10.5" {...line} /><path d="M10.5 6.5v8M6.5 10.5h8" {...line} /></svg>
 );
 /** The Colour group on the rail shows the Fill / Stroke boxes (mockup). */
-export const ColourIcon = () => <FillStrokeIcon />;
+/** Colour on the rail: the user's vector ("tool palet.svg"), 20% larger than the other rail icons. */
+export const ColourIcon = () => (
+  <svg viewBox="21.6 287.3 24 24" aria-hidden="true" style={{ width: 38.4, height: 38.4 }}>
+    <defs>
+      <mask id="cb-colour-icon-knock" maskUnits="userSpaceOnUse" x="20" y="286" width="28" height="26">
+        <rect x="20" y="286" width="28" height="26" fill="#fff" />
+        <rect x="22.68" y="289.12" width="14.25" height="14.25" rx="2.54" ry="2.54" fill="#000" />
+      </mask>
+    </defs>
+    <path mask="url(#cb-colour-icon-knock)" fill="currentColor" d="M39.95,308.88h-6.55c-1.92,0-3.47-1.56-3.47-3.47v-6.55c0-1.92,1.56-3.47,3.47-3.47h6.55c1.92,0,3.47,1.56,3.47,3.47v6.55c0,1.92-1.56,3.47-3.47,3.47ZM33.39,297.34c-.83,0-1.51.68-1.51,1.51v6.55c0,.83.68,1.51,1.51,1.51h6.55c.83,0,1.51-.68,1.51-1.51v-6.55c0-.83-.68-1.51-1.51-1.51h-6.55Z" />
+    <rect x="22.68" y="289.12" width="14.25" height="14.25" rx="2.54" ry="2.54" fill="currentColor" />
+    <path fill="#3a3a3a" d="M34.44,303.49h-9.26c-1.44,0-2.62-1.17-2.62-2.62v-9.26c0-1.44,1.17-2.62,2.62-2.62h9.26c1.44,0,2.62,1.17,2.62,2.62v9.26c0,1.44-1.17,2.62-2.62,2.62ZM25.17,289.24c-1.31,0-2.37,1.06-2.37,2.37v9.26c0,1.31,1.06,2.37,2.37,2.37h9.26c1.31,0,2.37-1.06,2.37-2.37v-9.26c0-1.31-1.06-2.37-2.37-2.37h-9.26Z" />
+    <path d="M40.85,289.94h.24c1.53,0,2.78,1.24,2.78,2.78v.17" fill="none" stroke="currentColor" strokeWidth=".25" strokeMiterlimit="10" />
+    <polygon points="41.07 290.68 39.78 289.94 41.07 289.19 41.07 290.68" fill="currentColor" />
+    <polygon points="43.12 292.66 43.87 293.96 44.62 292.66 43.12 292.66" fill="currentColor" />
+  </svg>
+);
+
+/** Draw on the rail: the user's vector ("tool palet.svg") - a drawing tablet and pen. */
+export const DrawIcon = () => (
+  <svg viewBox="17.27 359.86 31.6 31.6" aria-hidden="true">
+    <rect x="21.97" y="369.15" width="22.21" height="12.79" rx="2.59" ry="2.59" fill="none" stroke="currentColor" strokeMiterlimit="10" />
+    <g fill="none" stroke="currentColor" strokeWidth=".5" strokeMiterlimit="10">
+      <line x1="25.87" y1="369.15" x2="25.87" y2="381.28" />
+      <line x1="21.97" y1="371.78" x2="25.87" y2="371.78" />
+      <line x1="21.97" y1="379.12" x2="25.87" y2="379.12" />
+      <line x1="21.97" y1="375.55" x2="25.87" y2="375.55" />
+    </g>
+    <path fill="currentColor" transform="translate(205.05 38.19) rotate(32.72)" d="M37.48,362.17h0c.49,0,.89.4.89.89v11.42h-1.78v-11.42c0-.49.4-.89.89-.89Z" />
+    <polyline fill="currentColor" points="34.91 373.98 32.29 376.41 33.41 373.02" />
+    <path fill="currentColor" d="M38.34,377.32c-.08,0-.14.06-.14.14,0,.42-1.75.99-4.61.99s-4.61-.58-4.61-.99c0-.38,1.49-.94,3.96-1.02,0-.02,0,0,0-.02v-.02c-2.26.02-4.23.26-4.23,1.05s2.52,1.27,4.88,1.27,4.88-.45,4.88-1.27c0-.08-.06-.14-.14-.14Z" />
+  </svg>
+);
 
 // Colour palette tiles: the user's vectors ("colour tools icons.svg"), exact. Each viewBox is the
 // tile (#3a3a3a, drawn by the flyout), so the icons keep the mockup's size inside it.

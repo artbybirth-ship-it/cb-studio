@@ -27,6 +27,8 @@ type Props = {
   /** Shift+click / ⌘-click on layer names: several layers selected (with all their frames). */
   onSelectLayers?: (ids: string[]) => void;
   onAdd: () => void;
+  /** Delete a scene (asks first); only offered when the project has more than one. */
+  onDelete?: (scene: Scene) => void;
   onPlay: () => void;
   onSeek: (seconds: number) => void;
   onAddKeyframe?: (id: string, time: number) => void;
@@ -432,7 +434,7 @@ type DragState = {
 /** A layer being dragged by its name: the gap (0 = above the top layer) it would drop into. */
 type LayerDrag = { id: string; originY: number; active: boolean; gap: number | null };
 
-export default function Timeline({ layers, selectedObjectId, isPlaying, playhead, activeDuration, onSelectLayer, onSelectLayers, onPlay, onSeek, onReorderLayers, onMoveFramesToLayer, onDeleteLayer, onUpdateLayerTiming, onToggleLayerLoop, sourceDurations = {}, onClipDragChange, frameSelection = null, onSelectFrames, onFrameAction, onAddLayer, onToggleLayerHidden, onSoloLayer, onRenameLayer, onRenameObject, onEnterGroup, onMergeLayers, onSplitLayers, layerMemberCounts = {}, onToggleLayerLocked, onMoveKeyframe, onSetTweenEase }: Props) {
+export default function Timeline({ scenes, activeId, onSelect, onAdd, onDelete, layers, selectedObjectId, isPlaying, playhead, activeDuration, onSelectLayer, onSelectLayers, onPlay, onSeek, onReorderLayers, onMoveFramesToLayer, onDeleteLayer, onUpdateLayerTiming, onToggleLayerLoop, sourceDurations = {}, onClipDragChange, frameSelection = null, onSelectFrames, onFrameAction, onAddLayer, onToggleLayerHidden, onSoloLayer, onRenameLayer, onRenameObject, onEnterGroup, onMergeLayers, onSplitLayers, layerMemberCounts = {}, onToggleLayerLocked, onMoveKeyframe, onSetTweenEase }: Props) {
   const frameCount = Math.max(1, Math.ceil(activeDuration * FPS - 1e-6));
   const lastFrame = frameCount - 1;
   const playheadFrame = Math.max(0, Math.min(lastFrame, Math.floor(playhead * FPS + 1e-6)));
@@ -918,10 +920,38 @@ export default function Timeline({ layers, selectedObjectId, isPlaying, playhead
   const dropLineFor = (index: number): "above" | "below" | null =>
     dropGap == null ? null : dropGap === index ? "above" : dropGap === timelineLayers.length && index === timelineLayers.length - 1 ? "below" : null;
 
+  const [sceneMenuOpen, setSceneMenuOpen] = useState(false);
+  const sceneMenuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!sceneMenuOpen) return;
+    const away = (event: PointerEvent) => { if (!sceneMenuRef.current?.contains(event.target as Node)) setSceneMenuOpen(false); };
+    const esc = (event: KeyboardEvent) => { if (event.key === "Escape") setSceneMenuOpen(false); };
+    window.addEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", esc);
+    return () => { window.removeEventListener("pointerdown", away, true); window.removeEventListener("keydown", esc); };
+  }, [sceneMenuOpen]);
+  const activeScene = scenes.find((item) => item.id === activeId) ?? scenes[0];
+
   return (
     <section className="cb-timeline cb-frame-timeline" style={{ ["--cb-layer-panel-width" as string]: `${layerPanelWidth}px`, ["--cb-cell" as string]: `${cell}px`, ["--cb-lane-width" as string]: `${laneWidth}px` }}>
       <div className="cb-timeline-toolbar">
         <div className="cb-timeline-left-title"><strong>Layers</strong><span>{FPS.toFixed(2)}FPS</span></div>
+        <div className="cb-scene-menu" ref={sceneMenuRef}>
+          <button type="button" className="cb-scene-menu-btn" aria-haspopup="menu" aria-expanded={sceneMenuOpen} title="Scenes" onClick={() => setSceneMenuOpen((open) => !open)}>
+            {activeScene?.name ?? "Scene"}<i aria-hidden="true">▾</i>
+          </button>
+          {sceneMenuOpen && (
+            <div className="cb-scene-menu-list" role="menu" aria-label="Scenes">
+              {scenes.map((item) => (
+                <div key={item.id} className={`cb-scene-menu-row ${item.id === activeId ? "active" : ""}`}>
+                  <button type="button" role="menuitem" onClick={() => { setSceneMenuOpen(false); onSelect(item); }}>{item.name}</button>
+                  {scenes.length > 1 && onDelete && <button type="button" className="del" aria-label={`Delete ${item.name}`} title="Delete this scene" onClick={() => { setSceneMenuOpen(false); onDelete(item); }}>×</button>}
+                </div>
+              ))}
+              <button type="button" role="menuitem" className="cb-scene-menu-add" onClick={() => { setSceneMenuOpen(false); onAdd(); }}>＋ Add scene</button>
+            </div>
+          )}
+        </div>
         <FrameViewControl zoom={timelineZoom} setZoom={setTimelineZoom} />
         <div className="cb-transport">
           <div className="cb-transport-core">

@@ -3605,3 +3605,72 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 .cb-tool-submenu{min-width:294px}
 .cb-tool-submenu button{font:400 17.2px/1.2 system-ui,sans-serif}
 .cb-tool-submenu kbd{font:400 15.6px/1 system-ui,sans-serif}
+
+/* Header: one current-project tab (with a ☰ list of the other open projects) and an empty bar for tool properties. */
+.cb-project-tab-row>.cb-project-tabs{flex:0 0 auto;overflow:visible}
+.cb-project-tabs .cb-project-tab.active{max-width:420px;overflow:visible;position:relative;text-overflow:clip}
+.cb-project-tab-row>.cb-tool-props-bar{flex:1 1 auto;min-width:0;align-self:stretch;margin-left:6px;background:#535353;border-radius:10px 10px 0 0}
+.cb-open-more{position:relative;flex:none;display:flex;align-items:center}
+.cb-open-more-btn{position:relative;width:24px;height:22px;padding:0;border:0;border-radius:5px;background:transparent;color:inherit;opacity:.75;cursor:pointer;display:grid;place-items:center}
+.cb-open-more-btn:hover{opacity:1;background:rgba(255,255,255,.14)}
+.cb-open-more-btn svg{width:13px;height:11px}
+.cb-open-more-btn b{position:absolute;top:-9px;right:-4px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#3a3a3a;color:#ddd;font-size:10px;font-weight:500;line-height:16px;text-align:center}
+.cb-open-more-list{position:absolute;top:calc(100% + 8px);left:0;z-index:60;min-width:200px;max-width:320px;padding:6px 0;border-radius:12px;background:#535353;box-shadow:0 8px 22px rgba(0,0,0,.45);display:flex;flex-direction:column}
+.cb-open-more-list button{height:36px;padding:0 18px;border:0;background:transparent;color:#fff;font:inherit;font-size:13px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.cb-open-more-list button:hover{background:#414141}
+/* Timeline: scene menu */
+.cb-timeline-toolbar{position:relative}
+.cb-scene-menu{position:absolute;left:calc(var(--cb-layer-panel-width,210px) + 12px);top:50%;transform:translateY(-50%);z-index:30}
+.cb-scene-menu-btn{height:26px;padding:0 10px;border:1px solid #4d4d4d;border-radius:6px;background:#2f2f2f;color:#e6e6e6;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:8px;max-width:180px;white-space:nowrap}
+.cb-scene-menu-btn i{font-style:normal;font-size:10px;opacity:.7}
+.cb-scene-menu-list{position:absolute;top:calc(100% + 6px);left:0;min-width:170px;padding:5px 0;border-radius:10px;background:#535353;box-shadow:0 8px 22px rgba(0,0,0,.45)}
+.cb-scene-menu-row{display:flex;align-items:center}
+.cb-scene-menu-row>button:first-child{flex:1;height:32px;padding:0 14px;border:0;background:transparent;color:#fff;font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.cb-scene-menu-row.active>button:first-child{background:#414141}
+.cb-scene-menu-row:hover{background:#414141}
+.cb-scene-menu-row .del{width:24px;height:24px;margin-right:6px;border:0;border-radius:12px;background:transparent;color:#ddd;font-size:15px;opacity:.6;cursor:pointer}
+.cb-scene-menu-row .del:hover{opacity:1;background:rgba(255,255,255,.16)}
+.cb-scene-menu-add{width:100%;height:32px;padding:0 14px;border:0;border-top:1px solid #666;background:transparent;color:#fff;font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.cb-scene-menu-add:hover{background:#414141}
+.cb-project-tab-row{overflow:visible!important;position:relative;z-index:40}
+.cb-timeline-toolbar{z-index:60}
+/* Header spacing: tab, empty bar and zoom toolbar sit side by side, split only by a thin dark line. */
+.cb-project-tab-row{gap:0!important}
+.cb-project-tab-row>.cb-tool-props-bar{margin-left:2px}
+.cb-project-tab-row>.cb-canvas-zoom-toolbar{margin-left:2px}
+.cb-project-tab-row>.cb-editor-project-actions:empty{display:none}
+.cb-project-tabs .cb-project-tab.active{padding-right:16px!important;gap:4px}
+.cb-open-more{margin-left:-2px}
+.cb-open-more-btn b{top:-6px;right:-8px}
+/* A clear dark line between the header tabs and the canvas. */
+.cb-workspace>.cb-canvas-wrap{border-top:2px solid #1b1b1b!important}
+.cb-draw-soon{margin:0;padding:10px 16px;font-size:13px;color:#d0d0d0;white-space:nowrap}
+
+/* The File and Edit flyouts only: one vertical column, built from the user's "new vertical Flyout.svg" (box #535353,
+   header #262626, labels #a8a7a7, active icon box #3a3a3a, blurred black shadow) with the box and text
+   30% larger than the SVG; the icons stay 32px. It overlaps the rail's right edge and lines up with its button. */
+.cb-tool-flyout.cb-vflyout{min-width:106px;width:max-content;padding:0 0 30px;border-radius:15px;margin-top:2px;background:#535353;box-shadow:0 0 13px rgba(0,0,0,.75)}
+.cb-tool-flyout.cb-vflyout .cb-tool-flyout-head{border-radius:15px 15px 0 0;padding:0;height:30px;line-height:30px;font:400 15.4px/30px system-ui,sans-serif;background:#262626;color:#fff}
+.cb-tool-flyout.cb-vflyout .cb-tool-flyout-grid{grid-template-columns:1fr;gap:32px;padding:17px 0 0;justify-content:stretch}
+.cb-tool-flyout.cb-vflyout .cb-tool-flyout-item{width:100%;gap:7px}
+.cb-tool-flyout.cb-vflyout .cb-tool-flyout-item svg{width:32px;height:32px;padding:0;border-radius:3px;background:transparent;box-shadow:none;color:#fff}
+.cb-tool-flyout.cb-vflyout .cb-tool-flyout-item span{max-width:none;padding:0 6px;font:300 10.6px/1.2 system-ui,sans-serif;color:#a8a7a7}
+.cb-tool-flyout.cb-vflyout .cb-tool-flyout-item:hover:not(:disabled) svg,.cb-tool-flyout.cb-vflyout .cb-tool-flyout-item:focus-visible svg{background:#5f5f5f}
+.cb-tool-flyout.cb-vflyout .cb-tool-flyout-item.active svg{background:#3a3a3a;box-shadow:none}
+.cb-tool-flyout .cb-align-to-stage{display:flex;justify-content:center;gap:5px;padding:14px 8px 0;font-size:10.9px;color:#a8a7a7;line-height:1.2;text-align:center}
+.cb-tool-flyout .cb-draw-soon{padding:16px 8px 0;font-size:10.9px;text-align:center;white-space:normal}
+
+/* Align flyout: built from "Align.svg" at 1.3x (panel #535353, title bar #262626, joined #3a3a3a buttons). */
+.cb-tool-flyout.cb-align-flyout{width:396px;min-width:396px;padding:0 0 24px;border-radius:16px;background:#535353;box-shadow:0 0 13px rgba(0,0,0,.75)}
+.cb-align-flyout .cb-tool-flyout-head{height:35px;line-height:35px;font:400 18px/35px system-ui,sans-serif;background:#262626;color:#fff;border-radius:16px 16px 0 0}
+.cb-ap{padding:0 28px}
+.cb-ap-label{margin:20px 0 9px;font:300 13.5px/1.2 system-ui,sans-serif;color:#b4b2ac}
+.cb-ap-row{display:flex;justify-content:space-between;align-items:flex-end}
+.cb-ap-group{display:flex;border:1px solid #727272;border-radius:7px;overflow:hidden;background:#3a3a3a}
+.cb-ap-btn{box-sizing:border-box;width:48.6px;height:37.4px;padding:0;border:0;border-left:1px solid #727272;border-radius:0;background:#3a3a3a;color:#838280;cursor:pointer}
+.cb-ap-btn:first-child{border-left:0}
+.cb-ap-btn svg{display:block;width:100%;height:100%}
+.cb-ap-btn:hover:not(:disabled){background:#777;color:#fff}
+.cb-ap-btn.active{background:#777;color:#fff;box-shadow:inset 0 0 0 2px #fff}
+.cb-ap-btn:disabled{opacity:.45;cursor:not-allowed}
+.cb-ap-btn svg .w{stroke:#fff}

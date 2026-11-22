@@ -53,11 +53,13 @@ type Props = {
   /** The group's panel is the editor's own (Text panel): hold or the corner mark call this instead. */
   onOpenPanel?: () => void;
   panelOpen?: boolean;
+  /** A single click both runs onPrimary and toggles the panel (Edit). */
+  openOnClick?: boolean;
 };
 
 const LONG_PRESS_MS = 500;
 
-export default function ToolGroup({ label, icon, title, active = false, onPrimary, items = [], children, panelTitle, panelClassName = "", buttonRef, onPress, onOpenPanel, panelOpen = false }: Props) {
+export default function ToolGroup({ label, icon, title, active = false, onPrimary, items = [], children, panelTitle, panelClassName = "", buttonRef, onPress, onOpenPanel, panelOpen = false, openOnClick = false }: Props) {
   const ownRef = useRef<HTMLButtonElement>(null);
   const anchorRef = buttonRef || ownRef;
   const [open, setOpen] = useState(false);
@@ -101,6 +103,7 @@ export default function ToolGroup({ label, icon, title, active = false, onPrimar
           if (hasPanel && event.detail >= 2) { if (onOpenPanel) { if (!panelOpen) onOpenPanel(); } else setOpen(true); return; }
           const onMark = (event.target as HTMLElement).closest?.(".cb-tool-group-mark");
           if (hasPanel && (onMark || !onPrimary)) { if (onOpenPanel) onOpenPanel(); else setOpen((value) => !value); return; }
+          if (hasPanel && openOnClick && !onOpenPanel) { onPrimary?.(); setOpen((value) => !value); return; }
           onPrimary?.();
         }}
       >
@@ -108,7 +111,7 @@ export default function ToolGroup({ label, icon, title, active = false, onPrimar
         {hasPanel && <span className="cb-tool-group-mark" aria-hidden="true" />}
       </button>
       {hasPanel && !onOpenPanel && (
-        <Popover open={open} anchorRef={anchorRef} onClose={() => setOpen(false)} placement="right" offset={17} className={`cb-tool-flyout ${panelClassName}`} aria-label={panelTitle || label}>
+        <Popover open={open} anchorRef={anchorRef} onClose={() => setOpen(false)} placement="right" offset={11} className={`cb-tool-flyout ${panelClassName}`} aria-label={panelTitle || label}>
           <div className="cb-tool-flyout-head"><PanelClose onClose={() => setOpen(false)} label={`Close ${panelTitle || label}`} />{panelTitle || label}</div>
           {items.length > 0 && (
             <div className="cb-tool-flyout-grid">
