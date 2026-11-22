@@ -323,6 +323,10 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   const [nativeReady, setNativeReady] = useState<ReadonlySet<string>>(new Set());
   const nativeHandles = useRef(new Map<string, NativeCharacter>());
   const onNativeHandle = useCallback((id: string, handle: NativeCharacter | null) => { if (handle) nativeHandles.current.set(id, handle); else nativeHandles.current.delete(id); }, []);
+  // Each natively drawn character's way to be told which part of its box is on screen (NativeCharacterCanvas onViewApi), and the part last told
+  // (null: the whole box). ?cbview=0 in the address draws the whole box always.
+  const nativeViewApis = useRef(new Map<string, (view: { view: { x: number; y: number; width: number; height: number }; scale: number } | null) => void>());
+  const nativeViewsRef = useRef(new Map<string, { x: number; y: number; width: number; height: number } | null>());
   const onNativeCanvas = useCallback((id: string, node: HTMLCanvasElement | null) => { if (node) nativeCanvases.current.set(id, node); else nativeCanvases.current.delete(id); }, []);
   const onNativeReady = useCallback((id: string, ready: boolean) => setNativeReady((current) => (current.has(id) === ready ? current : new Set(ready ? [...current, id] : [...current].filter((item) => item !== id)))), []);
   const replacementFrameRefs = useRef<Map<string, HTMLIFrameElement>>(new Map());
@@ -371,12 +375,34 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   const [screenDpr, setScreenDpr] = useState(1);
   const [useCssZoom, setUseCssZoom] = useState(false);
   useEffect(() => { setUseCssZoom(supportsStandardZoom()); }, []);
+  // A real double-click is two presses within 0.4 s and a few pixels of each other, with no drag between.
+  // The browser also reports one when a click is followed by a quick press-drag; that must not step
+  // into a part or pose, so such a "double-click" on the stage is dropped before any handler sees it.
+  useEffect(() => {
+    const presses: { time: number; x: number; y: number; moved: boolean }[] = [];
+    const onDown = (event: PointerEvent) => { presses.push({ time: event.timeStamp, x: event.clientX, y: event.clientY, moved: false }); if (presses.length > 2) presses.shift(); };
+    const onMove = (event: PointerEvent) => { const last = presses[presses.length - 1]; if (last && event.buttons && Math.hypot(event.clientX - last.x, event.clientY - last.y) > 4) last.moved = true; };
+    const onDouble = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      // Only the browser's own double-clicks are judged; one a script dispatches (the browser tests) has no presses to count.
+      if (!event.isTrusted || !target?.closest?.("[data-editor-object-id], .cb-symbol-overlay")) return;
+      const [first, second] = presses.length === 2 ? presses : [];
+      const real = first && second && !first.moved && !second.moved
+        && second.time - first.time <= 400 && Math.hypot(second.x - first.x, second.y - first.y) <= 5;
+      if (!real) { event.stopImmediatePropagation(); event.preventDefault(); }
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("pointermove", onMove, true);
+    window.addEventListener("dblclick", onDouble, true);
+    return () => { window.removeEventListener("pointerdown", onDown, true); window.removeEventListener("pointermove", onMove, true); window.removeEventListener("dblclick", onDouble, true); };
+  }, []);
 
   if (frameAccessRef) frameAccessRef.current = (objectId: string) => frameRefs.current.get(objectId);
   if (colourFrameAccessRef) colourFrameAccessRef.current = (objectId: string) => {
     const handle = nativeHandles.current.get(objectId), canvas = nativeCanvases.current.get(objectId);
     if (!handle || !canvas || !nativeReady.has(objectId) || (symbolView && symbolView.objectId === objectId)) return frameRefs.current.get(objectId);
-    return { getBoundingClientRect: () => canvas.getBoundingClientRect(), contentWindow: { cbColorAt: handle.colourAt, cbColorPalette: handle.palette, cbColorRelatives: handle.relatives } } as unknown as HTMLIFrameElement;
+    // The character's box (the canvas may cover only the part on screen).
+    return { getBoundingClientRect: () => (canvas.parentElement ?? canvas).getBoundingClientRect(), contentWindow: { cbColorAt: handle.colourAt, cbColorPalette: handle.palette, cbColorRelatives: handle.relatives } } as unknown as HTMLIFrameElement;
   };
   // For the browser tests (tools/native-test): the colour tools' view of a character, called as the tools call it.
   if (colourFrameAccessRef && typeof window !== "undefined") (window as unknown as { __CBS_COLOUR_FRAME__?: unknown }).__CBS_COLOUR_FRAME__ = colourFrameAccessRef.current;
@@ -524,7 +550,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           const copy = document.createElement("canvas");
           copy.width = Math.round(canvas.width * scale); copy.height = Math.round(canvas.height * scale);
           copy.getContext("2d")?.drawImage(canvas, 0, 0, copy.width, copy.height);
-          const sent = native ? null : lastViewSentRef.current.get(object.id) as { x: number; y: number; width: number; height: number } | undefined;
+          const sent = native ? nativeViewsRef.current.get(object.id) : lastViewSentRef.current.get(object.id) as { x: number; y: number; width: number; height: number } | undefined;
           void writeSnapshot(object.id, key, copy.toDataURL("image/png"), sent ? { x: sent.x, y: sent.y, width: sent.width, height: sent.height } : null);
         } catch { /* a canvas that cannot be read is skipped */ }
       }
@@ -1398,7 +1424,10 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   // ?cbpad=0 in the address turns the margin off (to tell whether it is behind a problem).
   const padOff = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("cbpad") === "0";
   const playerPadOf = (objectId: string) => (!padOff && symbolView && symbolView.objectId === objectId ? PLAYER_PAD : 0);
+  const viewOff = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("cbview") === "0";
+  const step32 = 1 / 32;
   const lastViewKeyRef = useRef<Map<string, string>>(new Map());
+  const lastNativeKeyRef = useRef<Map<string, string>>(new Map());
   const lastViewSentRef = useRef<Map<string, Record<string, unknown>>>(new Map());
   const postCharacterViews = useCallback(() => {
     const host = hostRef.current;
@@ -1429,6 +1458,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       // Screen CSS px per player CSS px, recovered from the (rotated / skewed) bounding box.
       const screenScale = rect.width / Math.max(0.001, Math.abs(m00) * localWidth + Math.abs(m01) * localHeight);
       let view = { x: 0, y: 0, width: 1, height: 1 };
+      let bounds: { minU: number; minV: number; maxU: number; maxV: number } | null = null;
       if (!renderMode) {
         // Map the visible canvas corners into the player's own 0..1 space (invert the matrix).
         const centerX = rect.left + rect.width / 2;
@@ -1442,6 +1472,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
           minU = Math.min(minU, u); maxU = Math.max(maxU, u);
           minV = Math.min(minV, v); maxV = Math.max(maxV, v);
         }
+        bounds = { minU, minV, maxU, maxV };
         // Round outward to 1/32 with a margin so small pans don't force a re-render.
         const step = 1 / 32;
         const x0 = clamp(Math.floor((minU - 0.03) / step) * step, -pad, 1 + pad);
@@ -1462,6 +1493,27 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       // Seamless joins between touching pieces, as in Animate, on 1× screens (4K unchanged).
       const seal = screenDpr < 1.5 ? 0.5 : 0;
       const key = `${pixelScale}|${view.x}|${view.y}|${view.width}|${view.height}|${exact}|${minStroke}|${seal}|${dpr}|${pad}`;
+      // The native drawing of this character covers just the part on screen (with a tenth of it as margin, on whole device pixels so the
+      // canvas is never resampled), once that is smaller than the box or needs more than the default resolution. The player's own view above
+      // is rounded to 1/32 of the box, far more than a screen at high zoom, which would leave the canvas too few pixels per box pixel.
+      const nativeApi = nativeViewApis.current.get(object.id);
+      if (nativeApi) {
+        const deviceW = localWidth * pixelScale, deviceH = localHeight * pixelScale, nativeScale = deviceW / 720;
+        let shown: { x: number; y: number; width: number; height: number } | null = null;
+        if (bounds && !viewOff) {
+          const marginU = (bounds.maxU - bounds.minU) * 0.1, marginV = (bounds.maxV - bounds.minV) * 0.1;
+          const x0 = clamp(Math.floor((bounds.minU - marginU) * deviceW) / deviceW, 0, 1), y0 = clamp(Math.floor((bounds.minV - marginV) * deviceH) / deviceH, 0, 1);
+          const x1 = clamp(Math.ceil((bounds.maxU + marginU) * deviceW) / deviceW, 0, 1), y1 = clamp(Math.ceil((bounds.maxV + marginV) * deviceH) / deviceH, 0, 1);
+          const partial = x1 - x0 < 0.999 || y1 - y0 < 0.999;
+          if (partial || nativeScale > 2.05) shown = { x: x0, y: y0, width: Math.max(x1 - x0, 1 / deviceW), height: Math.max(y1 - y0, 1 / deviceH) };
+        }
+        const nativeKey = `${nativeScale}|${shown ? `${shown.x}|${shown.y}|${shown.width}|${shown.height}` : "whole"}`;
+        if (lastNativeKeyRef.current.get(object.id) !== nativeKey) {
+          lastNativeKeyRef.current.set(object.id, nativeKey);
+          nativeViewsRef.current.set(object.id, shown);
+          nativeApi(shown ? { view: shown, scale: nativeScale } : null);
+        }
+      }
       if (lastViewKeyRef.current.get(object.id) === key) continue;
       lastViewKeyRef.current.set(object.id, key);
       lastViewSentRef.current.set(object.id, { pixelScale, ...view, exact, minStroke, seal });
@@ -1470,6 +1522,13 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
   }, [characterObjects, playhead, renderMode, useCssZoom, screenDpr, symbolView?.objectId]);
   const postCharacterViewsRef = useRef(postCharacterViews);
   postCharacterViewsRef.current = postCharacterViews;
+  const onNativeViewApi = useCallback((id: string, api: ((view: { view: { x: number; y: number; width: number; height: number }; scale: number } | null) => void) | null) => {
+    if (!api) { nativeViewApis.current.delete(id); nativeViewsRef.current.delete(id); return; }
+    nativeViewApis.current.set(id, api);
+    // A drawing that has just appeared is told the part on screen at once.
+    lastNativeKeyRef.current.delete(id);
+    window.requestAnimationFrame(() => postCharacterViewsRef.current());
+  }, []);
 
   // Sharpness readout for diagnosing a screen (?cbdiag=1 in the address; never in render mode).
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -2060,7 +2119,8 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
       const point = playerPointFromClient(frame, rotation, skewOf(object), Boolean(object.flipX), clientX, clientY);
       if (!point) return false;
       // The player's canvas may cover only the visible part of the player (sharp rendering); the native canvas always covers the whole box.
-      const canvasRect = native ? { left: 0, top: 0, width: frame.offsetWidth, height: frame.offsetHeight } : canvas.getBoundingClientRect();
+      const shownView = native ? nativeViewsRef.current.get(object.id) : null;
+      const canvasRect = native ? (shownView ? { left: shownView.x * frame.offsetWidth, top: shownView.y * frame.offsetHeight, width: shownView.width * frame.offsetWidth, height: shownView.height * frame.offsetHeight } : { left: 0, top: 0, width: frame.offsetWidth, height: frame.offsetHeight }) : canvas.getBoundingClientRect();
       if (canvasRect.width <= 0 || canvasRect.height <= 0) return true;
       const px = Math.floor(((point.x - canvasRect.left) / canvasRect.width) * canvas.width);
       const py = Math.floor(((point.y - canvasRect.top) / canvasRect.height) * canvas.height);
@@ -3611,6 +3671,7 @@ export default function StageCanvas({ data, width, height, selectedObjectId, sel
                     onCanvas={onNativeCanvas}
                     onHandle={onNativeHandle}
                     onReady={onNativeReady}
+                    onViewApi={onNativeViewApi}
                     playerFrame={() => frameRefs.current.get(object.id)}
                     playerReady={readyCharacterIds.has(object.id)}
                     savedFit={object.nativePoseFit}

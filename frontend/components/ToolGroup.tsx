@@ -108,7 +108,7 @@ export default function ToolGroup({ label, icon, title, active = false, onPrimar
         {hasPanel && <span className="cb-tool-group-mark" aria-hidden="true" />}
       </button>
       {hasPanel && !onOpenPanel && (
-        <Popover open={open} anchorRef={anchorRef} onClose={() => setOpen(false)} placement="right" offset={10} className={`cb-tool-flyout ${panelClassName}`} aria-label={panelTitle || label}>
+        <Popover open={open} anchorRef={anchorRef} onClose={() => setOpen(false)} placement="right" offset={17} className={`cb-tool-flyout ${panelClassName}`} aria-label={panelTitle || label}>
           <div className="cb-tool-flyout-head"><PanelClose onClose={() => setOpen(false)} label={`Close ${panelTitle || label}`} />{panelTitle || label}</div>
           {items.length > 0 && (
             <div className="cb-tool-flyout-grid">

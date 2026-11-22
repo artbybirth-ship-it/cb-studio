@@ -1251,10 +1251,10 @@ export default function EditorShell({ projectId }: { projectId: string }) {
   })();
 
   /** Rules with "original → hex" for that box (fills or outlines) in the current scope, placed last so it wins. */
-  const withBoxRule = (rules: ColorReplacement[], original: string, box: "fill" | "stroke", hex: string) => {
+  const withBoxRule = (rules: ColorReplacement[], original: string, box: "fill" | "stroke" | "both", hex: string) => {
     const mine = rules.find((rule) => rule.from === original && rule.scope === boxScope && rule.target === box && rule.match === "exact");
     const rest = rules.filter((rule) => rule !== mine);
-    const othersApply = rest.some((rule) => rule.from === original && (rule.scope === "*" || rule.scope === boxScope) && (rule.target === "both" || rule.target === box));
+    const othersApply = rest.some((rule) => rule.from === original && (rule.scope === "*" || rule.scope === boxScope) && (box === "both" || rule.target === "both" || rule.target === box));
     if (hex === original && !othersApply) return rest; // back to the artwork's own colour
     return [...rest, { id: mine?.id || `box-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, from: original, to: hex, target: box, scope: boxScope, match: "exact" as const }];
   };
@@ -1276,7 +1276,7 @@ export default function EditorShell({ projectId }: { projectId: string }) {
       }
       mutateColour((item) => {
         let rules = withBoxRule(item.colorReplacements || [], original, box, hex);
-        if (effects?.stroke) for (const stroke of relatives.strokes) rules = withBoxRule(rules, stroke, "stroke", followColour(stroke, original, hex));
+        if (effects?.stroke) for (const stroke of relatives.strokes) rules = withBoxRule(rules, stroke, "both", followColour(stroke, original, hex)); // many outlines are brush shapes (fills), not strokes
         if (effects?.shadow) for (const shadow of [...relatives.shadows, ...(relatives.lights || [])]) rules = withBoxRule(rules, shadow, box, followColour(shadow, original, hex));
         item.colorReplacements = rules;
       });

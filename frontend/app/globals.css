@@ -2014,7 +2014,7 @@ button{cursor:pointer}
 .cb-create-orientation button .cb-orient-landscape,.cb-create-orientation button .cb-orient-portrait{justify-self:center;align-self:center;box-sizing:border-box;flex-shrink:0}
 
 /* Editor layout follows the supplied new-project workspace design. */
-.cb-editor-grid{height:calc(100dvh - 56px);grid-template-columns:50px minmax(0,1fr) var(--cb-side-panel-width,clamp(440px,28vw,535px));gap:10px;padding:0 20px 0 10px}
+.cb-editor-grid{height:calc(100dvh - 56px);grid-template-columns:64px minmax(0,1fr) var(--cb-side-panel-width,clamp(440px,28vw,535px));gap:10px;padding:0 20px 0 10px}
 .cb-editor-topbar{padding-left:18px}
 .cb-editor-topbar .cb-editor-home-button{display:inline-flex;flex:0 0 70.4px;width:70.4px;height:29.6px;position:absolute;left:10px;z-index:2}
 .cb-editor-topbar .cb-editor-home-button img{width:70.4px!important;height:29.6px!important}
@@ -2069,14 +2069,14 @@ button{cursor:pointer}
   .cb-canvas-zoom-toolbar{width:auto;justify-content:center;margin:0}
 }
 @media(max-width:1050px){
-  .cb-editor-grid{grid-template-columns:50px minmax(0,1fr) var(--cb-side-panel-width,360px);padding:0 10px;gap:8px}
+  .cb-editor-grid{grid-template-columns:64px minmax(0,1fr) var(--cb-side-panel-width,360px);padding:0 10px;gap:8px}
   .cb-workspace{grid-template-rows:76px minmax(300px,1fr) var(--cb-timeline-height,250px)}
   .cb-project-tab-row{height:76px;flex-wrap:wrap;align-content:center;overflow:visible}
   .cb-scene-tabs{flex:1}
   .cb-editor-project-actions{overflow-x:auto}
   .cb-canvas-zoom-toolbar{display:flex;margin-left:auto}
 }
-.cb-tool-rail{width:50px;height:min(585px,calc(100dvh - 110px));max-height:none;margin-top:40px;padding:13px 0;gap:25px;border-radius:12px;background:#535353}
+.cb-tool-rail{width:64px;height:min(585px,calc(100dvh - 110px));max-height:none;margin-top:40px;padding:13px 0;gap:25px;border-radius:12px;background:#535353}
 .cb-tool-rail button{width:32px;height:32px;flex:0 0 32px;border-radius:3px;background:transparent;color:#fff;font-size:19px}
 .cb-tool-rail button.active{background:#3a3a3a;color:#fff}
 .cb-tool-rail button:hover:not(:disabled),.cb-tool-rail button:focus-visible{background:#3a3a3a;color:#fff}
@@ -2084,7 +2084,7 @@ button{cursor:pointer}
 .cb-tool-rail button:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:1050px){.cb-tool-rail{margin-top:76px}}
 @media(max-width:820px){
-  .cb-editor-grid{padding:8px;grid-template-columns:50px minmax(0,1fr);grid-template-rows:minmax(620px,1fr) auto}
+  .cb-editor-grid{padding:8px;grid-template-columns:64px minmax(0,1fr);grid-template-rows:minmax(620px,1fr) auto}
   .cb-workspace{grid-template-rows:76px minmax(320px,1fr) var(--cb-timeline-height,250px)}
   .cb-project-tab-row{height:76px}
   .cb-editor-project-actions{max-width:calc(100% - 230px)}
@@ -3589,3 +3589,19 @@ body.cb-dragging-layer{cursor:grabbing;-webkit-user-select:none;user-select:none
 .cb-fr-hover b{height:24px;padding:0 10px;border-radius:5px;background:#3a3a3a;color:#f0f0f0;font:300 12px/24px Arial,sans-serif}
 
 .cb-fr-colour>*{flex:none}
+
+/* Editor header: the CB Studio logo sits at the right corner of the header, just left of the profile button. */
+.cb-editor-topbar .cb-opening-logo{left:auto;right:76px;transform:translateY(-50%)}
+
+/* Tools rail and its flyouts / submenus: text 56% bigger than first drawn (20%, then 30% more); columns and widths grow with it so nothing is cut. */
+.cb-tool-group-label{font:400 14px/1 system-ui,sans-serif}
+.cb-tool-flyout-head{font:400 18.7px/1.2 system-ui,sans-serif}
+.cb-tool-flyout-grid{grid-template-columns:repeat(3,116px)}
+.cb-align-flyout .cb-tool-flyout-grid{grid-template-columns:repeat(3,116px)}
+.cb-tool-flyout-item span{max-width:116px;font:300 12.5px/1.2 system-ui,sans-serif}
+.cb-colour-flyout .cb-tool-flyout-head{font-size:20.3px}
+.cb-colour-flyout .cb-tool-flyout-grid{grid-template-columns:repeat(3,150px)}
+.cb-colour-flyout .cb-tool-flyout-item span{max-width:150px;font-size:13.3px}
+.cb-tool-submenu{min-width:294px}
+.cb-tool-submenu button{font:400 17.2px/1.2 system-ui,sans-serif}
+.cb-tool-submenu kbd{font:400 15.6px/1 system-ui,sans-serif}

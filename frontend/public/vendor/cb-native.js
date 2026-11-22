@@ -25,6 +25,9 @@ const render_1 = require("lib/native/render");
 const colour_1 = require("lib/native/colour");
 const resolve_1 = require("lib/native/resolve");
 exports.BOX_W = 720, exports.BOX_H = 960;
+/** A part of the character's box, as 0..1 of it. */
+/** The most pixels one character canvas may have (about 32 million: a 5K screen's worth with a margin). */
+const MAX_CANVAS_PIXELS = 32000000;
 const fitCache = new Map();
 /** The player's own fit, read from its running page (exportRoot is what its fit() positioned): exactly where the pose is drawn. Null until the player is up. */
 function playerFitOf(frame) {
@@ -165,7 +168,7 @@ function createNativeCharacter(object) {
             state = { source, renderer, loaded };
             return true;
         },
-        draw(canvas, seekMs, resolution = 1, fitOverride) {
+        draw(canvas, seekMs, resolution = 1, fitOverride, view) {
             if (!state)
                 return;
             const { source, renderer, loaded } = state;
@@ -175,17 +178,23 @@ function createNativeCharacter(object) {
             const frames = Math.max(1, timeline.length);
             const raw = Math.floor((seekMs / 1000) * source.fps + 1e-6);
             const frame = object.loopMode === "loop" ? raw % frames : Math.min(frames - 1, raw);
-            const scale = Math.max(1, Math.min(4, resolution));
-            if (canvas.width !== Math.round(exports.BOX_W * scale)) {
-                canvas.width = Math.round(exports.BOX_W * scale);
-                canvas.height = Math.round(exports.BOX_H * scale);
+            // A view draws only that part of the box, at the asked resolution (any amount above 0.05, up to a pixel budget).
+            const v = view && view.width > 0 && view.height > 0 ? view : null;
+            const wanted = v ? Math.max(0.05, resolution) : Math.max(1, Math.min(4, resolution));
+            const cells = Math.max(1, (v ? v.width * v.height : 1) * exports.BOX_W * exports.BOX_H);
+            const scale = Math.min(wanted, Math.sqrt(MAX_CANVAS_PIXELS / cells));
+            const cw = Math.max(1, Math.round((v ? v.width : 1) * exports.BOX_W * scale)), ch = Math.max(1, Math.round((v ? v.height : 1) * exports.BOX_H * scale));
+            if (canvas.width !== cw || canvas.height !== ch) {
+                canvas.width = cw;
+                canvas.height = ch;
             }
+            const offX = v ? v.x * exports.BOX_W : 0, offY = v ? v.y * exports.BOX_H : 0;
             const ctx = canvas.getContext("2d");
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             const fit = fitOverride || fitOf(`${source.flaUrl}|${source.item}`, loaded, source.item);
-            ctx.setTransform(fit.s * scale, 0, 0, fit.s * scale, fit.tx * scale, fit.ty * scale);
-            renderer.setPartBase(new DOMMatrix().scale(scale));
+            ctx.setTransform(fit.s * scale, 0, 0, fit.s * scale, (fit.tx - offX) * scale, (fit.ty - offY) * scale);
+            renderer.setPartBase(new DOMMatrix().translate(-offX * scale, -offY * scale).scale(scale));
             renderer.drawSymbol(ctx, source.item, frame);
             last = { frame, fit };
         },

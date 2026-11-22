@@ -17,6 +17,10 @@ import { hexOf, parseColour, sameFamily, toHsl, type ColourRule } from "./colour
 import { resolvePoseSource, type PoseSource } from "./resolve";
 
 export const BOX_W = 720, BOX_H = 960;
+/** A part of the character's box, as 0..1 of it. */
+/** The most pixels one character canvas may have (about 32 million: a 5K screen's worth with a margin). */
+const MAX_CANVAS_PIXELS = 32_000_000;
+export type NativeView = { x: number; y: number; width: number; height: number };
 /** Where the pose sits in its box: scale and offset, in box pixels. */
 export type Fit = { s: number; tx: number; ty: number };
 const fitCache = new Map<string, Fit>();
@@ -104,8 +108,9 @@ export type NativeCharacter = {
    * right); otherwise when drawsNatively(object) and every part its edits name is a part this pose has. False until loaded.
    */
   covers(object: CoverageSource): boolean;
-  /** Draws source time `seekMs` onto `canvas`, at `resolution` times the 720 × 960 box. */
-  draw(canvas: HTMLCanvasElement, seekMs: number, resolution?: number, fit?: Fit | null): void;
+  /** Draws source time `seekMs` onto `canvas`, at `resolution` times the 720 × 960 box. With `view` (0..1 of the box: x, y, width, height), only that part
+   *  is drawn: the canvas covers just it, `resolution` pixels per box pixel, so a zoomed-in character stays sharp at a cost set by the screen, not the zoom. */
+  draw(canvas: HTMLCanvasElement, seekMs: number, resolution?: number, fit?: Fit | null, view?: NativeView | null): void;
   /** What the Animate player's colour finder answers, for this drawing (the colour tools use these when the native drawing is what is on screen). (x, y) are 0..1 over the 720 × 960 box. */
   colourAt(x: number, y: number, scope: string): { picked: string; original: string; current: string } | null;
   palette(scope: string): ColourEntry[];
@@ -157,7 +162,7 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       state = { source, renderer, loaded };
       return true;
     },
-    draw(canvas, seekMs, resolution = 1, fitOverride) {
+    draw(canvas, seekMs, resolution = 1, fitOverride, view) {
       if (!state) return;
       const { source, renderer, loaded } = state;
       const timeline = renderer.timelineOf(source.item);
@@ -165,14 +170,20 @@ export function createNativeCharacter(object: NativeCharacterSource): NativeChar
       const frames = Math.max(1, timeline.length);
       const raw = Math.floor((seekMs / 1000) * source.fps + 1e-6);
       const frame = object.loopMode === "loop" ? raw % frames : Math.min(frames - 1, raw);
-      const scale = Math.max(1, Math.min(4, resolution));
-      if (canvas.width !== Math.round(BOX_W * scale)) { canvas.width = Math.round(BOX_W * scale); canvas.height = Math.round(BOX_H * scale); }
+      // A view draws only that part of the box, at the asked resolution (any amount above 0.05, up to a pixel budget).
+      const v = view && view.width > 0 && view.height > 0 ? view : null;
+      const wanted = v ? Math.max(0.05, resolution) : Math.max(1, Math.min(4, resolution));
+      const cells = Math.max(1, (v ? v.width * v.height : 1) * BOX_W * BOX_H);
+      const scale = Math.min(wanted, Math.sqrt(MAX_CANVAS_PIXELS / cells));
+      const cw = Math.max(1, Math.round((v ? v.width : 1) * BOX_W * scale)), ch = Math.max(1, Math.round((v ? v.height : 1) * BOX_H * scale));
+      if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+      const offX = v ? v.x * BOX_W : 0, offY = v ? v.y * BOX_H : 0;
       const ctx = canvas.getContext("2d")!;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const fit = fitOverride || fitOf(`${source.flaUrl}|${source.item}`, loaded, source.item);
-      ctx.setTransform(fit.s * scale, 0, 0, fit.s * scale, fit.tx * scale, fit.ty * scale);
-      renderer.setPartBase(new DOMMatrix().scale(scale));
+      ctx.setTransform(fit.s * scale, 0, 0, fit.s * scale, (fit.tx - offX) * scale, (fit.ty - offY) * scale);
+      renderer.setPartBase(new DOMMatrix().translate(-offX * scale, -offY * scale).scale(scale));
       renderer.drawSymbol(ctx, source.item, frame);
       last = { frame, fit };
     },

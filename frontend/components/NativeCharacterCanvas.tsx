@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { EditorObject } from "@/types";
 import type { PartEdit } from "@/lib/native/render";
-import { createNativeCharacter, hasNativePose, playerFitOf, type CoverageSource, type Fit, type NativeCharacter } from "@/lib/native/character";
+import { createNativeCharacter, hasNativePose, playerFitOf, type CoverageSource, type Fit, type NativeCharacter, type NativeView } from "@/lib/native/character";
 
 /** How many native characters are still loading: the render page waits for zero before it starts. */
 const pending = (delta: number) => {
@@ -22,7 +22,7 @@ const pending = (delta: number) => {
   w.__CBS_NATIVE_PENDING__ = Math.max(0, (w.__CBS_NATIVE_PENDING__ || 0) + delta);
 };
 
-export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCanvas, onHandle, onReady, playerFrame, playerReady, savedFit, partEdits, standDown }: {
+export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCanvas, onHandle, onReady, playerFrame, playerReady, savedFit, partEdits, standDown, onViewApi }: {
   object: EditorObject;
   /** The part tools' edits at the playhead (lib/partKeyframes.ts resolvePartOverridesAtTime): drawn over the pose. */
   partEdits?: Record<string, PartEdit>;
@@ -42,6 +42,9 @@ export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCan
   savedFit?: Fit | null;
   /** The player is shown instead for now (part editing on a character with no native edits: the player draws the drag and the picked part). */
   standDown?: boolean;
+  /** Gives the stage a way to say which part of the character's box is on screen (and how many pixels per box pixel): the canvas then covers
+   *  and draws just that part, so a zoomed-in character stays sharp at a cost set by the screen. Called with null when the box is drawn whole. */
+  onViewApi?: (id: string, setView: ((view: { view: NativeView; scale: number } | null) => void) | null) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [character, setCharacter] = useState<NativeCharacter | null>(null);
@@ -80,12 +83,34 @@ export default function NativeCharacterCanvas({ object, seekMs, hueFilter, onCan
 
   const rulesKey = JSON.stringify(object.colorReplacements || []);
   const partsKey = JSON.stringify(partEdits || {}) + JSON.stringify(object.onlyParts || []);
+  // The part of the box on screen, when the stage has said (see onViewApi); the whole box otherwise.
+  const viewRef = useRef<{ view: NativeView; scale: number } | null>(null);
+  const drawNow = () => {
+    const el = canvas.current;
+    if (!el || !character || !ready) return;
+    const fit = playerFitOf(playerFrame?.()) ?? savedFit ?? null;
+    const shown = viewRef.current;
+    if (shown) {
+      const { view } = shown;
+      el.style.left = `${view.x * 100}%`; el.style.top = `${view.y * 100}%`; el.style.width = `${view.width * 100}%`; el.style.height = `${view.height * 100}%`;
+      character.draw(el, seekMs, shown.scale, fit, view);
+    } else {
+      el.style.left = el.style.top = el.style.width = el.style.height = "";
+      character.draw(el, seekMs, Math.min(2, window.devicePixelRatio || 1), fit);
+    }
+  };
+  const drawNowRef = useRef(drawNow);
+  drawNowRef.current = drawNow;
+  useEffect(() => {
+    onViewApi?.(object.id, (next) => { viewRef.current = next; drawNowRef.current(); });
+    return () => onViewApi?.(object.id, null);
+  }, [object.id, onViewApi]);
   useEffect(() => {
     const el = canvas.current;
     if (el && character) character.setColourRules(object.colorReplacements);
     if (el && character) character.setPartEdits(partEdits);
     if (el && character) character.setOnlyParts(object.onlyParts);
-    if (el && character && ready) character.draw(el, seekMs, Math.min(2, window.devicePixelRatio || 1), playerFitOf(playerFrame?.()) ?? savedFit ?? null);
+    drawNowRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [character, ready, seekMs, playerReady, rulesKey, partsKey]);
 
